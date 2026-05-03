@@ -1392,6 +1392,17 @@ rebuild_workstream_coordinator_prompts() {
   done
 }
 
+_display_name_for() {
+  case "$1" in
+    00-cataloger)   printf 'Cataloging' ;;
+    00-coordinator) printf 'Coordinating' ;;
+    coordinate-*)   printf '%s' "${1#coordinate-}" ;;
+    implement-*)    printf '%s' "${1#implement-}" ;;
+    verify-*)       printf 'verify:%s' "${1#verify-}" ;;
+    *)              printf '%s' "$1" ;;
+  esac
+}
+
 run_command_with_heartbeat() {
   local workstream="$1" log_file="$2"
   shift 2
@@ -1401,66 +1412,63 @@ run_command_with_heartbeat() {
   local start_ts
   start_ts="$(date +%s)"
 
-  # Pretty display name for the spinner line
-  local display_name
-  case "$workstream" in
-    00-cataloger)   display_name="Cataloging" ;;
-    00-coordinator) display_name="Coordinating" ;;
-    coordinate-*)   display_name="${workstream#coordinate-}" ;;
-    implement-*)    display_name="${workstream#implement-}" ;;
-    verify-*)       display_name="verify:${workstream#verify-}" ;;
-    *)              display_name="$workstream" ;;
-  esac
-
   # Run command in background so the heartbeat can kill it on stall
   set +e
   "$@" >"$log_file" 2>&1 &
   local cmd_pid="$!"
 
-  (
-    local spin_chars='-\|/'
-    local spin_idx=0
-    local prev_size=-1
-    local last_change_ts="$start_ts"
-    local stall_threshold=$(( stall_intervals * heartbeat_interval ))
-    while sleep 0.5; do
-      local now elapsed size
-      now="$(date +%s)"
-      elapsed=$((now - start_ts))
-      local spin_char="${spin_chars:$((spin_idx % 4)):1}"
-      spin_idx=$((spin_idx + 1))
-      printf '\r[%s] %s (%ds)  ' "$spin_char" "$display_name" "$elapsed"
-      # Stall detection: check log size and compare to threshold
-      if [[ -f "$log_file" ]]; then
-        size="$(wc -c <"$log_file" | tr -d ' ')"
-      else
-        size=0
-      fi
-      if [[ "$size" -ne "$prev_size" ]]; then
-        last_change_ts="$now"
-        prev_size="$size"
-      elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
-        local stall_secs=$((now - last_change_ts))
-        if [[ "$stall_secs" -ge "$stall_threshold" ]] && \
-           grep -q "^RESULT: " "$log_file" 2>/dev/null; then
-          printf '\r[!] %s: stalled after %ds with RESULT — terminating\033[K\n' \
-            "$display_name" "$elapsed" >&2
-          printf '[stall-kill] log stalled after %ds — terminating process\n' "$elapsed" >>"$log_file"
-          kill "$cmd_pid" 2>/dev/null || true
-          break
+  # In wave mode the combined display in wait_for_wave owns the terminal.
+  # Skip the per-job heartbeat to avoid interleaved output.
+  if [[ "${_WAVE_DISPLAY:-0}" != "1" ]]; then
+    local display_name
+    display_name="$(_display_name_for "$workstream")"
+    (
+      local spin_chars='-\|/'
+      local spin_idx=0
+      local prev_size=-1
+      local last_change_ts="$start_ts"
+      local stall_threshold=$(( stall_intervals * heartbeat_interval ))
+      while sleep 0.5; do
+        local now elapsed size
+        now="$(date +%s)"
+        elapsed=$((now - start_ts))
+        local spin_char="${spin_chars:$((spin_idx % 4)):1}"
+        spin_idx=$((spin_idx + 1))
+        printf '\r[%s] %s (%ds)  ' "$spin_char" "$display_name" "$elapsed"
+        if [[ -f "$log_file" ]]; then
+          size="$(wc -c <"$log_file" | tr -d ' ')"
+        else
+          size=0
         fi
-      fi
-    done
-  ) &
-  local heartbeat_pid="$!"
+        if [[ "$size" -ne "$prev_size" ]]; then
+          last_change_ts="$now"
+          prev_size="$size"
+        elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
+          local stall_secs=$((now - last_change_ts))
+          if [[ "$stall_secs" -ge "$stall_threshold" ]] && \
+             grep -q "^RESULT: " "$log_file" 2>/dev/null; then
+            printf '\r[!] %s: stalled after %ds with RESULT — terminating\033[K\n' \
+              "$display_name" "$elapsed" >&2
+            printf '[stall-kill] log stalled after %ds — terminating process\n' "$elapsed" >>"$log_file"
+            kill "$cmd_pid" 2>/dev/null || true
+            break
+          fi
+        fi
+      done
+    ) &
+    local heartbeat_pid="$!"
+    wait "$cmd_pid"
+    local status="$?"
+    set -e
+    kill "$heartbeat_pid" >/dev/null 2>&1 || true
+    wait "$heartbeat_pid" >/dev/null 2>&1 || true
+    printf '\n'
+  else
+    wait "$cmd_pid"
+    local status="$?"
+    set -e
+  fi
 
-  wait "$cmd_pid"
-  local status="$?"
-  set -e
-
-  kill "$heartbeat_pid" >/dev/null 2>&1 || true
-  wait "$heartbeat_pid" >/dev/null 2>&1 || true
-  printf '\n'  # end the spinner line cleanly
   if [[ "${VERBOSE:-0}" == "1" && -f "$log_file" ]]; then
     local final_size
     final_size="$(wc -c <"$log_file" | tr -d ' ')"
@@ -1657,16 +1665,96 @@ wait_for_wave() {
   local -n pids_ref=$1
   local -n names_ref=$2
   local failed=0
+  local n=${#pids_ref[@]}
+  [[ $n -eq 0 ]] && return 0
+
+  export _WAVE_DISPLAY=1
+
+  local heartbeat_interval="${REMEDIATION_HEARTBEAT_SECONDS:-60}"
+  local stall_intervals="${REMEDIATION_STALL_INTERVALS:-5}"
+  local stall_threshold=$(( stall_intervals * heartbeat_interval ))
+  local now
+  now="$(date +%s)"
+
+  # Per-job state: start time, log file, last-seen log size, last-change timestamp
+  local -a job_start=() job_log=() job_prev_size=() job_last_change=()
   local idx
-  for idx in "${!pids_ref[@]}"; do
-    if wait "${pids_ref[$idx]}"; then
-      printf '[ok] %s\n' "${names_ref[$idx]}"
-      printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
-    else
-      printf '[fail] %s (see %s/logs/%s.log)\n' "${names_ref[$idx]}" "$REMEDIATION_DIR" "${names_ref[$idx]}" >&2
-      failed=1
+  for idx in "${!names_ref[@]}"; do
+    job_start+=("$now")
+    job_log+=("$REMEDIATION_DIR/logs/${names_ref[$idx]}.log")
+    job_prev_size+=(-1)
+    job_last_change+=("$now")
+  done
+
+  local spin_chars='-\|/'
+  local spin_idx=0
+  local -a remaining=("${!pids_ref[@]}")
+
+  while [[ ${#remaining[@]} -gt 0 ]]; do
+    sleep 0.5
+    local now2 spin_char
+    now2="$(date +%s)"
+    spin_char="${spin_chars:$((spin_idx % 4)):1}"
+    spin_idx=$(( (spin_idx + 1) % 4 ))
+
+    local -a still_running=()
+    for idx in "${remaining[@]}"; do
+      if ! kill -0 "${pids_ref[$idx]}" 2>/dev/null; then
+        # Job finished — collect status, clear display line, report
+        wait "${pids_ref[$idx]}"
+        local s=$?
+        printf '\r\033[K'
+        if [[ $s -eq 0 ]]; then
+          printf '[ok] %s\n' "${names_ref[$idx]}"
+          printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+        else
+          printf '[fail] %s (see %s/logs/%s.log)\n' \
+            "${names_ref[$idx]}" "$REMEDIATION_DIR" "${names_ref[$idx]}" >&2
+          failed=1
+        fi
+      else
+        still_running+=("$idx")
+
+        # Stall detection
+        local size=0
+        if [[ -f "${job_log[$idx]}" ]]; then
+          size="$(wc -c <"${job_log[$idx]}" | tr -d ' ')"
+        fi
+        if [[ "$size" -ne "${job_prev_size[$idx]}" ]]; then
+          job_last_change[$idx]="$now2"
+          job_prev_size[$idx]="$size"
+        elif [[ "$stall_threshold" -gt 0 ]]; then
+          local stall_secs=$(( now2 - job_last_change[$idx] ))
+          if [[ "$stall_secs" -ge "$stall_threshold" ]] && \
+             grep -q "^RESULT: " "${job_log[$idx]}" 2>/dev/null; then
+            local elapsed=$(( now2 - job_start[$idx] ))
+            printf '\r\033[K[!] %s: stalled after %ds — terminating\n' \
+              "${names_ref[$idx]}" "$elapsed" >&2
+            printf '[stall-kill] stalled after %ds\n' "$elapsed" >> "${job_log[$idx]}"
+            kill "${pids_ref[$idx]}" 2>/dev/null || true
+          fi
+        fi
+      fi
+    done
+    remaining=("${still_running[@]}")
+
+    # Render combined status line
+    if [[ ${#remaining[@]} -gt 0 ]]; then
+      local parts=() part_idx
+      for part_idx in "${remaining[@]}"; do
+        local elapsed=$(( now2 - job_start[$part_idx] ))
+        local dname
+        dname="$(_display_name_for "${names_ref[$part_idx]}")"
+        parts+=("$dname (${elapsed}s)")
+      done
+      local line="${parts[0]}"
+      for p in "${parts[@]:1}"; do line+=" | $p"; done
+      printf '\r[%s] %-180s' "$spin_char" "$line"
     fi
   done
+
+  printf '\r\033[K'  # clear final display line
+  export _WAVE_DISPLAY=0
   return "$failed"
 }
 
