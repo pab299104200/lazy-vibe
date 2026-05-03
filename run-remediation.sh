@@ -3,12 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/shared.md}"
+SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/generic-shared.md}"
 PRODUCT_PROFILE="${PRODUCT_PROFILE:-}"
 PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 PROFILE="${PROFILE:-}"
 AUDIT_RUN=""
-REMEDIATION_DIR="${REMEDIATION_DIR:-$REPO_ROOT/docs/audit/$(date +%Y-%m-%d)-remediation-run}"
+REMEDIATION_DIR="${REMEDIATION_DIR:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-0}"
 AUTO_REVISE="${REMEDIATION_AUTO_REVISE:-1}"
@@ -218,6 +218,10 @@ fi
 if [[ ! -d "$AUDIT_RUN" ]]; then
   echo "Audit run directory not found: $AUDIT_RUN" >&2
   exit 2
+fi
+
+if [[ -z "$REMEDIATION_DIR" ]]; then
+  REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/$(date +%Y-%m-%d)-remediation-run"
 fi
 
 if [[ -n "$PROFILE" ]]; then
