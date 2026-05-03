@@ -1726,11 +1726,15 @@ execute_workstreams() {
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
       continue
     fi
-    # Skip already-completed units unless this is a revision pass — revision
-    # passes must re-run even if a unit previously exited 0.
-    if [[ "$REVISE_EXISTING" != "1" ]] && grep -qxF "implement-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
-      continue
+    # Skip already-completed units. Revision passes re-run units unless the
+    # summary artifact already records IMPLEMENTATION_RESULT: fixed, which
+    # means the unit was successfully implemented and does not need a redo.
+    if grep -qxF "implement-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
+      local _summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+      if [[ "$REVISE_EXISTING" != "1" ]] || grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$_summary" 2>/dev/null; then
+        printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
+        continue
+      fi
     fi
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
