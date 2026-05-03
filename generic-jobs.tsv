@@ -1,0 +1,17 @@
+group	job_id	kind	title	output	ref
+00	00-bootstrap	discovery	Bootstrap generic audit inventory and product profile fit	00-orchestrator-plan.md	GENERIC PHASE 0
+01	01a-product-contract	discovery	Product claims docs and launch contract	01-domain/01a-product-contract.md	GENERIC 1A
+01	01b-architecture-data	discovery	Architecture data model and trust boundaries	01-domain/01b-architecture-data.md	GENERIC 1B
+01	01c-user-journeys	discovery	User journeys surfaces and workflow inventory	01-domain/01c-user-journeys.md	GENERIC 1C
+02	02a-backend-api	discovery	Backend API services and domain logic	01-domain/02a-backend-api.md	GENERIC 2A
+02	02b-frontend-client	discovery	Frontend client mobile or UI surface	01-domain/02b-frontend-client.md	GENERIC 2B
+02	02c-integrations-async	discovery	Integrations async jobs protocols and external dependencies	01-domain/02c-integrations-async.md	GENERIC 2C
+03	03a-security-boundaries	synthesis	Security auth authorization and data boundaries	02-cross-cutting/03a-security-boundaries.md	GENERIC 3A
+03	03b-operability-recovery	synthesis	Observability recovery migrations and operations	02-cross-cutting/03b-operability-recovery.md	GENERIC 3B
+03	03c-test-doc-quality	synthesis	Test coverage docs truth and maintainability	02-cross-cutting/03c-test-doc-quality.md	GENERIC 3C
+04	04-market-comparison	web	Market or alternative comparison from product profile	02-cross-cutting/04-market-comparison.md	GENERIC 4
+05	05-synthesis	synthesis	Launch readiness synthesis and registers	08-launch-readiness.md	GENERIC 5
+06	06-runtime	runtime	Runtime verification against repo-supported checks	10-runtime-verification.md	GENERIC 6
+07	07-customer-simulation	simulation	Customer or operator maturity journey simulation	11-maturity-stage-simulation.md	GENERIC 7
+08	08-adversarial	adversarial	Adversarial launch challenge	13-adversarial-review.md	GENERIC 8
+09	09-final-decision	final	Final release decision	14-final-release-decision.md	GENERIC 9

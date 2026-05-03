@@ -1,0 +1,319 @@
+{
+  "shared_dir": "",
+  "default_task_type": "implement",
+  "default_workflow": "implement",
+  "task_types": {
+    "audit": {
+      "workflow": "audit"
+    },
+    "bug": {
+      "workflow": "bug"
+    },
+    "implement": {
+      "workflow": "implement"
+    }
+  },
+  "roles": {
+    "architect": {
+      "provider": "claude",
+      "model_profile": "deep"
+    },
+    "chair": {
+      "provider": "gemini",
+      "model_profile": "cheap_fast"
+    },
+    "critic": {
+      "provider": "codex",
+      "model_profile": "deep"
+    },
+    "implementer": {
+      "provider": "codex",
+      "model_profile": "balanced",
+      "max_subagents": 4,
+      "max_subagent_context_tokens": 200000
+    },
+    "reviewer": {
+      "provider": "claude",
+      "model_profile": "deep"
+    },
+    "verifier": {
+      "provider": "codex",
+      "model_profile": "deep"
+    }
+  },
+  "model_profiles": {
+    "cheap_fast": {
+      "codex": "gpt-5.4-mini",
+      "claude": "haiku",
+      "gemini": "gemini-2.5-flash"
+    },
+    "balanced": {
+      "codex": "gpt-5.4",
+      "claude": "sonnet",
+      "gemini": "gemini-2.5-pro"
+    },
+    "deep": {
+      "codex": "gpt-5.5",
+      "claude": "opus",
+      "gemini": "gemini-2.5-pro"
+    }
+  },
+  "providers": {
+    "codex": {
+      "command": "codex",
+      "prompt_delivery": "stdin",
+      "modes": {
+        "read": [
+          "exec",
+          "--cd",
+          "{repo}",
+          "--sandbox",
+          "read-only",
+          "--output-schema",
+          "{schema_file}",
+          "--output-last-message",
+          "{output_last_message}",
+          "-m",
+          "{model}",
+          "-"
+        ],
+        "write": [
+          "exec",
+          "--cd",
+          "{repo}",
+          "--sandbox",
+          "workspace-write",
+          "--output-schema",
+          "{schema_file}",
+          "--output-last-message",
+          "{output_last_message}",
+          "-m",
+          "{model}",
+          "-"
+        ]
+      }
+    },
+    "claude": {
+      "command": "claude",
+      "prompt_delivery": "stdin",
+      "modes": {
+        "read": [
+          "-p",
+          "--permission-mode",
+          "default",
+          "--output-format",
+          "json",
+          "--json-schema",
+          "{schema_inline}",
+          "--model",
+          "{model}"
+        ],
+        "write": [
+          "-p",
+          "--dangerously-skip-permissions",
+          "--output-format",
+          "json",
+          "--json-schema",
+          "{schema_inline}",
+          "--model",
+          "{model}"
+        ]
+      }
+    },
+    "gemini": {
+      "command": "gemini",
+      "prompt_delivery": "stdin",
+      "modes": {
+        "read": [
+          "--prompt",
+          "",
+          "--approval-mode",
+          "plan",
+          "--output-format",
+          "json",
+          "--model",
+          "{model}"
+        ],
+        "write": [
+          "--prompt",
+          "",
+          "--approval-mode",
+          "auto_edit",
+          "--output-format",
+          "json",
+          "--model",
+          "{model}"
+        ]
+      }
+    }
+  },
+  "workflows": {
+    "implement": {
+      "max_plan_rounds": 3,
+      "max_review_rounds": 3,
+      "review_loop_phases": [
+        "implementation",
+        "implementation_review",
+        "review_moderation"
+      ],
+      "phases": [
+        {
+          "name": "architecture",
+          "role": "architect",
+          "mode": "read",
+          "prompt": "architect.md",
+          "schema": "architect.schema.json"
+        },
+        {
+          "name": "architecture_critique",
+          "role": "critic",
+          "mode": "read",
+          "prompt": "critic.md",
+          "schema": "critic.schema.json"
+        },
+        {
+          "name": "consensus_moderation",
+          "role": "chair",
+          "mode": "read",
+          "prompt": "chair.md",
+          "schema": "chair.schema.json"
+        },
+        {
+          "name": "implementation",
+          "role": "implementer",
+          "mode": "write",
+          "prompt": "implementer.md",
+          "schema": "implementation.schema.json"
+        },
+        {
+          "name": "implementation_review",
+          "role": "reviewer",
+          "mode": "read",
+          "prompt": "reviewer.md",
+          "schema": "review.schema.json"
+        },
+        {
+          "name": "review_moderation",
+          "role": "chair",
+          "mode": "read",
+          "prompt": "chair-review.md",
+          "schema": "chair.schema.json"
+        }
+      ]
+    },
+    "bug": {
+      "max_plan_rounds": 3,
+      "max_review_rounds": 3,
+      "review_loop_phases": [
+        "implementation",
+        "implementation_review",
+        "review_moderation"
+      ],
+      "phases": [
+        {
+          "name": "architecture",
+          "role": "architect",
+          "mode": "read",
+          "prompt": "architect.md",
+          "schema": "architect.schema.json"
+        },
+        {
+          "name": "architecture_critique",
+          "role": "critic",
+          "mode": "read",
+          "prompt": "critic.md",
+          "schema": "critic.schema.json"
+        },
+        {
+          "name": "consensus_moderation",
+          "role": "chair",
+          "mode": "read",
+          "prompt": "chair.md",
+          "schema": "chair.schema.json"
+        },
+        {
+          "name": "implementation",
+          "role": "implementer",
+          "mode": "write",
+          "prompt": "implementer.md",
+          "schema": "implementation.schema.json"
+        },
+        {
+          "name": "implementation_review",
+          "role": "reviewer",
+          "mode": "read",
+          "prompt": "reviewer.md",
+          "schema": "review.schema.json"
+        },
+        {
+          "name": "review_moderation",
+          "role": "chair",
+          "mode": "read",
+          "prompt": "chair-review.md",
+          "schema": "chair.schema.json"
+        }
+      ]
+    },
+    "audit": {
+      "max_plan_rounds": 3,
+      "max_review_rounds": 3,
+      "review_loop_phases": [
+        "implementation",
+        "evidence_verification",
+        "implementation_review",
+        "review_moderation"
+      ],
+      "phases": [
+        {
+          "name": "architecture",
+          "role": "architect",
+          "mode": "read",
+          "prompt": "architect.md",
+          "schema": "architect.schema.json"
+        },
+        {
+          "name": "architecture_critique",
+          "role": "critic",
+          "mode": "read",
+          "prompt": "critic.md",
+          "schema": "critic.schema.json"
+        },
+        {
+          "name": "consensus_moderation",
+          "role": "chair",
+          "mode": "read",
+          "prompt": "chair.md",
+          "schema": "chair.schema.json"
+        },
+        {
+          "name": "implementation",
+          "role": "implementer",
+          "mode": "write",
+          "prompt": "audit-implementer.md",
+          "schema": "implementation.schema.json"
+        },
+        {
+          "name": "evidence_verification",
+          "role": "verifier",
+          "mode": "read",
+          "prompt": "audit-verifier.md",
+          "schema": "verification.schema.json"
+        },
+        {
+          "name": "implementation_review",
+          "role": "reviewer",
+          "mode": "read",
+          "prompt": "reviewer.md",
+          "schema": "review.schema.json"
+        },
+        {
+          "name": "review_moderation",
+          "role": "chair",
+          "mode": "read",
+          "prompt": "chair-review.md",
+          "schema": "chair.schema.json"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Cadres project profiles (product-specific, not for public repo)
+profiles/
+
+# Commitee session logs
+commitee/sessions/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Credential files
+*.creds
+.creds

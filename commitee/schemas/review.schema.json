@@ -1,0 +1,152 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "summary",
+    "findings",
+    "standards_review",
+    "bug_log_review",
+    "missing_tests",
+    "residual_risks"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "revise",
+        "ask_user",
+        "stop"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "file",
+          "line",
+          "issue",
+          "recommendation"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "issue": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "standards_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec_checked",
+        "coding_standard_checked",
+        "ui_standard_checked",
+        "definition_of_done_checked",
+        "execution_philosophy_checked",
+        "model_routing_checked",
+        "context_budgets_checked",
+        "notes"
+      ],
+      "properties": {
+        "spec_checked": {
+          "type": "boolean"
+        },
+        "coding_standard_checked": {
+          "type": "boolean"
+        },
+        "ui_standard_checked": {
+          "type": "boolean"
+        },
+        "definition_of_done_checked": {
+          "type": "boolean"
+        },
+        "execution_philosophy_checked": {
+          "type": "boolean"
+        },
+        "model_routing_checked": {
+          "type": "boolean"
+        },
+        "context_budgets_checked": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "bug_log_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicable",
+        "remote_logs_checked",
+        "sources_reviewed",
+        "notes"
+      ],
+      "properties": {
+        "applicable": {
+          "type": "boolean"
+        },
+        "remote_logs_checked": {
+          "type": "boolean"
+        },
+        "sources_reviewed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "missing_tests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "residual_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

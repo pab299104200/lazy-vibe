@@ -1,0 +1,104 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "reason",
+    "required_next_role",
+    "blocking_issues",
+    "consensus_contract"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "proceed",
+        "revise",
+        "ask_user",
+        "stop"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "required_next_role": {
+      "type": "string"
+    },
+    "blocking_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "consensus_contract": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "goal",
+        "non_goals",
+        "accepted_design",
+        "implementation_scope",
+        "risk_controls",
+        "required_tests",
+        "required_docs",
+        "review_focus",
+        "implementation_strategy",
+        "open_disagreements"
+      ],
+      "properties": {
+        "goal": {
+          "type": "string"
+        },
+        "non_goals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "accepted_design": {
+          "type": "string"
+        },
+        "implementation_scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risk_controls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_docs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "review_focus": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "implementation_strategy": {
+          "$ref": "implementation-strategy.schema.json"
+        },
+        "open_disagreements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
+

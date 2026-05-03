@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "summary",
+    "plan_agreement",
+    "task_plan_feedback",
+    "blocking_issues",
+    "non_blocking_issues",
+    "required_revisions",
+    "review_focus"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "revise",
+        "ask_user",
+        "stop"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "plan_agreement": {
+      "type": "string",
+      "enum": [
+        "agree",
+        "agree_with_revisions",
+        "disagree"
+      ]
+    },
+    "task_plan_feedback": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task_id",
+          "effort_assessment",
+          "model_routing_assessment",
+          "context_budget_assessment",
+          "required_change"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "effort_assessment": {
+            "type": "string"
+          },
+          "model_routing_assessment": {
+            "type": "string"
+          },
+          "context_budget_assessment": {
+            "type": "string"
+          },
+          "required_change": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "blocking_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_blocking_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_revisions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "review_focus": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

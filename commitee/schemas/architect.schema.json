@@ -1,0 +1,73 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "scope",
+    "non_goals",
+    "assumptions",
+    "risks",
+    "implementation_plan",
+    "required_tests",
+    "required_docs",
+    "implementation_strategy",
+    "open_questions"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "implementation_plan": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_tests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_docs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "implementation_strategy": {
+      "$ref": "implementation-strategy.schema.json"
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
+

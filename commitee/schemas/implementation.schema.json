@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "files_changed",
+    "subagents",
+    "remote_logs_checked",
+    "tests_run",
+    "docs_updated",
+    "unresolved_issues"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "subagents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "role",
+          "model_profile",
+          "context_budget_tokens",
+          "task",
+          "files_touched",
+          "result"
+        ],
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "model_profile": {
+            "type": "string"
+          },
+          "context_budget_tokens": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 200000
+          },
+          "task": {
+            "type": "string"
+          },
+          "files_touched": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "result": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "remote_logs_checked": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "checked",
+          "evidence"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "checked": {
+            "type": "boolean"
+          },
+          "evidence": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tests_run": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "docs_updated": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
