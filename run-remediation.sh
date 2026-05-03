@@ -1616,7 +1616,9 @@ run_prompt() {
 
   # Coordinator, cataloger, verifier, and reviewer roles must not modify product
   # source code. Allow writes inside REMEDIATION_DIR (artifacts, packets, TSVs)
-  # but revert anything outside it.
+  # but revert anything outside it. For coordinators the revert is a warning —
+  # their deliverables live in REMEDIATION_DIR and are already written, so the
+  # checkpoint is still valid. For all other roles the violation is a hard failure.
   if [[ "$class" =~ ^(cataloger|coordinator|verifier|reviewer)$ ]] && \
      git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null 2>&1; then
     local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
@@ -1628,7 +1630,9 @@ run_prompt() {
       git -C "$REPO_ROOT" submodule update --checkout >>"$log_file" 2>&1 || true
       git -C "$REPO_ROOT" submodule foreach --quiet \
         'git checkout -- . 2>/dev/null || true' >>"$log_file" 2>&1 || true
-      status=1
+      if [[ "$class" != "coordinator" ]]; then
+        status=1
+      fi
     fi
   fi
 
@@ -1869,7 +1873,12 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   extract_findings
   write_master_markdown
   write_packets_and_workstreams
-  write_default_units
+  # Skip write_default_units when --no-catalog and UNITS_TSV already exists —
+  # the coordinator/workstream coordinators may have rewritten it with split
+  # child units, and regenerating would wipe them.
+  if [[ "$NO_CATALOG" != "1" || ! -f "$UNITS_TSV" ]]; then
+    write_default_units
+  fi
 
   if [[ "$CATALOG_WITH_CODEX" == "1" ]]; then
     build_catalog_prompt
