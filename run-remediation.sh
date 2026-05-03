@@ -821,6 +821,17 @@ normalize_units_tsv() {
       mv "$tmp" "$UNITS_TSV"
       printf '[normalize-units] converted claude coordinator format (packet_id col2) to canonical format\n'
       ;;
+    workstream|workstream_id)
+      # Format: unit_id workstream[_id] model_class packet_count packets rationale
+      # Reorder to: unit_id packets group model_class severity rationale
+      tmp="$(mktemp)"
+      {
+        printf 'unit_id\tpackets\tgroup\tmodel_class\tseverity\trationale\n'
+        awk 'BEGIN{OFS="\t"; FS="\t"} FNR>1 && NF>0 {print $1,$5,$2,$3,"",($6==""?"":$6)}' "$UNITS_TSV"
+      } > "$tmp"
+      mv "$tmp" "$UNITS_TSV"
+      printf '[normalize-units] converted workstream format (col2=%s) to canonical format\n' "$col2"
+      ;;
     *)
       printf '[normalize-units] unrecognized UNITS_TSV format (col2=%s), leaving as-is\n' "$col2" >&2
       ;;
@@ -1526,6 +1537,10 @@ run_prompt() {
         runner="${REVIEWER_RUNNER:-${REVIEW_RUNNER:-${VERIFICATION_RUNNER:-${REMEDIATION_RUNNER:-}}}}"
         effective_agent="${REVIEWER_AGENT:-}"
       fi
+      ;;
+    *)
+      runner="${IMPLEMENTER_RUNNER:-${REMEDIATION_RUNNER:-}}"
+      effective_agent="${IMPLEMENTER_AGENT:-codex}"
       ;;
   esac
 
