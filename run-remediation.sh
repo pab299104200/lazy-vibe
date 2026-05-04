@@ -1668,8 +1668,6 @@ wait_for_wave() {
   local n=${#pids_ref[@]}
   [[ $n -eq 0 ]] && return 0
 
-  export _WAVE_DISPLAY=1
-
   local heartbeat_interval="${REMEDIATION_HEARTBEAT_SECONDS:-60}"
   local stall_intervals="${REMEDIATION_STALL_INTERVALS:-5}"
   local stall_threshold=$(( stall_intervals * heartbeat_interval ))
@@ -1754,7 +1752,6 @@ wait_for_wave() {
   done
 
   printf '\r\033[K'  # clear final display line
-  export _WAVE_DISPLAY=0
   return "$failed"
 }
 
@@ -1809,6 +1806,8 @@ execute_workstreams() {
   local active=0
 
   rebuild_unit_prompts
+
+  export _WAVE_DISPLAY=1
 
   while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
     [[ -z "${unit_id:-}" ]] && continue
