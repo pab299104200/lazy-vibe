@@ -1701,7 +1701,8 @@ wait_for_wave() {
         # Job finished — collect status, clear display line, report
         wait "${pids_ref[$idx]}"
         local s=$?
-        printf '\r\033[K'
+        local _tw; _tw=$(tput cols 2>/dev/null || echo 120)
+        printf '\r%-*s\r' $(( _tw - 1 )) ''
         if [[ $s -eq 0 ]]; then
           printf '[ok] %s\n' "${names_ref[$idx]}"
           printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
@@ -1747,14 +1748,18 @@ wait_for_wave() {
       done
       local line="${parts[0]}"
       for p in "${parts[@]:1}"; do line+=" | $p"; done
-      local term_width="${COLUMNS:-120}"
-      local max_len=$(( term_width - 5 ))
-      [[ ${#line} -gt $max_len ]] && line="${line:0:$max_len}"
-      printf '\r[%s] %s\033[K' "$spin_char" "$line"
+      local term_width
+      term_width=$(tput cols 2>/dev/null || echo 120)
+      local content="[$spin_char] $line"
+      local padded
+      printf -v padded '%-*s' $(( term_width - 1 )) "$content"
+      padded="${padded:0:$(( term_width - 1 ))}"
+      printf '\r%s' "$padded"
     fi
   done
 
-  printf '\r\033[K'  # clear final display line
+  local _tw; _tw=$(tput cols 2>/dev/null || echo 120)
+  printf '\r%-*s\r' $(( _tw - 1 )) ''  # clear final display line
   return "$failed"
 }
 
