@@ -1747,7 +1747,10 @@ wait_for_wave() {
       done
       local line="${parts[0]}"
       for p in "${parts[@]:1}"; do line+=" | $p"; done
-      printf '\r[%s] %-180s' "$spin_char" "$line"
+      local term_width="${COLUMNS:-120}"
+      local max_len=$(( term_width - 5 ))
+      [[ ${#line} -gt $max_len ]] && line="${line:0:$max_len}"
+      printf '\r[%s] %s\033[K' "$spin_char" "$line"
     fi
   done
 
