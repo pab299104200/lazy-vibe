@@ -642,6 +642,23 @@ _exec_gemini() {
   (cd "$REPO_ROOT" && "${cmd[@]}" -p "$(cat "$prompt_file")")
 }
 
+_exec_codex() {
+  local prompt_file="$1" class="$2"
+  local cmd=(codex exec --ephemeral --full-auto --skip-git-repo-check -C "$REPO_ROOT")
+  local model reasoning
+  model="$(select_model "$class")"
+  reasoning="$(select_reasoning "$class")"
+  [[ -n "$model" ]] && cmd+=(-m "$model")
+  [[ -n "$reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$reasoning\"")
+  [[ -n "${CODEX_PROFILE:-}" ]] && cmd+=(-p "$CODEX_PROFILE")
+  if [[ -n "${CODEX_EXTRA_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    local extra_args=($CODEX_EXTRA_ARGS)
+    cmd+=("${extra_args[@]}")
+  fi
+  "${cmd[@]}" - <"$prompt_file"
+}
+
 review_enabled() {
   [[ -n "$REVIEWER_AGENT" || -n "${REVIEWER_RUNNER:-}" || -n "${VERIFICATION_RUNNER:-}" || -n "${REVIEW_RUNNER:-}" ]]
 }
@@ -2133,19 +2150,7 @@ run_prompt() {
           status="$?"
           ;;
         codex)
-          local cmd=(codex exec --ephemeral --full-auto --skip-git-repo-check -C "$REPO_ROOT")
-          local model reasoning
-          model="$(select_model "$class")"
-          reasoning="$(select_reasoning "$class")"
-          [[ -n "$model" ]]     && cmd+=(-m "$model")
-          [[ -n "$reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$reasoning\"")
-          [[ -n "${CODEX_PROFILE:-}" ]] && cmd+=(-p "$CODEX_PROFILE")
-          if [[ -n "${CODEX_EXTRA_ARGS:-}" ]]; then
-            # shellcheck disable=SC2206
-            local extra_args=($CODEX_EXTRA_ARGS)
-            cmd+=("${extra_args[@]}")
-          fi
-          run_command_with_heartbeat "$workstream" "$log_file" "${cmd[@]}" - <"$prompt_file"
+          run_command_with_heartbeat "$workstream" "$log_file" _exec_codex "$prompt_file" "$class"
           status="$?"
           ;;
         *)
