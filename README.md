@@ -293,6 +293,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `--revise-existing` | Skip cataloging and re-run implementation against existing packets. |
 | `--split-incomplete` | Detect and split oversized or incomplete units before re-running. |
 | `--no-catalog` | Skip the cataloger when `--execute` is set. |
+| `--force-catalog` | Run the cataloger even when an existing implementation-unit catalog is present. |
 | `--dry-run` | Print the execution schedule without running agents. |
 | `--verbose` | Print log size and path after each unit completes. |
 | `--rules FILE` | Override the shared rules file. |

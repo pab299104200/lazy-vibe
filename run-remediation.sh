@@ -22,6 +22,7 @@ VERBOSE="${VERBOSE:-0}"
 ONLY_GROUP=""
 ONLY_UNIT=""
 CATALOG_WITH_CODEX=0
+FORCE_CATALOG=0
 REVISE_EXISTING=0
 SPLIT_INCOMPLETE=0
 AUTO_SPLIT_BEFORE_EXECUTE="${REMEDIATION_AUTO_SPLIT:-1}"
@@ -50,7 +51,7 @@ NO_CATALOG=0
 
 usage() {
   cat <<'USAGE'
-Usage: run-remediation.sh --audit-run RUN_DIR [--execute] [--verify] [--verify-only] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
+Usage: run-remediation.sh --audit-run RUN_DIR [--execute] [--verify] [--verify-only] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--force-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
 
 Environment:
   REMEDIATION_DIR             Output directory for remediation plan and logs.
@@ -217,6 +218,11 @@ while (($#)); do
       NO_CATALOG=1
       shift
       ;;
+    --force-catalog)
+      FORCE_CATALOG=1
+      CATALOG_WITH_CODEX=1
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -281,10 +287,11 @@ fi
 mkdir -p "$REMEDIATION_DIR"/{packets,prompts,logs,artifacts}
 CHECKPOINT_FILE="$REMEDIATION_DIR/completed-units.txt"
 
-# Auto-enable the cataloger when executing — running implementation on the raw
-# deterministic extract without deduplication and rewriting produces lower-quality
-# packets. --no-catalog opts out; --catalog-with-codex still works for plan-only.
-if [[ "$EXECUTE" == "1" && "$NO_CATALOG" != "1" && "$REVISE_EXISTING" != "1" && "$VERIFY_ONLY" != "1" ]]; then
+# Auto-enable the cataloger for fresh execution only. Existing implementation
+# units are catalog state and must be resumed as-is unless --force-catalog is
+# passed. --no-catalog opts out; --catalog-with-codex still works explicitly.
+if [[ "$EXECUTE" == "1" && "$NO_CATALOG" != "1" && "$REVISE_EXISTING" != "1" && "$VERIFY_ONLY" != "1" && \
+      ( "$FORCE_CATALOG" == "1" || ! -s "$REMEDIATION_DIR/03-implementation-units.tsv" ) ]]; then
   CATALOG_WITH_CODEX=1
 fi
 
@@ -995,18 +1002,20 @@ guard_against_raw_unit_manifest() {
   [[ -n "$ONLY_UNIT" ]] && return 0
 
   local threshold="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
-  local stats total raw single
-  stats="$(awk -F '\t' '
-    FNR > 1 && $1 != "" {
-      total += 1
-      if ($1 ~ /^PX-[0-9]+$/) raw += 1
-      if ($2 !~ /,/) single += 1
-    }
-    END {
-      printf "%d\t%d\t%d\n", total, raw, single
-    }
-  ' "$UNITS_TSV")"
-  IFS=$'\t' read -r total raw single <<< "$stats"
+  local total=0 raw=0 single=0 unit_id packets_csv _group _model _sev _rat
+  while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
+    [[ -z "${unit_id:-}" ]] && continue
+    # Count only units that still have incomplete packets. A raw historical
+    # manifest should not block resume when all of its packets are already done.
+    [[ -n "$(incomplete_packets_csv "$packets_csv")" ]] || continue
+    total=$((total + 1))
+    if [[ "$unit_id" =~ ^PX-[0-9]+$ ]]; then
+      raw=$((raw + 1))
+    fi
+    if [[ "$packets_csv" != *,* ]]; then
+      single=$((single + 1))
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
 
   if (( total == 0 || raw < threshold )); then
     return 0
@@ -1030,7 +1039,7 @@ without using the combined packet graph.
 
 Fix:
   - Stop this run.
-  - Re-run without --no-catalog so 00-cataloger can rewrite $UNITS_TSV, or
+  - Re-run with --force-catalog so 00-cataloger can rewrite $UNITS_TSV, or
     provide a hand-edited implementation-unit TSV that merges related packets.
   - Use --only-unit for a deliberately targeted raw packet run.
 
@@ -2760,15 +2769,22 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   build_implemented_packet_set
 
   if [[ "$CATALOG_WITH_CODEX" == "1" ]]; then
-    build_catalog_prompt
-    if grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null; then
-      printf '[resume] skipping completed 00-cataloger\n'
+    if [[ "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" && -s "$WORKSTREAMS_TSV" ]]; then
+      printf '[resume] existing catalog detected; skipping 00-cataloger (use --force-catalog to rewrite)\n'
+      grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
     else
-      printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
-      if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
-        printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+      build_catalog_prompt
+      if grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null; then
+        printf '[resume] skipping completed 00-cataloger\n'
+      else
+        printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
+        if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
+          printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+        fi
       fi
     fi
+  elif [[ "$EXECUTE" == "1" && "$NO_CATALOG" != "1" && "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" && -s "$WORKSTREAMS_TSV" ]]; then
+    printf '[resume] existing catalog detected; not auto-running 00-cataloger (use --force-catalog to rewrite)\n'
   fi
 elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
   echo "--verify-only/--revise-existing requires an existing REMEDIATION_DIR with $PX_TSV, $WORKSTREAMS_TSV, and $UNITS_TSV" >&2
@@ -2776,6 +2792,9 @@ elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
 fi
 
 build_implemented_packet_set
+if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+  guard_against_raw_unit_manifest
+fi
 build_coordinator_prompt
 
 rebuild_workstream_coordinator_prompts
