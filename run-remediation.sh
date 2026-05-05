@@ -45,6 +45,7 @@ REMEDIATION_ALLOW_RAW_UNITS="${REMEDIATION_ALLOW_RAW_UNITS:-0}"
 REMEDIATION_REWRITE_PACKETS="${REMEDIATION_REWRITE_PACKETS:-0}"
 REMEDIATION_REWRITE_WORKSTREAMS="${REMEDIATION_REWRITE_WORKSTREAMS:-0}"
 REMEDIATION_REWRITE_UNITS="${REMEDIATION_REWRITE_UNITS:-0}"
+REMEDIATION_IMPORT_PRIOR_RUNS="${REMEDIATION_IMPORT_PRIOR_RUNS:-1}"
 NO_CATALOG=0
 
 usage() {
@@ -79,6 +80,9 @@ Environment:
   REMEDIATION_REWRITE_WORKSTREAMS
                               1 to overwrite existing workstream TSV when reusing REMEDIATION_DIR. Defaults to 0.
   REMEDIATION_REWRITE_UNITS   1 to overwrite existing implementation units TSV when reusing REMEDIATION_DIR. Defaults to 0.
+  REMEDIATION_IMPORT_PRIOR_RUNS
+                              1 to recover fixed packets from sibling remediation runs for the same audit run
+                              when the packet source/line/title still matches. Defaults to 1.
   REMEDIATION_AUTO_SPLIT      1 to auto-detect oversized units before execution. Defaults to 1.
   REMEDIATION_MAX_UNIT_PACKET_COUNT
                               Max packets per implementation unit before split preflight. Defaults to 3.
@@ -1185,6 +1189,65 @@ stamp_packet_complete() {
   printf '\n- Status: `complete` (stamped by remediation runner from %s)\n' "$source_label" >> "$pfile"
 }
 
+remediation_dir_audit_run() {
+  local rdir="$1"
+  sed -n 's/^- Audit run: `\(.*\)`$/\1/p' "$rdir/01-master-px-list.md" 2>/dev/null | head -1
+}
+
+packet_row_key() {
+  local px="$1" px_tsv="$2"
+  awk -F '\t' -v px="$px" 'NR > 1 && $1 == px { print $5 "\t" $6 "\t" $7; found = 1; exit } END { if (!found) exit 1 }' "$px_tsv" 2>/dev/null
+}
+
+packet_row_matches_current_run() {
+  local px="$1" prior_dir="$2"
+  local current_key prior_key
+  current_key="$(packet_row_key "$px" "$PX_TSV" || true)"
+  prior_key="$(packet_row_key "$px" "$prior_dir/00-master-px-list.tsv" || true)"
+  [[ -n "$current_key" && "$current_key" == "$prior_key" ]]
+}
+
+mark_fixed_packets_from_summary() {
+  local summary="$1" source_dir="$2" require_row_match="$3"
+  grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$summary" 2>/dev/null || return 0
+  local px
+  while IFS= read -r px; do
+    [[ -n "$px" ]] || continue
+    if [[ "$require_row_match" == "1" ]] && ! packet_row_matches_current_run "$px" "$source_dir"; then
+      continue
+    fi
+    _IMPLEMENTED_PACKETS[$px]=1
+  done < <(grep -oE 'PX-[0-9]{4}' "$summary" | sort -u)
+}
+
+recover_packets_from_prior_remediation_runs() {
+  [[ "$REMEDIATION_IMPORT_PRIOR_RUNS" == "1" ]] || return 0
+  [[ -f "$PX_TSV" ]] || return 0
+  local parent_dir current_audit prior_dir prior_audit summary imported_before imported_after imported
+  parent_dir="$(dirname "$REMEDIATION_DIR")"
+  current_audit="$(remediation_dir_audit_run "$REMEDIATION_DIR")"
+  [[ -n "$current_audit" ]] || current_audit="$AUDIT_RUN"
+  imported_before="${#_IMPLEMENTED_PACKETS[@]}"
+
+  shopt -s nullglob
+  for prior_dir in "$parent_dir"/*-remediation-run; do
+    [[ "$prior_dir" != "$REMEDIATION_DIR" ]] || continue
+    [[ -f "$prior_dir/00-master-px-list.tsv" ]] || continue
+    prior_audit="$(remediation_dir_audit_run "$prior_dir")"
+    [[ -n "$prior_audit" && "$prior_audit" == "$current_audit" ]] || continue
+    for summary in "$prior_dir"/artifacts/*-summary.md; do
+      mark_fixed_packets_from_summary "$summary" "$prior_dir" 1
+    done
+  done
+  shopt -u nullglob
+
+  imported_after="${#_IMPLEMENTED_PACKETS[@]}"
+  imported=$(( imported_after - imported_before ))
+  if (( imported > 0 )); then
+    printf '[resume] recovered %d fixed packet(s) from prior same-audit remediation runs\n' "$imported"
+  fi
+}
+
 build_implemented_packet_set() {
   _IMPLEMENTED_PACKETS=()
   [[ ! -f "$UNITS_TSV" ]] && return 0
@@ -1216,13 +1279,11 @@ build_implemented_packet_set() {
   local summary
   shopt -s nullglob
   for summary in "$REMEDIATION_DIR"/artifacts/*-summary.md; do
-    grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$summary" 2>/dev/null || continue
-    while IFS= read -r px; do
-      [[ -n "$px" ]] || continue
-      _IMPLEMENTED_PACKETS[$px]=1
-    done < <(grep -oE 'PX-[0-9]{4}' "$summary" | sort -u)
+    mark_fixed_packets_from_summary "$summary" "$REMEDIATION_DIR" 0
   done
   shopt -u nullglob
+
+  recover_packets_from_prior_remediation_runs
 
   # Stamp Status: complete into packet files that are done but unstamped.
   local stamped=0

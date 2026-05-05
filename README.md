@@ -277,6 +277,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_REWRITE_PACKETS` | `0` | Set to `1` to overwrite existing packet files when reusing `REMEDIATION_DIR`. |
 | `REMEDIATION_REWRITE_WORKSTREAMS` | `0` | Set to `1` to overwrite an existing workstream TSV when reusing `REMEDIATION_DIR`. |
 | `REMEDIATION_REWRITE_UNITS` | `0` | Set to `1` to overwrite an existing implementation-units TSV when reusing `REMEDIATION_DIR`. |
+| `REMEDIATION_IMPORT_PRIOR_RUNS` | `1` | Recover fixed packets from sibling remediation runs for the same audit run when packet source, line, and title still match. |
 | `REMEDIATION_HEARTBEAT_SECONDS` | `60` | How often stall detection checks log size. |
 | `REMEDIATION_STALL_INTERVALS` | `5` | Unchanged-log intervals before stall-kill (0 disables). |
 | `VERBOSE` | `0` | Print log size after each unit completes. |
