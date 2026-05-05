@@ -2693,6 +2693,11 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
     printf '[resume] preserving existing implementation units: %s\n' "$UNITS_TSV"
   fi
 
+  # Reconcile completed packet state before any agent phase. A reused
+  # REMEDIATION_DIR may have fixed summaries from prior runs, and cataloging can
+  # be slow or interrupted before the normal execution resume path is reached.
+  build_implemented_packet_set
+
   if [[ "$CATALOG_WITH_CODEX" == "1" ]]; then
     build_catalog_prompt
     if grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null; then
