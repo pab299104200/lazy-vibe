@@ -40,6 +40,8 @@ RECOORDINATE=0
 NO_NORMALIZE=0
 SPLIT_RUN_UNITS=""
 REMEDIATION_MAX_RETRIES="${REMEDIATION_MAX_RETRIES:-2}"
+REMEDIATION_RAW_UNIT_ABORT_THRESHOLD="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
+REMEDIATION_ALLOW_RAW_UNITS="${REMEDIATION_ALLOW_RAW_UNITS:-0}"
 NO_CATALOG=0
 
 usage() {
@@ -65,6 +67,10 @@ Environment:
                               Parallelism during revision rounds. Defaults to 2.
   REMEDIATION_VERIFY_SCOPE    implementation or launch. Defaults to implementation.
   REMEDIATION_MAX_RETRIES     Extra retry attempts per workstream on non-zero runner exit. Defaults to 2 (3 total attempts, backoff 15s/30s).
+  REMEDIATION_RAW_UNIT_ABORT_THRESHOLD
+                              Abort before execution when this many raw one-packet PX-* implementation
+                              units remain after coordination/cataloging. Defaults to 50.
+  REMEDIATION_ALLOW_RAW_UNITS 1 to allow execution of a large raw one-packet manifest. Defaults to 0.
   REMEDIATION_AUTO_SPLIT      1 to auto-detect oversized units before execution. Defaults to 1.
   REMEDIATION_MAX_UNIT_PACKET_COUNT
                               Max packets per implementation unit before split preflight. Defaults to 3.
@@ -966,6 +972,57 @@ normalize_units_tsv() {
       printf '[normalize-units] unrecognized UNITS_TSV format (col2=%s), leaving as-is\n' "$col2" >&2
       ;;
   esac
+}
+
+guard_against_raw_unit_manifest() {
+  [[ -f "$UNITS_TSV" ]] || return 0
+  [[ "$REMEDIATION_ALLOW_RAW_UNITS" == "1" ]] && return 0
+  [[ -n "$ONLY_UNIT" ]] && return 0
+
+  local threshold="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
+  local stats total raw single
+  stats="$(awk -F '\t' '
+    FNR > 1 && $1 != "" {
+      total += 1
+      if ($1 ~ /^PX-[0-9]+$/) raw += 1
+      if ($2 !~ /,/) single += 1
+    }
+    END {
+      printf "%d\t%d\t%d\n", total, raw, single
+    }
+  ' "$UNITS_TSV")"
+  IFS=$'\t' read -r total raw single <<< "$stats"
+
+  if (( total == 0 || raw < threshold )); then
+    return 0
+  fi
+
+  local raw_pct=$(( raw * 100 / total ))
+  local single_pct=$(( single * 100 / total ))
+  if (( raw_pct < 80 || single_pct < 80 )); then
+    return 0
+  fi
+
+  cat >&2 <<EOF
+[raw-unit-guard] refusing to execute a raw one-packet implementation manifest.
+
+Manifest: $UNITS_TSV
+Rows: total=$total raw_px_unit_ids=$raw single_packet_rows=$single
+
+This means cataloging/coordinator consolidation did not produce implementation-ready
+units. Running now would launch one planner/implementer per PX packet and burn quota
+without using the combined packet graph.
+
+Fix:
+  - Stop this run.
+  - Re-run without --no-catalog so 00-cataloger can rewrite $UNITS_TSV, or
+    provide a hand-edited implementation-unit TSV that merges related packets.
+  - Use --only-unit for a deliberately targeted raw packet run.
+
+Override only when you intentionally want raw per-PX execution:
+  REMEDIATION_ALLOW_RAW_UNITS=1
+EOF
+  return 2
 }
 
 # Split workstreams in WORKSTREAMS_TSV before coordinator dispatch.
@@ -2401,6 +2458,7 @@ execute_workstreams() {
     done < <(tail -n +2 "$WORKSTREAMS_TSV")
   fi
 
+  guard_against_raw_unit_manifest
   execute_planners
 
   local -a pids=()

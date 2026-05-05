@@ -272,6 +272,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_MAX_REVISION_ROUNDS` | `2` | Maximum automatic revision loops before final review. |
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
+| `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing a large raw one-packet-per-PX manifest. |
+| `REMEDIATION_RAW_UNIT_ABORT_THRESHOLD` | `50` | Raw `PX-*` unit count that triggers the execution guard. |
 | `REMEDIATION_HEARTBEAT_SECONDS` | `60` | How often stall detection checks log size. |
 | `REMEDIATION_STALL_INTERVALS` | `5` | Unchanged-log intervals before stall-kill (0 disables). |
 | `VERBOSE` | `0` | Print log size after each unit completes. |
