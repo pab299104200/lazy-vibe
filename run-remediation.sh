@@ -1001,29 +1001,11 @@ guard_against_raw_unit_manifest() {
   [[ "$REMEDIATION_ALLOW_RAW_UNITS" == "1" ]] && return 0
   [[ -n "$ONLY_UNIT" ]] && return 0
 
-  local threshold="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
-  local total=0 raw=0 single=0 unit_id packets_csv _group _model _sev _rat
-  while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
-    [[ -z "${unit_id:-}" ]] && continue
-    # Count only units that still have incomplete packets. A raw historical
-    # manifest should not block resume when all of its packets are already done.
-    [[ -n "$(incomplete_packets_csv "$packets_csv")" ]] || continue
-    total=$((total + 1))
-    if [[ "$unit_id" =~ ^PX-[0-9]+$ ]]; then
-      raw=$((raw + 1))
-    fi
-    if [[ "$packets_csv" != *,* ]]; then
-      single=$((single + 1))
-    fi
-  done < <(tail -n +2 "$UNITS_TSV")
+  local stats total raw single
+  stats="$(raw_incomplete_unit_manifest_stats)"
+  IFS=$'\t' read -r total raw single <<< "$stats"
 
-  if (( total == 0 || raw < threshold )); then
-    return 0
-  fi
-
-  local raw_pct=$(( raw * 100 / total ))
-  local single_pct=$(( single * 100 / total ))
-  if (( raw_pct < 80 || single_pct < 80 )); then
+  if ! raw_incomplete_unit_manifest_is_unsafe "$total" "$raw" "$single"; then
     return 0
   fi
 
@@ -1047,6 +1029,44 @@ Override only when you intentionally want raw per-PX execution:
   REMEDIATION_ALLOW_RAW_UNITS=1
 EOF
   return 2
+}
+
+raw_incomplete_unit_manifest_stats() {
+  [[ -f "$UNITS_TSV" ]] || {
+    printf '0\t0\t0\n'
+    return 0
+  }
+  local total=0 raw=0 single=0 unit_id packets_csv _group _model _sev _rat
+  while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
+    [[ -z "${unit_id:-}" ]] && continue
+    # Count only units that still have incomplete packets. A raw historical
+    # manifest should not block resume when all of its packets are already done.
+    [[ -n "$(incomplete_packets_csv "$packets_csv")" ]] || continue
+    total=$((total + 1))
+    if [[ "$unit_id" =~ ^PX-[0-9]+$ ]]; then
+      raw=$((raw + 1))
+    fi
+    if [[ "$packets_csv" != *,* ]]; then
+      single=$((single + 1))
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+  printf '%d\t%d\t%d\n' "$total" "$raw" "$single"
+}
+
+raw_incomplete_unit_manifest_is_unsafe() {
+  local total="$1" raw="$2" single="$3"
+  local threshold="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
+  if (( total == 0 || raw < threshold )); then
+    return 1
+  fi
+
+  local raw_pct=$(( raw * 100 / total ))
+  local single_pct=$(( single * 100 / total ))
+  if (( raw_pct < 80 || single_pct < 80 )); then
+    return 1
+  fi
+
+  return 0
 }
 
 # Split workstreams in WORKSTREAMS_TSV before coordinator dispatch.
@@ -2768,10 +2788,29 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   # be slow or interrupted before the normal execution resume path is reached.
   build_implemented_packet_set
 
+  if [[ "$EXECUTE" == "1" && "$NO_CATALOG" != "1" && "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" ]]; then
+    _raw_stats="$(raw_incomplete_unit_manifest_stats)"
+    IFS=$'\t' read -r _raw_total _raw_units _raw_single <<< "$_raw_stats"
+    if raw_incomplete_unit_manifest_is_unsafe "$_raw_total" "$_raw_units" "$_raw_single"; then
+      printf '[catalog] existing implementation units are a raw incomplete PX manifest; running 00-cataloger (use --no-catalog to forbid this)\n'
+      CATALOG_WITH_CODEX=1
+    fi
+  fi
+
   if [[ "$CATALOG_WITH_CODEX" == "1" ]]; then
     if [[ "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" && -s "$WORKSTREAMS_TSV" ]]; then
-      printf '[resume] existing catalog detected; skipping 00-cataloger (use --force-catalog to rewrite)\n'
-      grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+      _raw_stats="$(raw_incomplete_unit_manifest_stats)"
+      IFS=$'\t' read -r _raw_total _raw_units _raw_single <<< "$_raw_stats"
+      if raw_incomplete_unit_manifest_is_unsafe "$_raw_total" "$_raw_units" "$_raw_single"; then
+        build_catalog_prompt
+        printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
+        if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
+          printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+        fi
+      else
+        printf '[resume] existing catalog detected; skipping 00-cataloger (use --force-catalog to rewrite)\n'
+        grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+      fi
     else
       build_catalog_prompt
       if grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null; then
