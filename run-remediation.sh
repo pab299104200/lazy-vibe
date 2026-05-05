@@ -42,6 +42,9 @@ SPLIT_RUN_UNITS=""
 REMEDIATION_MAX_RETRIES="${REMEDIATION_MAX_RETRIES:-2}"
 REMEDIATION_RAW_UNIT_ABORT_THRESHOLD="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
 REMEDIATION_ALLOW_RAW_UNITS="${REMEDIATION_ALLOW_RAW_UNITS:-0}"
+REMEDIATION_REWRITE_PACKETS="${REMEDIATION_REWRITE_PACKETS:-0}"
+REMEDIATION_REWRITE_WORKSTREAMS="${REMEDIATION_REWRITE_WORKSTREAMS:-0}"
+REMEDIATION_REWRITE_UNITS="${REMEDIATION_REWRITE_UNITS:-0}"
 NO_CATALOG=0
 
 usage() {
@@ -71,6 +74,11 @@ Environment:
                               Abort before execution when this many raw one-packet PX-* implementation
                               units remain after coordination/cataloging. Defaults to 50.
   REMEDIATION_ALLOW_RAW_UNITS 1 to allow execution of a large raw one-packet manifest. Defaults to 0.
+  REMEDIATION_REWRITE_PACKETS
+                              1 to overwrite existing packet files when reusing REMEDIATION_DIR. Defaults to 0.
+  REMEDIATION_REWRITE_WORKSTREAMS
+                              1 to overwrite existing workstream TSV when reusing REMEDIATION_DIR. Defaults to 0.
+  REMEDIATION_REWRITE_UNITS   1 to overwrite existing implementation units TSV when reusing REMEDIATION_DIR. Defaults to 0.
   REMEDIATION_AUTO_SPLIT      1 to auto-detect oversized units before execution. Defaults to 1.
   REMEDIATION_MAX_UNIT_PACKET_COUNT
                               Max packets per implementation unit before split preflight. Defaults to 3.
@@ -757,6 +765,9 @@ write_master_markdown() {
 write_packet() {
   local id="$1" severity="$2" group="$3" model_class="$4" source="$5" line="$6" title="$7"
   local packet="$REMEDIATION_DIR/packets/$id.md"
+  if [[ -f "$packet" && "$REMEDIATION_REWRITE_PACKETS" != "1" ]]; then
+    return 0
+  fi
   local kind
   kind="$(source_kind "$source")"
   local abs_source="$REPO_ROOT/$source"
@@ -806,9 +817,9 @@ write_packet() {
 }
 
 write_packets_and_workstreams() {
-  # Preserve an existing WORKSTREAMS_TSV when --no-normalize is set — it may
-  # contain normalized sub-groups from a prior run that we must not overwrite.
-  if [[ "$NO_NORMALIZE" != "1" || ! -f "$WORKSTREAMS_TSV" ]]; then
+  # Preserve existing run state by default. Reusing REMEDIATION_DIR means packet
+  # work logs, normalized workstreams, and cataloged units are durable state.
+  if [[ "$REMEDIATION_REWRITE_WORKSTREAMS" == "1" || ! -f "$WORKSTREAMS_TSV" ]]; then
     {
       printf 'group\tmodel_class\tpacket_count\tpackets\n'
       tail -n +2 "$PX_TSV" | awk -F '\t' '
@@ -1161,6 +1172,19 @@ declare -gA _IMPLEMENTED_PACKETS=()
 # Build _IMPLEMENTED_PACKETS from the checkpoint + UNITS_TSV + summary artifacts,
 # then stamp Status: complete into any packet file that is done but unstamped.
 # This makes completion state durable in the packet files themselves.
+packet_has_terminal_status() {
+  local pfile="$1"
+  [[ -f "$pfile" ]] || return 1
+  file_matches 'Status:[[:space:]]*`?(complete|fixed|split-into-child-units|deferred)' "$pfile"
+}
+
+stamp_packet_complete() {
+  local px="$1" source_label="$2" pfile="$REMEDIATION_DIR/packets/$px.md"
+  [[ -f "$pfile" ]] || return 1
+  packet_has_terminal_status "$pfile" && return 1
+  printf '\n- Status: `complete` (stamped by remediation runner from %s)\n' "$source_label" >> "$pfile"
+}
+
 build_implemented_packet_set() {
   _IMPLEMENTED_PACKETS=()
   [[ ! -f "$UNITS_TSV" ]] && return 0
@@ -1186,17 +1210,31 @@ build_implemented_packet_set() {
     done
   done < <(tail -n +2 "$UNITS_TSV")
 
+  # Recovery path for reused remediation directories whose unit manifest was
+  # accidentally regenerated. Summary artifacts are the durable implementation
+  # proof, so scan them directly and map any mentioned packets back to done.
+  local summary
+  shopt -s nullglob
+  for summary in "$REMEDIATION_DIR"/artifacts/*-summary.md; do
+    grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$summary" 2>/dev/null || continue
+    while IFS= read -r px; do
+      [[ -n "$px" ]] || continue
+      _IMPLEMENTED_PACKETS[$px]=1
+    done < <(grep -oE 'PX-[0-9]{4}' "$summary" | sort -u)
+  done
+  shopt -u nullglob
+
   # Stamp Status: complete into packet files that are done but unstamped.
   local stamped=0
   for px in "${!_IMPLEMENTED_PACKETS[@]}"; do
     local pfile="$REMEDIATION_DIR/packets/$px.md"
     [[ -f "$pfile" ]] || continue
-    # Skip if already has any status line (terminal or otherwise).
-    if file_matches 'Status:[[:space:]]*`?(complete|fixed|split-into-child-units|deferred|partial|blocked|not-started|pending|incomplete|revise)' "$pfile"; then
+    if packet_has_terminal_status "$pfile"; then
       continue
     fi
-    printf '\n- Status: `complete` (stamped by remediation runner from checkpoint)\n' >> "$pfile"
-    stamped=$(( stamped + 1 ))
+    if stamp_packet_complete "$px" "fixed implementation artifact"; then
+      stamped=$(( stamped + 1 ))
+    fi
   done
   if [[ "$stamped" -gt 0 ]]; then
     printf '[stamp] wrote Status: complete to %d packet files\n' "$stamped"
@@ -1209,7 +1247,7 @@ build_implemented_packet_set() {
 packet_is_done() {
   local pfile="$1" px="${2:-}"
   [[ -f "$pfile" ]] || return 1
-  if file_matches 'Status:[[:space:]]*`?(complete|fixed|split-into-child-units|deferred)' "$pfile"; then
+  if packet_has_terminal_status "$pfile"; then
     return 0
   fi
   if [[ -n "$px" && -v "_IMPLEMENTED_PACKETS[$px]" ]]; then
@@ -1934,6 +1972,7 @@ execute_planners() {
   local any=0
   while IFS=$'\t' read -r _uid _pcsv _grp mc _sev _rat; do
     [[ -z "${_uid:-}" ]] && continue
+    [[ -z "$(incomplete_packets_csv "$_pcsv")" ]] && continue
     if needs_planner "$mc"; then
       any=1
       break
@@ -1957,6 +1996,11 @@ execute_planners() {
     needs_planner "$model_class" || continue
     if ! unit_selected "$unit_id"; then continue; fi
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then continue; fi
+    if [[ -z "$(incomplete_packets_csv "$packets_csv")" ]]; then
+      printf '[resume] all packets complete for plan-%s; auto-checkpointing\n' "$unit_id"
+      grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "plan-$unit_id" >> "$CHECKPOINT_FILE"
+      continue
+    fi
     if grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
       local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
       if artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
@@ -2640,11 +2684,13 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   extract_findings
   write_master_markdown
   write_packets_and_workstreams
-  # Skip write_default_units when --no-catalog and UNITS_TSV already exists —
-  # the coordinator/workstream coordinators may have rewritten it with split
-  # child units, and regenerating would wipe them.
-  if [[ "$NO_CATALOG" != "1" || ! -f "$UNITS_TSV" ]]; then
+  # Preserve existing implementation units by default. A reused REMEDIATION_DIR
+  # may already contain cataloged/combined units; regenerating the raw PX list
+  # here would disconnect resume state from completed artifacts.
+  if [[ "$REMEDIATION_REWRITE_UNITS" == "1" || ! -f "$UNITS_TSV" ]]; then
     write_default_units
+  else
+    printf '[resume] preserving existing implementation units: %s\n' "$UNITS_TSV"
   fi
 
   if [[ "$CATALOG_WITH_CODEX" == "1" ]]; then
@@ -2663,6 +2709,7 @@ elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
   exit 2
 fi
 
+build_implemented_packet_set
 build_coordinator_prompt
 
 rebuild_workstream_coordinator_prompts
