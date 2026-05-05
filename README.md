@@ -264,6 +264,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `PRODUCT_PROFILE` | profile `product-profile.md` | Product profile injected into every agent prompt. |
 | `SHARED_PROMPT` | `shared.md` (or profile override) | Shared rules injected into every prompt. |
 | `IMPLEMENTER_AGENT` | `codex` | Implementation agent: `codex`, `claude`, `gemini`, or `runner`. |
+| `PLANNER_AGENT` | `COORDINATOR_AGENT`, then `IMPLEMENTER_AGENT` | Planner agent for `high-risk`/`complex` implementation units. |
 | `REVIEWER_AGENT` | — | Verification agent. Empty disables `--verify`. |
 | `MAX_PARALLEL` | `3` | Maximum implementation units running in parallel. |
 | `CONTINUE_ON_FAIL` | `0` | Set to `1` to continue past a failed unit instead of stopping. |
@@ -305,12 +306,15 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `logs/*.log` | Full agent logs. |
 | `04-final-remediation-review.md` | Final read-only signoff. |
 
+`03-implementation-units.tsv` is normalized before prompts are rebuilt. Each `unit_id` is an artifact identity and must appear once; when a coordinator emits repeated rows for the same unit, the runner merges the packet lists into one row before planning, implementation, and verification so agents do not overwrite the same prompt, log, summary, verifier, and checkpoint files.
+
 ### Model overrides (Codex)
 
 | Variable | Default |
 |---|---|
 | `CODEX_MODEL` | per-class defaults |
 | `CODEX_MODEL_COORDINATOR` | `gpt-5.5` |
+| `CODEX_MODEL_PLANNER` | `gpt-5.5` |
 | `CODEX_MODEL_HIGH_RISK` | `gpt-5.5` |
 | `CODEX_MODEL_VERIFIER` | `gpt-5.5` |
 | `CODEX_MODEL_REVIEWER` | `gpt-5.5` |
@@ -323,7 +327,7 @@ Reasoning effort follows the same pattern: `CODEX_REASONING_EFFORT` overrides al
 | Variable | Default |
 |---|---|
 | `CLAUDE_MODEL` | per-class defaults |
-| `CLAUDE_MODEL_HIGH` | `claude-opus-4-7` (coordinator, high-risk, verifier, reviewer) |
+| `CLAUDE_MODEL_HIGH` | `claude-opus-4-7` (coordinator, planner, high-risk, verifier, reviewer) |
 | `CLAUDE_MODEL_STANDARD` | `claude-sonnet-4-6` (standard, cataloger) |
 
 Effort follows the same pattern: `CLAUDE_EFFORT`, `CLAUDE_EFFORT_HIGH`, `CLAUDE_EFFORT_STANDARD`, `CLAUDE_EFFORT_CATALOGER`.
@@ -333,7 +337,7 @@ Effort follows the same pattern: `CLAUDE_EFFORT`, `CLAUDE_EFFORT_HIGH`, `CLAUDE_
 | Variable | Default |
 |---|---|
 | `GEMINI_MODEL` | per-class defaults |
-| `GEMINI_MODEL_HIGH` | `gemini-2.5-pro` (coordinator, high-risk, verifier, reviewer) |
+| `GEMINI_MODEL_HIGH` | `gemini-2.5-pro` (coordinator, planner, high-risk, verifier, reviewer) |
 | `GEMINI_MODEL_STANDARD` | `gemini-2.5-flash` (standard, cataloger) |
 
 ### Stall detection and auto-recovery

@@ -10,6 +10,7 @@ PROFILE="${PROFILE:-}"
 AUDIT_RUN=""
 REMEDIATION_DIR="${REMEDIATION_DIR:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
+MAX_WORKSTREAM_PACKETS="${MAX_WORKSTREAM_PACKETS:-80}"
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-0}"
 AUTO_REVISE="${REMEDIATION_AUTO_REVISE:-1}"
 MAX_REVISION_ROUNDS="${REMEDIATION_MAX_REVISION_ROUNDS:-2}"
@@ -28,11 +29,15 @@ MAX_UNIT_PACKET_COUNT="${REMEDIATION_MAX_UNIT_PACKET_COUNT:-3}"
 MAX_UNIT_PACKET_BYTES="${REMEDIATION_MAX_UNIT_PACKET_BYTES:-120000}"
 MAX_PACKET_BYTES="${REMEDIATION_MAX_PACKET_BYTES:-60000}"
 IMPLEMENTER_AGENT="${IMPLEMENTER_AGENT:-codex}"
+PLANNER_AGENT="${PLANNER_AGENT:-}"
 REVIEWER_AGENT="${REVIEWER_AGENT:-}"
+PLAN_MODEL_CLASSES="${PLAN_MODEL_CLASSES:-high-risk complex}"
 VERIFY_SCOPE="${REMEDIATION_VERIFY_SCOPE:-implementation}"
 AUTO_SPLIT_CHILD_UNITS=""
 SPLIT_CANDIDATE_UNITS=""
 SPLIT_SKIP_EXECUTION=0
+RECOORDINATE=0
+NO_NORMALIZE=0
 SPLIT_RUN_UNITS=""
 REMEDIATION_MAX_RETRIES="${REMEDIATION_MAX_RETRIES:-2}"
 NO_CATALOG=0
@@ -49,6 +54,9 @@ Environment:
   PROFILES_DIR                Directory containing named profile subdirectories. Defaults to profiles/ alongside the script.
   PRODUCT_PROFILE             Optional product profile markdown. Set automatically when PROFILE is used.
   MAX_PARALLEL                Max workstreams per wave. Defaults to 3.
+  MAX_WORKSTREAM_PACKETS      Max packets per workstream coordinator. Oversized workstreams are
+                              split by source kind, then source file stem, then numerically.
+                              Defaults to 80.
   CONTINUE_ON_FAIL            1 to continue after a failed workstream. Defaults to 0.
   REMEDIATION_AUTO_REVISE     1 to rerun verifier-revised units before final review. Defaults to 1.
   REMEDIATION_MAX_REVISION_ROUNDS
@@ -68,6 +76,12 @@ Environment:
                               Use runner to hand off to IMPLEMENTER_RUNNER instead.
   IMPLEMENTER_RUNNER          Custom implementer wrapper (overrides built-in agent).
                               Receives: prompt_file remediation_dir workstream_id.
+  PLANNER_AGENT               Built-in planner agent for high-risk/complex units. Defaults to
+                              COORDINATOR_AGENT, then IMPLEMENTER_AGENT. Planners read code
+                              and write a design doc; implementers then execute against the design.
+  PLANNER_RUNNER              Custom planner wrapper (overrides built-in agent).
+  PLAN_MODEL_CLASSES          Space-separated model classes that run through the planner phase
+                              before implementation. Defaults to "high-risk complex".
   REVIEWER_AGENT              Built-in reviewer: codex, claude, or gemini.
                               Defaults to IMPLEMENTER_AGENT when not set; a warning is printed when
                               same-model review is used since it reduces independence.
@@ -83,12 +97,14 @@ Environment:
 Codex agent (IMPLEMENTER_AGENT=codex or REVIEWER_AGENT=codex):
   CODEX_MODEL                 Override model for all classes.
   CODEX_MODEL_COORDINATOR     Defaults to gpt-5.5.
+  CODEX_MODEL_PLANNER         Defaults to gpt-5.5.
   CODEX_MODEL_HIGH_RISK       Defaults to gpt-5.5.
   CODEX_MODEL_STANDARD        Defaults to gpt-5.4.
   CODEX_MODEL_VERIFIER        Defaults to gpt-5.5.
   CODEX_MODEL_REVIEWER        Defaults to gpt-5.5.
   CODEX_REASONING_EFFORT      Override reasoning effort for all classes.
   CODEX_REASONING_COORDINATOR Defaults to high.
+  CODEX_REASONING_PLANNER     Defaults to high.
   CODEX_REASONING_HIGH_RISK   Defaults to high.
   CODEX_REASONING_STANDARD    Defaults to medium.
   CODEX_REASONING_VERIFIER    Defaults to high.
@@ -98,8 +114,8 @@ Codex agent (IMPLEMENTER_AGENT=codex or REVIEWER_AGENT=codex):
 
 Claude agent (IMPLEMENTER_AGENT=claude or REVIEWER_AGENT=claude):
   Model is chosen automatically from the packet's model class:
-    coordinator / high-risk / verifier / reviewer → claude-opus-4-7
-    standard / cataloger                          → claude-sonnet-4-6
+    coordinator / planner / high-risk / verifier / reviewer → claude-opus-4-7
+    standard / cataloger                                    → claude-sonnet-4-6
   CLAUDE_MODEL                Override model for all classes.
   CLAUDE_MODEL_HIGH           Model for high-effort classes. Defaults to claude-opus-4-7.
   CLAUDE_MODEL_STANDARD       Model for standard/cataloger classes. Defaults to claude-sonnet-4-6.
@@ -111,8 +127,8 @@ Claude agent (IMPLEMENTER_AGENT=claude or REVIEWER_AGENT=claude):
 
 Gemini agent (IMPLEMENTER_AGENT=gemini or REVIEWER_AGENT=gemini):
   Model is chosen automatically from the packet's model class:
-    coordinator / high-risk / verifier / reviewer → gemini-2.5-pro
-    standard / cataloger                          → gemini-2.5-flash
+    coordinator / planner / high-risk / verifier / reviewer → gemini-2.5-pro
+    standard / cataloger                                    → gemini-2.5-flash
   GEMINI_MODEL                Override model for all classes.
   GEMINI_MODEL_HIGH           Model for high-effort classes. Defaults to gemini-2.5-pro.
   GEMINI_MODEL_STANDARD       Model for standard/cataloger. Defaults to gemini-2.5-flash.
@@ -126,6 +142,8 @@ Gemini agent (IMPLEMENTER_AGENT=gemini or REVIEWER_AGENT=gemini):
 Default behavior builds the master Px list, work packets, grouping, and prompts only.
 Use --execute to run the coordinator and workstream agents. The cataloger runs automatically with --execute unless --no-catalog is set.
 Use --no-catalog to skip the cataloger when --execute is set (useful when packets were hand-edited or the cataloger already ran).
+Use --recoordinate to strip coordinate-* checkpoint entries and re-run workstream coordinators against incomplete packets only. Combine with --no-catalog --no-auto-split --execute to resume from open packets without touching the catalog or splitting logic.
+Use --no-normalize to skip workstream source-kind splitting on resume runs where normalization has already been done.
 Use --catalog-with-codex to run the cataloger explicitly without --execute (plan-only mode with catalog refinement).
 Use --verify to run read-only verifier agents after workstream implementation.
 Use --verify-only to run only verifier and final-review agents against an existing remediation directory.
@@ -163,6 +181,14 @@ while (($#)); do
     --split-incomplete)
       SPLIT_INCOMPLETE=1
       REVISE_EXISTING=1
+      shift
+      ;;
+    --recoordinate)
+      RECOORDINATE=1
+      shift
+      ;;
+    --no-normalize)
+      NO_NORMALIZE=1
       shift
       ;;
     --no-auto-split)
@@ -494,6 +520,7 @@ select_model() {
   fi
   case "$class" in
     coordinator) printf '%s\n' "${CODEX_MODEL_COORDINATOR:-gpt-5.5}" ;;
+    planner) printf '%s\n' "${CODEX_MODEL_PLANNER:-gpt-5.5}" ;;
     verifier) printf '%s\n' "${CODEX_MODEL_VERIFIER:-gpt-5.5}" ;;
     reviewer) printf '%s\n' "${CODEX_MODEL_REVIEWER:-gpt-5.5}" ;;
     high-risk) printf '%s\n' "${CODEX_MODEL_HIGH_RISK:-gpt-5.5}" ;;
@@ -509,6 +536,7 @@ select_reasoning() {
   fi
   case "$class" in
     coordinator) printf '%s\n' "${CODEX_REASONING_COORDINATOR:-high}" ;;
+    planner) printf '%s\n' "${CODEX_REASONING_PLANNER:-high}" ;;
     verifier) printf '%s\n' "${CODEX_REASONING_VERIFIER:-high}" ;;
     reviewer) printf '%s\n' "${CODEX_REASONING_REVIEWER:-high}" ;;
     high-risk) printf '%s\n' "${CODEX_REASONING_HIGH_RISK:-high}" ;;
@@ -516,13 +544,13 @@ select_reasoning() {
   esac
 }
 
-# coordinator/high-risk/verifier/reviewer → opus; standard/cataloger → sonnet.
+# coordinator/planner/high-risk/verifier/reviewer → opus; standard/cataloger → sonnet.
 # Packet model_class drives this automatically; no manual per-job override needed.
 select_claude_model() {
   local class="$1"
   [[ -n "${CLAUDE_MODEL:-}" ]] && { printf '%s' "$CLAUDE_MODEL"; return; }
   case "$class" in
-    coordinator|high-risk|verifier|reviewer) printf '%s' "${CLAUDE_MODEL_HIGH:-claude-opus-4-7}" ;;
+    coordinator|planner|high-risk|verifier|reviewer) printf '%s' "${CLAUDE_MODEL_HIGH:-claude-opus-4-7}" ;;
     *) printf '%s' "${CLAUDE_MODEL_STANDARD:-claude-sonnet-4-6}" ;;
   esac
 }
@@ -532,17 +560,17 @@ select_claude_effort() {
   [[ -n "${CLAUDE_EFFORT:-}" ]] && { printf '%s' "$CLAUDE_EFFORT"; return; }
   case "$class" in
     cataloger) printf '%s' "${CLAUDE_EFFORT_CATALOGER:-low}" ;;
-    coordinator|high-risk|verifier|reviewer) printf '%s' "${CLAUDE_EFFORT_HIGH:-high}" ;;
+    coordinator|planner|high-risk|verifier|reviewer) printf '%s' "${CLAUDE_EFFORT_HIGH:-high}" ;;
     *) printf '%s' "${CLAUDE_EFFORT_STANDARD:-medium}" ;;
   esac
 }
 
-# coordinator/high-risk/verifier/reviewer → pro; standard/cataloger → flash.
+# coordinator/planner/high-risk/verifier/reviewer → pro; standard/cataloger → flash.
 select_gemini_model() {
   local class="$1"
   [[ -n "${GEMINI_MODEL:-}" ]] && { printf '%s' "$GEMINI_MODEL"; return; }
   case "$class" in
-    coordinator|high-risk|verifier|reviewer) printf '%s' "${GEMINI_MODEL_HIGH:-gemini-2.5-pro}" ;;
+    coordinator|planner|high-risk|verifier|reviewer) printf '%s' "${GEMINI_MODEL_HIGH:-gemini-2.5-pro}" ;;
     *) printf '%s' "${GEMINI_MODEL_STANDARD:-gemini-2.5-flash}" ;;
   esac
 }
@@ -755,22 +783,26 @@ write_packet() {
 }
 
 write_packets_and_workstreams() {
-  {
-    printf 'group\tmodel_class\tpacket_count\tpackets\n'
-    tail -n +2 "$PX_TSV" | awk -F '\t' '
-      {
-        key = $3 "\t" $4
-        count[key] += 1
-        if (packets[key] == "") packets[key] = $1
-        else packets[key] = packets[key] "," $1
-      }
-      END {
-        for (key in count) {
-          print key "\t" count[key] "\t" packets[key]
+  # Preserve an existing WORKSTREAMS_TSV when --no-normalize is set — it may
+  # contain normalized sub-groups from a prior run that we must not overwrite.
+  if [[ "$NO_NORMALIZE" != "1" || ! -f "$WORKSTREAMS_TSV" ]]; then
+    {
+      printf 'group\tmodel_class\tpacket_count\tpackets\n'
+      tail -n +2 "$PX_TSV" | awk -F '\t' '
+        {
+          key = $3 "\t" $4
+          count[key] += 1
+          if (packets[key] == "") packets[key] = $1
+          else packets[key] = packets[key] "," $1
         }
-      }
-    ' | sort
-  } > "$WORKSTREAMS_TSV"
+        END {
+          for (key in count) {
+            print key "\t" count[key] "\t" packets[key]
+          }
+        }
+      ' | sort
+    } > "$WORKSTREAMS_TSV"
+  fi
 
   tail -n +2 "$PX_TSV" | while IFS=$'\t' read -r id severity group model_class source line title _packet; do
     write_packet "$id" "$severity" "$group" "$model_class" "$source" "$line" "$title"
@@ -787,6 +819,83 @@ write_default_units() {
   } > "$UNITS_TSV"
 }
 
+# Merge duplicate unit rows after the manifest has been normalized. A unit ID is
+# the artifact/log/checkpoint identity, so duplicate rows would make concurrent
+# agents overwrite the same prompt, log, summary, verifier artifact, and
+# checkpoint entry.
+merge_duplicate_units_tsv() {
+  [[ ! -f "$UNITS_TSV" ]] && return 0
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    BEGIN {
+      FS = OFS = "\t"
+    }
+    FNR == 1 {
+      print "unit_id", "packets", "group", "model_class", "severity", "rationale"
+      next
+    }
+    NF == 0 || $1 == "" {
+      next
+    }
+    {
+      unit = $1
+      if (!(unit in seen_unit)) {
+        order[++order_count] = unit
+        seen_unit[unit] = 1
+        group[unit] = $3
+        model_class[unit] = $4
+        severity[unit] = $5
+        rationale[unit] = $6
+      } else {
+        duplicate_count += 1
+        if (group[unit] != "" && $3 != "" && group[unit] != $3) {
+          printf "[normalize-units] duplicate unit_id=%s has conflicting group values: %s vs %s; keeping %s\n", unit, group[unit], $3, group[unit] > "/dev/stderr"
+        }
+        if (model_class[unit] != "" && $4 != "" && model_class[unit] != $4) {
+          printf "[normalize-units] duplicate unit_id=%s has conflicting model_class values: %s vs %s; keeping %s\n", unit, model_class[unit], $4, model_class[unit] > "/dev/stderr"
+        }
+        if (severity[unit] == "" && $5 != "") {
+          severity[unit] = $5
+        }
+        if (rationale[unit] == "" && $6 != "") {
+          rationale[unit] = $6
+        } else if ($6 != "" && index(rationale[unit], $6) == 0) {
+          rationale[unit] = rationale[unit] " | " $6
+        }
+      }
+
+      packet_count = split($2, packet_ids, ",")
+      for (i = 1; i <= packet_count; i += 1) {
+        packet = packet_ids[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", packet)
+        if (packet == "") {
+          continue
+        }
+        packet_key = unit SUBSEP packet
+        if (!(packet_key in seen_packet)) {
+          seen_packet[packet_key] = 1
+          if (packets[unit] == "") {
+            packets[unit] = packet
+          } else {
+            packets[unit] = packets[unit] "," packet
+          }
+        }
+      }
+    }
+    END {
+      for (i = 1; i <= order_count; i += 1) {
+        unit = order[i]
+        print unit, packets[unit], group[unit], model_class[unit], severity[unit], rationale[unit]
+      }
+      if (duplicate_count > 0) {
+        printf "[normalize-units] merged %d duplicate unit row(s) by unit_id\n", duplicate_count > "/dev/stderr"
+      }
+    }
+  ' "$UNITS_TSV" > "$tmp"
+  mv "$tmp" "$UNITS_TSV"
+}
+
 # Normalize UNITS_TSV to canonical column order: unit_id packets group model_class severity rationale.
 # The coordinator (especially claude) may write a different column order; this makes it uniform.
 normalize_units_tsv() {
@@ -797,6 +906,7 @@ normalize_units_tsv() {
   case "$col2" in
     packets|packets_csv)
       # Already canonical — ensure header matches expected name
+      merge_duplicate_units_tsv
       return 0
       ;;
     group)
@@ -809,6 +919,7 @@ normalize_units_tsv() {
       } > "$tmp"
       mv "$tmp" "$UNITS_TSV"
       printf '[normalize-units] converted old format (group col2) to canonical format\n'
+      merge_duplicate_units_tsv
       ;;
     packet_id)
       # Claude coordinator format: unit_id packet_id workstream_id title model_class estimated_tokens status
@@ -820,6 +931,7 @@ normalize_units_tsv() {
       } > "$tmp"
       mv "$tmp" "$UNITS_TSV"
       printf '[normalize-units] converted claude coordinator format (packet_id col2) to canonical format\n'
+      merge_duplicate_units_tsv
       ;;
     workstream|workstream_id)
       # Format: unit_id workstream[_id] model_class packet_count packets rationale
@@ -831,11 +943,233 @@ normalize_units_tsv() {
       } > "$tmp"
       mv "$tmp" "$UNITS_TSV"
       printf '[normalize-units] converted workstream format (col2=%s) to canonical format\n' "$col2"
+      merge_duplicate_units_tsv
       ;;
     *)
       printf '[normalize-units] unrecognized UNITS_TSV format (col2=%s), leaving as-is\n' "$col2" >&2
       ;;
   esac
+}
+
+# Split workstreams in WORKSTREAMS_TSV before coordinator dispatch.
+# Level 1 (always): split by Source kind when multiple kinds exist in a workstream.
+# Level 2: split by source file stem when a kind-group exceeds MAX_WORKSTREAM_PACKETS.
+# Level 3: numeric batching when a file-group still exceeds MAX_WORKSTREAM_PACKETS.
+normalize_workstream_sizes() {
+  local max="${MAX_WORKSTREAM_PACKETS:-80}"
+  local packets_dir="$REMEDIATION_DIR/packets"
+
+  local tmp
+  tmp="$(mktemp)"
+  head -1 "$WORKSTREAMS_TSV" > "$tmp"
+  local any_split=0
+
+  while IFS=$'\t' read -r f1 f2 f3 f4 _rest; do
+    local group model_class packets_csv
+    if [[ "$f1" == WS-* ]]; then
+      group="$f1"; model_class="$f3"; packets_csv="$f4"
+    else
+      group="$f1"; model_class="$f2"; packets_csv="$f4"
+    fi
+    [[ -z "${group:-}" ]] && continue
+
+    # Level 1: always group by Source kind.
+    # If all packets share the same kind (or have no kind), keep the group as-is.
+    local -A kind_map=()
+    local -a all_pxs
+    IFS=',' read -ra all_pxs <<< "$packets_csv"
+    for px in "${all_pxs[@]}"; do
+      local kind
+      kind=$(grep "^- Source kind:" "$packets_dir/$px.md" 2>/dev/null | head -1 | grep -oP '`[^`]+`' | tr -d '`')
+      [[ -z "$kind" ]] && kind="other"
+      kind="${kind// /-}"
+      kind_map[$kind]="${kind_map[$kind]:+${kind_map[$kind]},}$px"
+    done
+
+    local num_kinds="${#kind_map[@]}"
+
+    if (( num_kinds <= 1 )); then
+      # Single source kind — keep as one group, still apply size cap below.
+      local count="${#all_pxs[@]}"
+      if (( count <= max )); then
+        printf '%s\t%s\t%d\t%s\n' "$group" "$model_class" "$count" "$packets_csv" >> "$tmp"
+      else
+        # Level 3 directly: numeric batching
+        printf '[normalize-workstreams] %s: %d packets, batching numerically\n' "$group" "$count"
+        any_split=1
+        local -a batch=(); local bn=1
+        for px in "${all_pxs[@]}"; do
+          batch+=("$px")
+          if (( ${#batch[@]} >= max )); then
+            local bc; printf -v bc '%s,' "${batch[@]}"; bc="${bc%,}"
+            printf '%s\t%s\t%d\t%s\n' "${group}-${bn}" "$model_class" "${#batch[@]}" "$bc" >> "$tmp"
+            bn=$(( bn + 1 )); batch=()
+          fi
+        done
+        if (( ${#batch[@]} > 0 )); then
+          local bc; printf -v bc '%s,' "${batch[@]}"; bc="${bc%,}"
+          printf '%s\t%s\t%d\t%s\n' "${group}-${bn}" "$model_class" "${#batch[@]}" "$bc" >> "$tmp"
+        fi
+      fi
+      continue
+    fi
+
+    # Multiple source kinds — split into sub-groups.
+    printf '[normalize-workstreams] %s: splitting %d packets into %d source-kind groups\n' \
+      "$group" "${#all_pxs[@]}" "$num_kinds"
+    any_split=1
+
+    for kind in "${!kind_map[@]}"; do
+      local sg="${group}-${kind}"
+      local sg_csv="${kind_map[$kind]}"
+      local -a sg_pxs
+      IFS=',' read -ra sg_pxs <<< "$sg_csv"
+      local sg_count="${#sg_pxs[@]}"
+
+      if (( sg_count <= max )); then
+        printf '%s\t%s\t%d\t%s\n' "$sg" "$model_class" "$sg_count" "$sg_csv" >> "$tmp"
+        continue
+      fi
+
+      printf '[normalize-workstreams] %s: %d packets, splitting by source file\n' "$sg" "$sg_count"
+
+      # Level 2: group by source file stem
+      local -A stem_map=()
+      for px in "${sg_pxs[@]}"; do
+        local src stem
+        src=$(grep "^- Source:" "$packets_dir/$px.md" 2>/dev/null | head -1 | grep -oP '`[^`]+`' | tr -d '`')
+        stem=$(basename "${src%%:*}" 2>/dev/null | sed 's/\.[^.]*$//')
+        [[ -z "$stem" ]] && stem="other"
+        stem_map[$stem]="${stem_map[$stem]:+${stem_map[$stem]},}$px"
+      done
+
+      for stem in "${!stem_map[@]}"; do
+        local stg="${sg}-${stem}"
+        local stg_csv="${stem_map[$stem]}"
+        local -a stg_pxs
+        IFS=',' read -ra stg_pxs <<< "$stg_csv"
+        local stg_count="${#stg_pxs[@]}"
+
+        if (( stg_count <= max )); then
+          printf '%s\t%s\t%d\t%s\n' "$stg" "$model_class" "$stg_count" "$stg_csv" >> "$tmp"
+        else
+          # Level 3: numeric batching
+          printf '[normalize-workstreams] %s: %d packets, batching numerically\n' "$stg" "$stg_count"
+          local -a batch=(); local bn=1
+          for px in "${stg_pxs[@]}"; do
+            batch+=("$px")
+            if (( ${#batch[@]} >= max )); then
+              local bc; printf -v bc '%s,' "${batch[@]}"; bc="${bc%,}"
+              printf '%s\t%s\t%d\t%s\n' "${stg}-${bn}" "$model_class" "${#batch[@]}" "$bc" >> "$tmp"
+              bn=$(( bn + 1 )); batch=()
+            fi
+          done
+          if (( ${#batch[@]} > 0 )); then
+            local bc; printf -v bc '%s,' "${batch[@]}"; bc="${bc%,}"
+            printf '%s\t%s\t%d\t%s\n' "${stg}-${bn}" "$model_class" "${#batch[@]}" "$bc" >> "$tmp"
+          fi
+        fi
+      done
+    done
+  done < <(tail -n +2 "$WORKSTREAMS_TSV")
+
+  mv "$tmp" "$WORKSTREAMS_TSV"
+  if [[ "$any_split" -eq 1 ]]; then
+    printf '[normalize-workstreams] done: %d workstreams\n' "$(tail -n +2 "$WORKSTREAMS_TSV" | grep -c .)"
+  fi
+}
+
+# Associative array populated by build_implemented_packet_set.
+# Maps packet ID -> 1 for packets whose implementation unit was checkpointed fixed.
+# Declared here so packet_is_done can reference it without a separate argument.
+declare -gA _IMPLEMENTED_PACKETS=()
+
+# Build _IMPLEMENTED_PACKETS from the checkpoint + UNITS_TSV + summary artifacts,
+# then stamp Status: complete into any packet file that is done but unstamped.
+# This makes completion state durable in the packet files themselves.
+build_implemented_packet_set() {
+  _IMPLEMENTED_PACKETS=()
+  [[ ! -f "$UNITS_TSV" ]] && return 0
+  while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
+    [[ -z "${unit_id:-}" ]] && continue
+    grep -qxF "implement-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || continue
+    local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+    grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$summary" 2>/dev/null || continue
+    local IFS=,
+    local px
+    for px in $packets_csv; do
+      local pfile="$REMEDIATION_DIR/packets/$px.md"
+      if [[ -f "$pfile" ]] && file_matches 'Status:[[:space:]]*`?(complete|fixed|split-into-child-units|deferred)' "$pfile"; then
+        _IMPLEMENTED_PACKETS[$px]=1
+        continue
+      fi
+      if ! grep -qF "$px" "$summary" 2>/dev/null; then
+        printf '[resume] checkpoint implement-%s has fixed summary but does not mention packet %s; leaving packet incomplete\n' \
+          "$unit_id" "$px" >&2
+        continue
+      fi
+      _IMPLEMENTED_PACKETS[$px]=1
+    done
+  done < <(tail -n +2 "$UNITS_TSV")
+
+  # Stamp Status: complete into packet files that are done but unstamped.
+  local stamped=0
+  for px in "${!_IMPLEMENTED_PACKETS[@]}"; do
+    local pfile="$REMEDIATION_DIR/packets/$px.md"
+    [[ -f "$pfile" ]] || continue
+    # Skip if already has any status line (terminal or otherwise).
+    if file_matches 'Status:[[:space:]]*`?(complete|fixed|split-into-child-units|deferred|partial|blocked|not-started|pending|incomplete|revise)' "$pfile"; then
+      continue
+    fi
+    printf '\n- Status: `complete` (stamped by remediation runner from checkpoint)\n' >> "$pfile"
+    stamped=$(( stamped + 1 ))
+  done
+  if [[ "$stamped" -gt 0 ]]; then
+    printf '[stamp] wrote Status: complete to %d packet files\n' "$stamped"
+  fi
+}
+
+# Returns 0 (true) if a packet is done. Checks in order:
+#   1. Explicit Status: complete/fixed/split-into-child-units/deferred in the packet file.
+#   2. Packet belongs to a unit that was checkpointed with IMPLEMENTATION_RESULT: fixed.
+packet_is_done() {
+  local pfile="$1" px="${2:-}"
+  [[ -f "$pfile" ]] || return 1
+  if file_matches 'Status:[[:space:]]*`?(complete|fixed|split-into-child-units|deferred)' "$pfile"; then
+    return 0
+  fi
+  if [[ -n "$px" && -v "_IMPLEMENTED_PACKETS[$px]" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Given a comma-separated list of packet IDs, returns a CSV of only those
+# packets that are not yet complete. Empty output means all packets are done.
+incomplete_packets_csv() {
+  local packets_csv="$1"
+  local -a result=()
+  local IFS=,
+  local px
+  for px in $packets_csv; do
+    packet_is_done "$REMEDIATION_DIR/packets/$px.md" "$px" || result+=("$px")
+  done
+  if (( ${#result[@]} > 0 )); then
+    local IFS=,
+    printf '%s' "${result[*]}"
+  fi
+}
+
+artifact_mentions_all_packets() {
+  local artifact="$1" packets_csv="$2"
+  [[ -s "$artifact" ]] || return 1
+  local IFS=,
+  local px
+  for px in $packets_csv; do
+    [[ -z "${px:-}" ]] && continue
+    grep -qF "$px" "$artifact" 2>/dev/null || return 1
+  done
+  return 0
 }
 
 packet_paths_for_ids() {
@@ -878,6 +1212,8 @@ $(product_profile_block)
 
 Review the master Px list and workstream grouping.
 
+Manifest invariant: each \`unit_id\` in \`$UNITS_TSV\` must appear exactly once. If multiple packets belong to the same implementation unit, put all packet IDs in that row's comma-separated \`packets\` field. Never create repeated rows with the same \`unit_id\`; repeated IDs cause prompt, log, summary, verifier, and checkpoint artifact collisions.
+
 Write \`$REMEDIATION_DIR/03-coordinator-plan.md\` with:
 
 1. Ordered workstream waves, preserving parallel-safe grouping.
@@ -893,8 +1229,21 @@ PROMPT
 build_workstream_coordinator_prompt() {
   local group="$1" model_class="$2" packets_csv="$3"
   local prompt="$REMEDIATION_DIR/prompts/coordinate-$group.md"
+
+  # Only show the coordinator packets that haven't been completed yet.
+  local incomplete_csv
+  incomplete_csv="$(incomplete_packets_csv "$packets_csv")"
+  if [[ -z "$incomplete_csv" ]]; then
+    # All packets complete — write a stub prompt so the file exists but mark it skip.
+    printf '# Workstream Coordinator: %s\n\nAll packets complete — no coordination required.\n' "$group" > "$prompt"
+    return 0
+  fi
+
   local packet_list
-  packet_list="$(packet_paths_for_ids "$packets_csv")"
+  packet_list="$(packet_paths_for_ids "$incomplete_csv")"
+  local total_count incomplete_count
+  total_count=$(tr ',' '\n' <<< "$packets_csv" | grep -c .)
+  incomplete_count=$(tr ',' '\n' <<< "$incomplete_csv" | grep -c .)
 
   cat > "$prompt" <<PROMPT
 # Workstream Coordinator: $group
@@ -906,7 +1255,9 @@ build_workstream_coordinator_prompt() {
 - Remediation run: $REMEDIATION_DIR
 - Workstream: $group
 - Model class: $model_class
-- Packet IDs: $packets_csv
+- Total packets: $total_count
+- Incomplete packets: $incomplete_count (packets with Status: complete/fixed/split-into-child-units/deferred are excluded)
+- Incomplete packet IDs: $incomplete_csv
 - Implementation units manifest: $UNITS_TSV
 - Product profile: ${PRODUCT_PROFILE:-"(none)"}
 
@@ -918,7 +1269,7 @@ $(cat "$SHARED_PROMPT")
 
 $(product_profile_block)
 
-## Assigned Packets
+## Incomplete Packets (to coordinate)
 
 \`\`\`text
 $packet_list
@@ -928,7 +1279,11 @@ $packet_list
 
 **ROLE CONSTRAINT — READ THIS FIRST**: You are a WORKSTREAM COORDINATOR, not an implementer. You must NOT write any product source code, commit changes, run tests, or modify any files outside the remediation directory ($REMEDIATION_DIR). Shared rules 1–9 above describe what IMPLEMENTERS must do; they do not apply to your coordination role. Rule 10 is the operative rule for you: coordination is planning only. Allowed writes: $UNITS_TSV, $REMEDIATION_DIR/artifacts/coordinate-$group.md, and packet work-log fields. Nothing else.
 
-Review the assigned packets and \`$UNITS_TSV\`. Decide whether the default one-packet-per-unit split is correct.
+**Packet status**: Only incomplete packets are listed above. Packets with \`Status: complete\`, \`fixed\`, \`split-into-child-units\`, or \`deferred\` have already been handled and must not be reassigned or given new unit IDs. When updating \`$UNITS_TSV\`, preserve the existing unit IDs for completed packets — add or modify only units for the incomplete packets listed above.
+
+Review the incomplete packets and \`$UNITS_TSV\`. Decide whether the default one-packet-per-unit split is correct.
+
+Manifest invariant: each \`unit_id\` in \`$UNITS_TSV\` must appear exactly once. If multiple packets belong to the same implementation unit, merge them into the comma-separated \`packets\` field of a single row. Never add repeated rows with the same \`unit_id\`; repeated IDs collide on the same prompt, log, summary, verifier, and checkpoint artifact paths.
 
 You may update only:
 
@@ -943,6 +1298,8 @@ Write \`$REMEDIATION_DIR/artifacts/coordinate-$group.md\` with:
 3. Which packets can run in parallel and which must be serialized.
 4. Required docs and verification gates per implementation unit.
 5. Context-budget risks for any unit that may exceed 200000 tokens.
+
+Model class guidance for units you create or update: \`high-risk\` for security, tenant isolation, protocol, SCIM/lifecycle, IGA, migration, runtime quality; \`complex\` for multi-file architectural changes that need a design phase before implementation; \`standard\` for narrow UI/docs/test/cleanup work. High-risk and complex units run through a planner before the implementer.
 
 If the default unit split is acceptable, state that and leave \`$UNITS_TSV\` unchanged.
 PROMPT
@@ -1013,7 +1370,7 @@ Catalog requirements:
 - Group mixed P0/P1/P2 packets together when they belong to the same implementation surface and can be fixed by one agent.
 - Split implementation units that would exceed roughly 200k tokens or create file ownership conflicts.
 - Default to one implementation unit per packet for high-risk P0s unless the same code/doc/test change clearly closes several packets together.
-- Select \`high-risk\` model class for security, tenant isolation, protocol, SCIM/lifecycle, IGA execution, migration runtime correctness, and runtime quality gates. Use \`standard\` for narrow UI/docs/test-harness/product cleanup.
+- Select model class per unit: \`high-risk\` for security, tenant isolation, protocol, SCIM/lifecycle, IGA execution, migration runtime correctness, and runtime quality gates; \`complex\` for multi-file architectural changes that require design before implementation (cross-cutting state machines, permission model restructuring, API contract changes); \`standard\` for narrow UI/docs/test-harness/product cleanup. High-risk and complex units run through a planner agent that writes an implementation design before the implementer runs.
 - Every packet must include required docs updates for the documentation locations named by the product profile. If the repo uses \`docs/architecture\`, \`docs/functional\`, or \`docs/manual\`, update the relevant layer when behavior or customer/operator workflows change.
 - Every packet must include verification gates.
 - Every packet must include a \`## Work Log\` section initialized to \`not-started\`.
@@ -1186,6 +1543,19 @@ build_workstream_prompt() {
   local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
   local packet_list
   packet_list="$(packet_paths_for_ids "$packets_csv")"
+  local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+  local design_block=""
+  if [[ -f "$design_doc" ]]; then
+    design_block=$(cat <<DESIGN
+
+## Implementation Design
+
+A planner has already analyzed the packets and code for this unit and produced a precise implementation design. **Read the design document first and treat it as your primary brief.** Execute the specified changes rather than re-deriving the approach from scratch. If you discover the design is incorrect once you read the actual code, apply the necessary correction and note the deviation in your summary — do not redesign from scratch.
+
+- Design: \`$design_doc\`
+DESIGN
+)
+  fi
   local revision_context=""
   if [[ "$REVISE_EXISTING" == "1" ]]; then
     revision_context=$(cat <<REVISION
@@ -1232,23 +1602,28 @@ $(product_profile_block)
 \`\`\`text
 $packet_list
 \`\`\`
+$design_block
 $revision_context
 
 ## Implementation Instructions
 
-Read only the assigned packets first. Then inspect the minimal code, tests, and docs required to fix them.
+Read only the assigned packets first (and the design document above if one was provided). Then inspect the minimal code, tests, and docs required to fix them.
 
 Packets may originate from domain, cross-cutting, spec-addition, runtime, maturity/customer-proof, adversarial, or final-decision audit sources. Treat all source kinds as first-class implementation contracts. For spec-addition or product-profile packets, do not close the packet with docs-only evidence unless the packet explicitly says the missing work is documentation truth; implement the missing code path, validation, control, operator/customer workflow, protocol behavior, integration behavior, or test harness required by the spec/profile.
 
 Own this implementation unit end to end:
 
 1. Implement the remediation for the assigned packets.
-2. Update each packet's \`## Work Log\`.
+2. Update each packet's \`## Work Log\` with a machine-readable status line as the final entry:
+   - \`- Status: \`complete\`\` — packet fully implemented, tests pass, docs updated.
+   - \`- Status: \`partial\`\` — implementation started but not finished; describe what remains.
+   - \`- Status: \`blocked\`\` — cannot proceed; describe the blocker.
+   This status is used by the coordinator on re-runs to skip already-completed packets. Do not leave it as \`not-started\`.
 3. Update the product documentation locations named by the product profile as required.
 4. Run the strongest relevant verification available in the repo for the changed surface.
 5. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, remaining risks, and any packets left incomplete.
 
-Keep the context window under 200k tokens. If these packets are too broad, complete the highest-severity coherent subset and mark the rest incomplete in the packet logs.
+Keep the context window under 200k tokens. If these packets are too broad, complete the highest-severity coherent subset, mark completed packets \`Status: \`complete\`\`, and mark the rest \`Status: \`partial\`\` in the packet logs.
 
 For revision passes, do not stop at restating verifier findings. Resolve them. The summary must include:
 
@@ -1308,12 +1683,13 @@ When scope is \`launch\`, require full launch evidence and block on missing live
 This verifier is intentionally independent from the implementation workstream and may run on a different provider/model through \`VERIFICATION_RUNNER\`. Use strict evidence discipline:
 
 1. Verify every assigned P0/P1 packet, and sample P2 packets when present.
-2. Check that each packet's work log truthfully states files changed, docs updated, verification run, and remaining risk.
-3. Open cited audit sources, changed code, changed tests, and changed docs. Confirm the fix addresses the actual finding, not just the symptom.
-4. Confirm docs were updated in the product-profile documentation locations where behavior, contracts, workflows, controls, or customer guidance changed.
-5. Confirm success-path and failure-path tests exist and were run or honestly blocked.
-6. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
-7. Block implementation signoff for overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
+2. Check that each packet's work log contains a machine-readable \`- Status: \`complete\`\` (or \`partial\`/\`blocked\`) line as its final entry, and that the stated status is truthful. A packet missing this line or still reading \`not-started\` is incomplete regardless of the implementation summary.
+3. Check that each packet's work log truthfully states files changed, docs updated, verification run, and remaining risk.
+4. Open cited audit sources, changed code, changed tests, and changed docs. Confirm the fix addresses the actual finding, not just the symptom.
+5. Confirm docs were updated in the product-profile documentation locations where behavior, contracts, workflows, controls, or customer guidance changed.
+6. Confirm success-path and failure-path tests exist and were run or honestly blocked.
+7. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
+8. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
 
 Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 
@@ -1373,6 +1749,168 @@ rebuild_unit_prompts() {
     build_workstream_prompt "$unit_id" "$group" "$model_class" "$packets_csv"
     build_verifier_prompt "$unit_id" "$group" "$model_class" "$packets_csv"
   done
+}
+
+needs_planner() {
+  local class="$1"
+  local c
+  for c in ${PLAN_MODEL_CLASSES:-high-risk complex}; do
+    if [[ "$c" == "$class" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+build_planner_prompt() {
+  local unit_id="$1" group="$2" model_class="$3" packets_csv="$4"
+  local prompt="$REMEDIATION_DIR/prompts/plan-$unit_id.md"
+  local packet_list
+  packet_list="$(packet_paths_for_ids "$packets_csv")"
+  local design_out="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+
+  cat > "$prompt" <<PROMPT
+# Remediation Planner: $unit_id
+
+## Metadata
+
+- Repo root: $REPO_ROOT
+- Audit run: $AUDIT_RUN
+- Remediation run: $REMEDIATION_DIR
+- Workstream: $group
+- Implementation unit: $unit_id
+- Model class: $model_class
+- Packet IDs: $packets_csv
+- Product profile: ${PRODUCT_PROFILE:-"(none)"}
+- Design output: $design_out
+
+## Shared Instructions
+
+$(cat "$SHARED_PROMPT")
+
+## Product Profile
+
+$(product_profile_block)
+
+## Assigned Packets
+
+\`\`\`text
+$packet_list
+\`\`\`
+
+## Planner Instructions
+
+**ROLE CONSTRAINT**: You are a PLANNER, not an implementer. Do NOT edit product source files, commit changes, or run tests. Your only output is the design document written to \`$design_out\`.
+
+Your job: understand the assigned packets and the relevant code deeply, then produce a precise file-by-file implementation design that an implementer agent can execute without re-deriving the approach.
+
+**Working-set discipline**: Keep context under 120k tokens. For files over 1500 lines, read the skeleton first, then targeted sections.
+
+**Process**:
+1. Read each assigned packet file in full.
+2. Identify what code, docs, and tests need to change.
+3. Read the relevant source files (skeleton first, then targeted reads).
+4. Verify the current state of each affected code section before specifying the fix. Do not speculate.
+5. Write the design document and stop.
+
+**Design document structure** (write to \`$design_out\`):
+
+\`\`\`markdown
+# Implementation Design: $unit_id
+
+## Problem Summary
+What is broken, exactly where, and why it matters. Severity and blast radius.
+
+## Solution Approach
+The architectural decision — what to do and why. If multiple approaches exist, state which you chose and the tradeoff.
+
+## Per-File Change Spec
+For every file that must change:
+### File: path/to/file.py (lines NNN–MMM)
+**Current behavior:** what the code does now.
+**Required change:** exactly what to add, remove, or replace. Precise enough that the implementer does not need to re-read the original finding.
+
+## Test Requirements
+For each change: what test to write, what to assert, what negative cases to cover, where in the test suite it belongs.
+
+## Migration Requirements
+Any DB schema changes, config updates, ordered sequencing constraints, or deployment steps.
+
+## Invariants to Preserve
+Tenant isolation, permission boundaries, audit trail continuity, idempotency contracts, and any other invariants the implementer must not break.
+
+## Risks and Unknowns
+Edge cases, unknown dependencies, or areas where the implementer may need to deviate from the design and must document why.
+\`\`\`
+
+Do not edit product source files. Do not run tests. Write only the design document.
+PROMPT
+}
+
+rebuild_planner_prompts() {
+  tail -n +2 "$UNITS_TSV" | while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
+    [[ -z "${unit_id:-}" ]] && continue
+    needs_planner "$model_class" || continue
+    build_planner_prompt "$unit_id" "$group" "$model_class" "$packets_csv"
+  done
+}
+
+execute_planners() {
+  # Skip entirely if no units in UNITS_TSV need the planner phase.
+  local any=0
+  while IFS=$'\t' read -r _uid _pcsv _grp mc _sev _rat; do
+    [[ -z "${_uid:-}" ]] && continue
+    if needs_planner "$mc"; then
+      any=1
+      break
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+  if [[ "$any" -eq 0 ]]; then
+    return 0
+  fi
+
+  rebuild_planner_prompts
+
+  printf '[planners] design phase for model classes: %s\n' "${PLAN_MODEL_CLASSES:-high-risk complex}"
+
+  local -a pids=() names=()
+  local active=0
+
+  export _WAVE_DISPLAY=1
+
+  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
+    [[ -z "${unit_id:-}" ]] && continue
+    needs_planner "$model_class" || continue
+    if ! unit_selected "$unit_id"; then continue; fi
+    if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then continue; fi
+    if grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
+      local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+      if artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
+        printf '[resume] skipping completed plan-%s\n' "$unit_id"
+        continue
+      fi
+      printf '[resume] re-running plan-%s; checkpoint exists but design does not cover merged packets=%s\n' \
+        "$unit_id" "$packets_csv"
+    fi
+    local prompt="$REMEDIATION_DIR/prompts/plan-$unit_id.md"
+    printf '[plan] unit=%s group=%s model_class=%s\n' "$unit_id" "$group" "$model_class"
+    run_prompt "$prompt" "plan-$unit_id" "planner" &
+    pids+=("$!")
+    names+=("plan-$unit_id")
+    active=$((active + 1))
+    if ((active >= MAX_PARALLEL)); then
+      if ! wait_for_wave pids names; then
+        [[ "$CONTINUE_ON_FAIL" != "1" ]] && exit 1
+      fi
+      pids=(); names=(); active=0
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+
+  if ((${#pids[@]} > 0)); then
+    if ! wait_for_wave pids names; then
+      [[ "$CONTINUE_ON_FAIL" != "1" ]] && exit 1
+    fi
+  fi
 }
 
 rebuild_workstream_coordinator_prompts() {
@@ -1522,7 +2060,15 @@ run_prompt() {
       runner="${REMEDIATION_RUNNER:-}"
       effective_agent="${IMPLEMENTER_AGENT:-codex}"
       ;;
-    high-risk|standard)
+    planner)
+      if [[ -n "${PLANNER_RUNNER:-}" ]]; then
+        runner="$PLANNER_RUNNER"
+      else
+        runner="${REMEDIATION_RUNNER:-}"
+        effective_agent="${PLANNER_AGENT:-${COORDINATOR_AGENT:-${IMPLEMENTER_AGENT:-codex}}}"
+      fi
+      ;;
+    high-risk|standard|complex)
       if [[ "$IMPLEMENTER_AGENT" == "runner" ]]; then
         runner="${IMPLEMENTER_RUNNER:?IMPLEMENTER_AGENT=runner requires IMPLEMENTER_RUNNER}"
       else
@@ -1661,12 +2207,33 @@ run_prompt() {
   return "$status"
 }
 
+wave_job_completed_successfully() {
+  local name="$1" log_file="$2"
+  case "$name" in
+    implement-*)
+      local unit_id="${name#implement-}"
+      local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+      grep -q "^RESULT: PASS" "$log_file" 2>/dev/null && [[ -s "$summary" ]]
+      ;;
+    verify-*)
+      local unit_id="${name#verify-}"
+      local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+      grep -q "^RESULT: PASS" "$log_file" 2>/dev/null && [[ -s "$verifier" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 wait_for_wave() {
   local -n pids_ref=$1
   local -n names_ref=$2
   local failed=0
   local n=${#pids_ref[@]}
-  [[ $n -eq 0 ]] && return 0
+  if [[ $n -eq 0 ]]; then
+    return 0
+  fi
 
   local heartbeat_interval="${REMEDIATION_HEARTBEAT_SECONDS:-60}"
   local stall_intervals="${REMEDIATION_STALL_INTERVALS:-5}"
@@ -1705,6 +2272,11 @@ wait_for_wave() {
         printf '\r%-*s\r' $(( _tw - 1 )) ''
         if [[ $s -eq 0 ]]; then
           printf '[ok] %s\n' "${names_ref[$idx]}"
+          printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+        elif wave_job_completed_successfully "${names_ref[$idx]}" "${job_log[$idx]}"; then
+          printf '[ok] %s (auto-recovered after non-zero wave exit)\n' "${names_ref[$idx]}"
+          printf '\n[auto-recover] %s: non-zero wave exit but RESULT: PASS with required artifact — treating as success\n' \
+            "${names_ref[$idx]}" >>"${job_log[$idx]}"
           printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
         else
           printf '[fail] %s (see %s/logs/%s.log)\n' \
@@ -1778,6 +2350,11 @@ execute_workstreams() {
     printf '[revise-existing] skipping catalog/global coordination and using existing implementation units\n'
   fi
 
+  if [[ "$NO_NORMALIZE" != "1" ]]; then
+    normalize_workstream_sizes
+  fi
+  normalize_units_tsv
+  build_implemented_packet_set
   rebuild_workstream_coordinator_prompts
 
   if [[ "$REVISE_EXISTING" != "1" ]]; then
@@ -1802,12 +2379,24 @@ execute_workstreams() {
         printf '[resume] skipping completed %s\n' "$coord_name"
         continue
       fi
-      printf '[workstream-coordinator] group=%s model_class=%s packets=%s\n' "$group" "$model_class" "$packets_csv"
+      # If every packet in this workstream is already complete, auto-checkpoint
+      # without running the coordinator — nothing left to coordinate.
+      local _remaining
+      _remaining="$(incomplete_packets_csv "$packets_csv")"
+      if [[ -z "$_remaining" ]]; then
+        printf '[coordinator-skip] %s: all packets complete, auto-checkpointing\n' "$coord_name"
+        printf '%s\n' "$coord_name" >> "$CHECKPOINT_FILE"
+        continue
+      fi
+      printf '[workstream-coordinator] group=%s model_class=%s incomplete=%s\n' \
+        "$group" "$model_class" "$_remaining"
       if run_prompt "$prompt" "$coord_name" "coordinator"; then
         printf '%s\n' "$coord_name" >> "$CHECKPOINT_FILE"
       fi
     done < <(tail -n +2 "$WORKSTREAMS_TSV")
   fi
+
+  execute_planners
 
   local -a pids=()
   local -a names=()
@@ -1825,15 +2414,30 @@ execute_workstreams() {
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
       continue
     fi
+    if [[ "$REVISE_EXISTING" != "1" ]]; then
+      local _already_complete_packets
+      _already_complete_packets="$(incomplete_packets_csv "$packets_csv")"
+      if [[ -z "$_already_complete_packets" ]]; then
+        printf '[resume] all packets complete for %s; auto-checkpointing\n' "implement-$unit_id"
+        printf '%s\n' "implement-$unit_id" >> "$CHECKPOINT_FILE"
+        continue
+      fi
+    fi
     # Skip already-completed units. Revision passes re-run units unless the
     # summary artifact already records IMPLEMENTATION_RESULT: fixed, which
     # means the unit was successfully implemented and does not need a redo.
     if grep -qxF "implement-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
       local _summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-      if [[ "$REVISE_EXISTING" != "1" ]] || grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$_summary" 2>/dev/null; then
-        printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
-        continue
+      local _remaining_packets
+      _remaining_packets="$(incomplete_packets_csv "$packets_csv")"
+      if [[ -z "$_remaining_packets" ]]; then
+        if [[ "$REVISE_EXISTING" != "1" ]] || grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$_summary" 2>/dev/null; then
+          printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
+          continue
+        fi
       fi
+      printf '[resume] re-running %s; checkpoint exists but packets remain incomplete: %s\n' \
+        "implement-$unit_id" "$_remaining_packets"
     fi
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
@@ -1879,8 +2483,13 @@ execute_verifier_units() {
     fi
     # Skip already-verified units unless this is a revision pass.
     if [[ "$REVISE_EXISTING" != "1" ]] && grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      printf '[resume] skipping completed verify-%s\n' "$unit_id"
-      continue
+      local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+      if artifact_mentions_all_packets "$verifier" "$packets_csv"; then
+        printf '[resume] skipping completed verify-%s\n' "$unit_id"
+        continue
+      fi
+      printf '[resume] re-running verify-%s; checkpoint exists but verifier does not cover merged packets=%s\n' \
+        "$unit_id" "$packets_csv"
     fi
     local prompt="$REMEDIATION_DIR/prompts/verify-$unit_id.md"
     printf '[verify] unit=%s group=%s implementation_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
@@ -2102,6 +2711,14 @@ printf 'Master Px list: %s\n' "$PX_MD"
 printf 'Workstreams: %s\n' "$WORKSTREAMS_TSV"
 printf 'Implementation units: %s\n' "$UNITS_TSV"
 printf 'Packets: %s/packets\n' "$REMEDIATION_DIR"
+
+if [[ "$RECOORDINATE" == "1" && -f "$CHECKPOINT_FILE" ]]; then
+  _rc_before=$(grep -c "^coordinate-" "$CHECKPOINT_FILE" 2>/dev/null || true)
+  grep -v "^coordinate-" "$CHECKPOINT_FILE" > "${CHECKPOINT_FILE}.tmp" && mv "${CHECKPOINT_FILE}.tmp" "$CHECKPOINT_FILE"
+  _rc_after=$(grep -c "^coordinate-" "$CHECKPOINT_FILE" 2>/dev/null || true)
+  printf '[recoordinate] cleared %d coordinate-* checkpoint entries; workstream coordinators will re-run against incomplete packets\n' \
+    "$(( _rc_before - _rc_after ))"
+fi
 
 if [[ "$VERIFY_ONLY" == "1" ]]; then
   execute_verifiers
