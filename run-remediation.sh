@@ -2627,14 +2627,15 @@ execute_workstreams() {
       local _summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
       local _remaining_packets
       _remaining_packets="$(incomplete_packets_csv "$packets_csv")"
-      if [[ -z "$_remaining_packets" ]]; then
-        if [[ "$REVISE_EXISTING" != "1" ]] || grep -qi 'IMPLEMENTATION_RESULT:[[:space:]]*fixed' "$_summary" 2>/dev/null; then
-          printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
-          continue
-        fi
+      if [[ "$REVISE_EXISTING" == "1" ]]; then
+        printf '[revise] re-running %s from verifier decision\n' "implement-$unit_id"
+      elif [[ -z "$_remaining_packets" ]]; then
+        printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
+        continue
+      else
+        printf '[resume] re-running %s; checkpoint exists but packets remain incomplete: %s\n' \
+          "implement-$unit_id" "$_remaining_packets"
       fi
-      printf '[resume] re-running %s; checkpoint exists but packets remain incomplete: %s\n' \
-        "implement-$unit_id" "$_remaining_packets"
     fi
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
