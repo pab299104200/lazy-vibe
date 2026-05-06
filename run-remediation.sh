@@ -2247,6 +2247,30 @@ validate_prompt_outputs() {
   fi
 }
 
+final_result_value() {
+  local log_file="$1"
+  grep -E '^RESULT:[[:space:]]*(PASS|FAIL|INCOMPLETE|BLOCKED)' "$log_file" 2>/dev/null \
+    | tail -1 \
+    | sed -E 's/^RESULT:[[:space:]]*//; s/[[:space:]].*$//' \
+    | tr '[:lower:]' '[:upper:]'
+}
+
+final_result_is_pass() {
+  [[ "$(final_result_value "$1")" == "PASS" ]]
+}
+
+final_result_is_terminal() {
+  case "$(final_result_value "$1")" in
+    PASS|FAIL|INCOMPLETE|BLOCKED) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+readonly_role_diff_snapshot() {
+  local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
+  git -C "$REPO_ROOT" diff --binary -- . ":(exclude)${rel_rdir}" 2>/dev/null || true
+}
+
 run_prompt() {
   local prompt_file="$1" workstream="$2" class="$3"
   local log_file="$REMEDIATION_DIR/logs/$workstream.log"
@@ -2317,6 +2341,15 @@ run_prompt() {
   local max_attempts=$((REMEDIATION_MAX_RETRIES + 1))
   local attempt=1
   local status=0
+  local readonly_integrity=0 readonly_before_file="" readonly_before_hash="" readonly_before_size=0
+  if [[ "$class" =~ ^(cataloger|coordinator|verifier|reviewer)$ ]] && \
+     git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null 2>&1; then
+    readonly_integrity=1
+    readonly_before_file="$(mktemp)"
+    readonly_role_diff_snapshot > "$readonly_before_file"
+    readonly_before_hash="$(sha256sum "$readonly_before_file" | awk '{print $1}')"
+    readonly_before_size="$(wc -c <"$readonly_before_file" | tr -d ' ')"
+  fi
 
   while ((attempt <= max_attempts)); do
     if ((attempt > 1)); then
@@ -2365,25 +2398,28 @@ run_prompt() {
   fi
 
   # Coordinator, cataloger, verifier, and reviewer roles must not modify product
-  # source code. Allow writes inside REMEDIATION_DIR (artifacts, packets, TSVs)
-  # but revert anything outside it. For coordinators the revert is a warning —
-  # their deliverables live in REMEDIATION_DIR and are already written, so the
-  # checkpoint is still valid. For all other roles the violation is a hard failure.
-  if [[ "$class" =~ ^(cataloger|coordinator|verifier|reviewer)$ ]] && \
-     git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null 2>&1; then
-    local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
-    if ! git -C "$REPO_ROOT" diff --exit-code --quiet -- . ":(exclude)${rel_rdir}" 2>>"$log_file"; then
+  # source code. Compare against the pre-run diff snapshot so verifier/reviewer
+  # roles do not get blamed for implementation changes that were already dirty.
+  if [[ "$readonly_integrity" == "1" ]]; then
+    local readonly_after_file readonly_after_hash
+    readonly_after_file="$(mktemp)"
+    readonly_role_diff_snapshot > "$readonly_after_file"
+    readonly_after_hash="$(sha256sum "$readonly_after_file" | awk '{print $1}')"
+    if [[ "$readonly_after_hash" != "$readonly_before_hash" ]]; then
       printf '\nINTEGRITY VIOLATION: %s (class=%s) modified source files outside remediation dir; reverting\n' \
         "$workstream" "$class" >>"$log_file"
-      git -C "$REPO_ROOT" checkout -- . ":(exclude)${rel_rdir}" >>"$log_file" 2>&1
-      # Also reset any submodule changes (new commits or dirty state inside submodules).
-      git -C "$REPO_ROOT" submodule update --checkout >>"$log_file" 2>&1 || true
-      git -C "$REPO_ROOT" submodule foreach --quiet \
-        'git checkout -- . 2>/dev/null || true' >>"$log_file" 2>&1 || true
+      if [[ "$readonly_before_size" == "0" ]]; then
+        local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
+        git -C "$REPO_ROOT" checkout -- . ":(exclude)${rel_rdir}" >>"$log_file" 2>&1 || true
+      else
+        printf 'Pre-existing product diff was present before %s; not reverting to avoid destroying implementation work.\n' \
+          "$workstream" >>"$log_file"
+      fi
       if [[ "$class" != "coordinator" ]]; then
         status=1
       fi
     fi
+    rm -f "$readonly_before_file" "$readonly_after_file"
   fi
 
   # Auto-recover: if the agent exited non-zero but the log shows RESULT: PASS
@@ -2393,7 +2429,7 @@ run_prompt() {
   if [[ "$status" != "0" ]] && [[ "$class" =~ ^(high-risk|standard)$ ]]; then
     local unit_id="${workstream#implement-}"
     local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-    if grep -q "^RESULT: PASS" "$log_file" 2>/dev/null && [[ -s "$summary" ]]; then
+    if final_result_is_pass "$log_file" && [[ -s "$summary" ]]; then
       printf '\n[auto-recover] %s: non-zero exit but RESULT: PASS with summary — treating as success\n' \
         "$workstream" >>"$log_file"
       status=0
@@ -2405,16 +2441,19 @@ run_prompt() {
 
 wave_job_completed_successfully() {
   local name="$1" log_file="$2"
+  if grep -q '^INTEGRITY VIOLATION:' "$log_file" 2>/dev/null; then
+    return 1
+  fi
   case "$name" in
     implement-*)
       local unit_id="${name#implement-}"
       local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-      grep -q "^RESULT: PASS" "$log_file" 2>/dev/null && [[ -s "$summary" ]]
+      final_result_is_pass "$log_file" && [[ -s "$summary" ]]
       ;;
     verify-*)
       local unit_id="${name#verify-}"
       local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
-      grep -q "^RESULT: PASS" "$log_file" 2>/dev/null && [[ -s "$verifier" ]]
+      final_result_is_terminal "$log_file" && [[ -s "$verifier" ]]
       ;;
     *)
       return 1
@@ -2471,7 +2510,7 @@ wait_for_wave() {
           printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
         elif wave_job_completed_successfully "${names_ref[$idx]}" "${job_log[$idx]}"; then
           printf '[ok] %s (auto-recovered after non-zero wave exit)\n' "${names_ref[$idx]}"
-          printf '\n[auto-recover] %s: non-zero wave exit but RESULT: PASS with required artifact — treating as success\n' \
+          printf '\n[auto-recover] %s: non-zero wave exit but terminal RESULT with required artifact — treating as success\n' \
             "${names_ref[$idx]}" >>"${job_log[$idx]}"
           printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
         else
