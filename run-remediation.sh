@@ -1215,7 +1215,7 @@ stamp_packet_complete() {
   local px="$1" source_label="$2" pfile="$REMEDIATION_DIR/packets/$px.md"
   [[ -f "$pfile" ]] || return 1
   packet_has_terminal_status "$pfile" && return 1
-  printf '\n- Status: `complete` (stamped by remediation runner from %s)\n' "$source_label" >> "$pfile"
+  printf '\n- Status: `complete`\n' >> "$pfile"
 }
 
 remediation_dir_audit_run() {
