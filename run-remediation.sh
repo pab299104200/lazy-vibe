@@ -2264,8 +2264,13 @@ execute_planners() {
       grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "plan-$unit_id" >> "$CHECKPOINT_FILE"
       continue
     fi
+    local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+    if final_result_is_pass "$design_doc" && artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
+      printf '[resume] recovered completed plan-%s from existing design artifact\n' "$unit_id"
+      grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "plan-$unit_id" >> "$CHECKPOINT_FILE"
+      continue
+    fi
     if grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
       if artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
         printf '[resume] skipping completed plan-%s\n' "$unit_id"
         continue
@@ -2730,6 +2735,11 @@ wave_job_completed_successfully() {
     return 1
   fi
   case "$name" in
+    plan-*)
+      local unit_id="${name#plan-}"
+      local design="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+      final_result_is_pass "$design" && [[ -s "$design" ]]
+      ;;
     implement-*)
       local unit_id="${name#implement-}"
       local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
