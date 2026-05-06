@@ -103,8 +103,9 @@ Environment:
   IMPLEMENTER_RUNNER          Custom implementer wrapper (overrides built-in agent).
                               Receives: prompt_file remediation_dir workstream_id.
   PLANNER_AGENT               Built-in planner agent for high-risk/complex units. Defaults to
-                              COORDINATOR_AGENT, then IMPLEMENTER_AGENT. Planners read code
-                              and write a design doc; implementers then execute against the design.
+                              REVIEWER_AGENT, then COORDINATOR_AGENT, then IMPLEMENTER_AGENT.
+                              Planners read code and write a design doc; implementers then
+                              execute against the design.
   PLANNER_RUNNER              Custom planner wrapper (overrides built-in agent).
   PLAN_MODEL_CLASSES          Space-separated model classes that run through the planner phase
                               before implementation. Defaults to "high-risk complex".
@@ -2653,9 +2654,11 @@ run_prompt() {
     planner)
       if [[ -n "${PLANNER_RUNNER:-}" ]]; then
         runner="$PLANNER_RUNNER"
+      elif [[ "${REVIEWER_AGENT:-}" == "runner" && -n "${REVIEWER_RUNNER:-}" ]]; then
+        runner="$REVIEWER_RUNNER"
       else
         runner="${REMEDIATION_RUNNER:-}"
-        effective_agent="${PLANNER_AGENT:-${COORDINATOR_AGENT:-${IMPLEMENTER_AGENT:-codex}}}"
+        effective_agent="${PLANNER_AGENT:-${REVIEWER_AGENT:-${COORDINATOR_AGENT:-${IMPLEMENTER_AGENT:-codex}}}}"
       fi
       ;;
     high-risk|standard|complex)
