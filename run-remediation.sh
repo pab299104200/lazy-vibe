@@ -1373,6 +1373,68 @@ EOF
   exit 2
 }
 
+guard_existing_px_inventory_consistency() {
+  [[ -f "$PX_TSV" ]] || return 0
+  [[ -d "$REMEDIATION_DIR/packets" ]] || return 0
+
+  local packet_file_count px_row_count unit_unknown_count
+  packet_file_count="$(find "$REMEDIATION_DIR/packets" -maxdepth 1 -name 'PX-*.md' -printf '.' 2>/dev/null | wc -c | tr -d ' ')"
+  px_row_count="$(awk 'NR > 1 && $1 ~ /^PX-/ { count += 1 } END { print count + 0 }' "$PX_TSV")"
+  unit_unknown_count=0
+  if [[ -f "$UNITS_TSV" ]]; then
+    unit_unknown_count="$(
+      awk -F '\t' '
+        NR == FNR {
+          if (FNR > 1 && $1 ~ /^PX-/) known[$1] = 1
+          next
+        }
+        FNR == 1 {
+          packet_col = 2
+          for (i = 1; i <= NF; i += 1) {
+            if ($i == "packets" || $i == "packets_csv") packet_col = i
+          }
+          next
+        }
+        FNR > 1 {
+          split($packet_col, ids, ",")
+          for (i in ids) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", ids[i])
+            if (ids[i] ~ /^PX-/ && !(ids[i] in known)) unknown[ids[i]] = 1
+          }
+        }
+        END {
+          for (id in unknown) count += 1
+          print count + 0
+        }
+      ' "$PX_TSV" "$UNITS_TSV"
+    )"
+  fi
+
+  if (( packet_file_count > px_row_count || unit_unknown_count > 0 )); then
+    cat >&2 <<EOF
+[manifest-guard] refusing to preserve an inconsistent remediation inventory.
+
+Remediation dir: $REMEDIATION_DIR
+Master PX inventory: $PX_TSV
+Packet files: $packet_file_count
+Master PX rows: $px_row_count
+Unit packet IDs missing from master: $unit_unknown_count
+
+The run directory has cataloged packets or units that are not represented in
+the master inventory. Resuming would let the runner skip real packet work.
+
+Fix:
+  - Restore the matching cataloged $PX_TSV, or
+  - Rebuild this run with:
+      REMEDIATION_REWRITE_PACKETS=1
+      REMEDIATION_REWRITE_WORKSTREAMS=1
+      REMEDIATION_REWRITE_UNITS=1
+      --force-catalog
+EOF
+    exit 2
+  fi
+}
+
 packet_row_matches_current_run() {
   local px="$1" prior_dir="$2"
   local current_key prior_key
@@ -3118,15 +3180,25 @@ execute_revision_rounds() {
 
 if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   _previous_px_tsv=""
-  if [[ -f "$PX_TSV" ]]; then
-    _previous_px_tsv="$(mktemp)"
-    cp "$PX_TSV" "$_previous_px_tsv"
+  _preserve_existing_inventory=0
+  if [[ -f "$PX_TSV" && "$REMEDIATION_REWRITE_PACKETS" != "1" ]] && remediation_state_exists; then
+    _preserve_existing_inventory=1
   fi
-  extract_findings
-  guard_reused_px_inventory "$_previous_px_tsv"
-  [[ -n "$_previous_px_tsv" ]] && rm -f "$_previous_px_tsv"
-  write_master_markdown
-  write_packets_and_workstreams
+
+  if [[ "$_preserve_existing_inventory" == "1" ]]; then
+    printf '[resume] preserving existing master PX inventory: %s\n' "$PX_TSV"
+    guard_existing_px_inventory_consistency
+  else
+    if [[ -f "$PX_TSV" ]]; then
+      _previous_px_tsv="$(mktemp)"
+      cp "$PX_TSV" "$_previous_px_tsv"
+    fi
+    extract_findings
+    guard_reused_px_inventory "$_previous_px_tsv"
+    [[ -n "$_previous_px_tsv" ]] && rm -f "$_previous_px_tsv"
+    write_master_markdown
+    write_packets_and_workstreams
+  fi
   # Preserve existing implementation units by default. A reused REMEDIATION_DIR
   # may already contain cataloged/combined units; regenerating the raw PX list
   # here would disconnect resume state from completed artifacts.
