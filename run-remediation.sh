@@ -47,6 +47,8 @@ REMEDIATION_REWRITE_PACKETS="${REMEDIATION_REWRITE_PACKETS:-0}"
 REMEDIATION_REWRITE_WORKSTREAMS="${REMEDIATION_REWRITE_WORKSTREAMS:-0}"
 REMEDIATION_REWRITE_UNITS="${REMEDIATION_REWRITE_UNITS:-0}"
 REMEDIATION_IMPORT_PRIOR_RUNS="${REMEDIATION_IMPORT_PRIOR_RUNS:-1}"
+REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-0}"
+REMEDIATION_COMMIT_ROOTS="${REMEDIATION_COMMIT_ROOTS:-backend,frontend}"
 NO_CATALOG=0
 
 usage() {
@@ -84,6 +86,11 @@ Environment:
   REMEDIATION_IMPORT_PRIOR_RUNS
                               1 to recover fixed packets from sibling remediation runs for the same audit run
                               when the packet source/line/title still matches. Defaults to 1.
+  REMEDIATION_COMMIT_ON_VERIFY
+                              1 to commit changed Git roots after a unit verifies as accepted/fixed.
+                              Defaults to 0. Forces serialized implementation/verification waves.
+  REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
+                              REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to backend,frontend.
   REMEDIATION_AUTO_SPLIT      1 to auto-detect oversized units before execution. Defaults to 1.
   REMEDIATION_MAX_UNIT_PACKET_COUNT
                               Max packets per implementation unit before split preflight. Defaults to 3.
@@ -286,6 +293,17 @@ fi
 
 mkdir -p "$REMEDIATION_DIR"/{packets,prompts,logs,artifacts}
 CHECKPOINT_FILE="$REMEDIATION_DIR/completed-units.txt"
+
+if [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]]; then
+  if [[ "$MAX_PARALLEL" != "1" ]]; then
+    printf '[commit-on-verify] forcing MAX_PARALLEL=1 so unit diffs cannot interleave across repos\n'
+    MAX_PARALLEL=1
+  fi
+  if [[ "${REMEDIATION_REVISION_MAX_PARALLEL:-2}" != "1" ]]; then
+    printf '[commit-on-verify] forcing REMEDIATION_REVISION_MAX_PARALLEL=1 so revision diffs remain attributable\n'
+    REMEDIATION_REVISION_MAX_PARALLEL=1
+  fi
+fi
 
 # Auto-enable the cataloger for fresh execution only. Existing implementation
 # units are catalog state and must be resumed as-is unless --force-catalog is
@@ -2408,6 +2426,118 @@ readonly_role_diff_snapshot() {
   git -C "$REPO_ROOT" diff --binary -- . ":(exclude)${rel_rdir}" 2>/dev/null || true
 }
 
+commit_root_path() {
+  local root="$1"
+  if [[ "$root" == /* ]]; then
+    printf '%s\n' "$root"
+  else
+    printf '%s/%s\n' "$REPO_ROOT" "$root"
+  fi
+}
+
+commit_root_label() {
+  local root="$1"
+  root="${root#"$REPO_ROOT"/}"
+  root="${root#/}"
+  [[ -n "$root" ]] || root="repo"
+  printf '%s\n' "$root" | tr '/[:space:]' '--'
+}
+
+unit_packets_csv() {
+  local wanted="$1"
+  awk -F '\t' -v unit="$wanted" 'NR > 1 && $1 == unit { print $2; found = 1; exit } END { if (!found) exit 1 }' "$UNITS_TSV" 2>/dev/null
+}
+
+commit_baseline_dir_for_unit() {
+  printf '%s/commit-baselines/%s\n' "$REMEDIATION_DIR/artifacts" "$1"
+}
+
+record_commit_baseline_for_unit() {
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
+  local unit_id="$1" baseline_dir
+  baseline_dir="$(commit_baseline_dir_for_unit "$unit_id")"
+  mkdir -p "$baseline_dir"
+
+  local IFS=',' root root_path label status_file
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    root_path="$(commit_root_path "$root")"
+    [[ -d "$root_path" ]] || continue
+    if ! git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1; then
+      continue
+    fi
+    label="$(commit_root_label "$root_path")"
+    status_file="$baseline_dir/$label.status"
+    [[ -f "$status_file" ]] && continue
+    git -C "$root_path" status --porcelain=v1 -uall > "$status_file"
+    if [[ -s "$status_file" ]]; then
+      printf '[commit-on-verify] %s: %s dirty before implementation; auto-commit disabled for this unit/root\n' \
+        "$unit_id" "$root_path"
+    fi
+  done
+}
+
+verifier_accepts_unit() {
+  local unit_id="$1"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  [[ -s "$verifier" ]] || return 1
+  grep -qiE '^[[:space:]-]*Decision:[[:space:]]*`?accept`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*Implementation decision:[[:space:]]*`?fixed`?' "$verifier" || return 1
+}
+
+commit_verified_unit_changes() {
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
+  local unit_id="$1"
+  verifier_accepts_unit "$unit_id" || {
+    printf '[commit-on-verify] %s: verifier did not accept/fix; not committing\n' "$unit_id"
+    return 0
+  }
+
+  local packets_csv baseline_dir
+  packets_csv="$(unit_packets_csv "$unit_id" || true)"
+  baseline_dir="$(commit_baseline_dir_for_unit "$unit_id")"
+  [[ -d "$baseline_dir" ]] || {
+    printf '[commit-on-verify] %s: missing clean baseline; not committing\n' "$unit_id" >&2
+    return 1
+  }
+
+  local IFS=',' root root_path label status_file current_status commit_msg
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    root_path="$(commit_root_path "$root")"
+    [[ -d "$root_path" ]] || continue
+    if ! git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1; then
+      continue
+    fi
+    label="$(commit_root_label "$root_path")"
+    status_file="$baseline_dir/$label.status"
+    if [[ ! -f "$status_file" ]]; then
+      printf '[commit-on-verify] %s: no baseline for %s; not committing that root\n' "$unit_id" "$root_path" >&2
+      continue
+    fi
+    if [[ -s "$status_file" ]]; then
+      printf '[commit-on-verify] %s: %s was dirty before implementation; leaving changes uncommitted\n' \
+        "$unit_id" "$root_path" >&2
+      continue
+    fi
+    current_status="$(git -C "$root_path" status --porcelain=v1 -uall)"
+    if [[ -z "$current_status" ]]; then
+      printf '[commit-on-verify] %s: no %s changes to commit\n' "$unit_id" "$label"
+      continue
+    fi
+
+    git -C "$root_path" add -A
+    commit_msg="$(printf 'fix(remediation): complete %s %s\n\nPackets: %s\nVerifier: accept/fixed\nAudit run: %s\n' \
+      "$unit_id" "$label" "${packets_csv:-unknown}" "$(basename "$AUDIT_RUN")")"
+    if git -C "$root_path" commit -m "$commit_msg"; then
+      printf '[commit-on-verify] %s: committed %s changes in %s\n' "$unit_id" "$label" "$root_path"
+    else
+      printf '[commit-on-verify] %s: git commit failed in %s\n' "$unit_id" "$root_path" >&2
+      return 1
+    fi
+  done
+}
+
 run_prompt() {
   local prompt_file="$1" workstream="$2" class="$3"
   local log_file="$REMEDIATION_DIR/logs/$workstream.log"
@@ -2645,11 +2775,21 @@ wait_for_wave() {
         if [[ $s -eq 0 ]]; then
           printf '[ok] %s\n' "${names_ref[$idx]}"
           printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+          if [[ "${names_ref[$idx]}" == verify-* ]]; then
+            if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
+              failed=1
+            fi
+          fi
         elif wave_job_completed_successfully "${names_ref[$idx]}" "${job_log[$idx]}"; then
           printf '[ok] %s (auto-recovered after non-zero wave exit)\n' "${names_ref[$idx]}"
           printf '\n[auto-recover] %s: non-zero wave exit but terminal RESULT with required artifact — treating as success\n' \
             "${names_ref[$idx]}" >>"${job_log[$idx]}"
           printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+          if [[ "${names_ref[$idx]}" == verify-* ]]; then
+            if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
+              failed=1
+            fi
+          fi
         else
           printf '[fail] %s (see %s/logs/%s.log)\n' \
             "${names_ref[$idx]}" "$REMEDIATION_DIR" "${names_ref[$idx]}" >&2
@@ -2815,6 +2955,7 @@ execute_workstreams() {
     fi
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
+    record_commit_baseline_for_unit "$unit_id"
     run_prompt "$prompt" "implement-$unit_id" "$model_class" &
     pids+=("$!")
     names+=("implement-$unit_id")
