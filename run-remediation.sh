@@ -998,7 +998,23 @@ normalize_units_tsv() {
       merge_duplicate_units_tsv
       ;;
     workstream|workstream_id)
-      # Format: unit_id workstream[_id] model_class packet_count packets rationale
+      local header
+      header="$(head -1 "$UNITS_TSV")"
+      # Rich cataloger format:
+      # unit_id workstream_id workstream_name model_class status severity_floor packets title rationale
+      if [[ "$header" == $'unit_id\tworkstream_id\tworkstream_name\tmodel_class\tstatus\tseverity_floor\tpackets\t'* ]]; then
+        tmp="$(mktemp)"
+        {
+          printf 'unit_id\tpackets\tgroup\tmodel_class\tseverity\trationale\n'
+          awk 'BEGIN{OFS="\t"; FS="\t"} FNR>1 && NF>0 {print $1,$7,($3==""?$2:$3),$4,$6,($9==""?$8:$9)}' "$UNITS_TSV"
+        } > "$tmp"
+        mv "$tmp" "$UNITS_TSV"
+        printf '[normalize-units] converted rich cataloger workstream format to canonical format\n'
+        merge_duplicate_units_tsv
+        return 0
+      fi
+
+      # Legacy format: unit_id workstream[_id] model_class packet_count packets rationale
       # Reorder to: unit_id packets group model_class severity rationale
       tmp="$(mktemp)"
       {
@@ -1727,6 +1743,8 @@ Catalog requirements:
 - Group mixed P0/P1/P2 packets together when they belong to the same implementation surface and can be fixed by one agent.
 - Split implementation units that would exceed roughly 200k tokens or create file ownership conflicts.
 - Default to one implementation unit per packet for high-risk P0s unless the same code/doc/test change clearly closes several packets together.
+- Write \`$UNITS_TSV\` with this exact tab-separated header and column order: \`unit_id	packets	group	model_class	severity	rationale\`.
+- In \`$UNITS_TSV\`, put all packet IDs covered by the unit in the comma-separated \`packets\` column. Do not write alternate schemas such as \`workstream_id/workstream_name/status/severity_floor/title\`; the runner consumes the canonical six-column schema.
 - Select model class per unit: \`high-risk\` for security, tenant isolation, protocol, SCIM/lifecycle, IGA execution, migration runtime correctness, and runtime quality gates; \`complex\` for multi-file architectural changes that require design before implementation (cross-cutting state machines, permission model restructuring, API contract changes); \`standard\` for narrow UI/docs/test-harness/product cleanup. High-risk and complex units run through a planner agent that writes an implementation design before the implementer runs.
 - Every packet must include required docs updates for the documentation locations named by the product profile. If the repo uses \`docs/architecture\`, \`docs/functional\`, or \`docs/manual\`, update the relevant layer when behavior or customer/operator workflows change.
 - Every packet must include verification gates.
@@ -3156,6 +3174,7 @@ elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
   exit 2
 fi
 
+normalize_units_tsv
 build_implemented_packet_set 0
 if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
   guard_against_incomplete_unit_coverage
