@@ -1031,6 +1031,66 @@ EOF
   return 2
 }
 
+guard_against_incomplete_unit_coverage() {
+  [[ "${REMEDIATION_ALLOW_INCOMPLETE_UNIT_COVERAGE:-0}" == "1" ]] && return 0
+  [[ -f "$PX_TSV" && -f "$UNITS_TSV" ]] || return 0
+  [[ -n "$ONLY_UNIT" ]] && return 0
+
+  local -A assigned_packets=()
+  local unit_id packets_csv _group _model _sev _rat px
+  while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
+    [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+    IFS=',' read -ra _unit_packets <<< "$packets_csv"
+    for px in "${_unit_packets[@]}"; do
+      px="${px//[[:space:]]/}"
+      [[ -n "$px" ]] && assigned_packets["$px"]=1
+    done
+  done < "$UNITS_TSV"
+
+  local total_current=0 incomplete_current=0 missing_count=0 sample_missing=()
+  local id severity group model_class source line title packet
+  while IFS=$'\t' read -r id severity group model_class source line title packet; do
+    [[ "$id" == "id" || -z "${id:-}" ]] && continue
+    total_current=$((total_current + 1))
+    packet_is_done "$REMEDIATION_DIR/packets/$id.md" "$id" && continue
+    incomplete_current=$((incomplete_current + 1))
+    if [[ -z "${assigned_packets[$id]:-}" ]]; then
+      missing_count=$((missing_count + 1))
+      if (( ${#sample_missing[@]} < 12 )); then
+        sample_missing+=("$id")
+      fi
+    fi
+  done < "$PX_TSV"
+
+  (( missing_count == 0 )) && return 0
+
+  cat >&2 <<EOF
+[unit-coverage-guard] refusing to execute an incomplete implementation-unit manifest.
+
+Manifest: $UNITS_TSV
+Master PX inventory: $PX_TSV
+Current PX rows: $total_current
+Incomplete current PX rows: $incomplete_current
+Incomplete PX rows missing from units: $missing_count
+Sample missing packets: ${sample_missing[*]}
+
+This means the catalog/unit manifest does not cover the current packet graph.
+Running now would silently skip not-started packets.
+
+Fix:
+  - Use a fresh REMEDIATION_DIR, or
+  - Rebuild the run state with --force-catalog and the rewrite flags when the
+    existing state is intentionally being replaced:
+      REMEDIATION_REWRITE_PACKETS=1
+      REMEDIATION_REWRITE_WORKSTREAMS=1
+      REMEDIATION_REWRITE_UNITS=1
+
+Override only for a deliberate partial run:
+  REMEDIATION_ALLOW_INCOMPLETE_UNIT_COVERAGE=1
+EOF
+  return 2
+}
+
 raw_incomplete_unit_manifest_stats() {
   [[ -f "$UNITS_TSV" ]] || {
     printf '0\t0\t0\n'
@@ -1228,6 +1288,56 @@ packet_row_key() {
   awk -F '\t' -v px="$px" 'NR > 1 && $1 == px { print $5 "\t" $6 "\t" $7; found = 1; exit } END { if (!found) exit 1 }' "$px_tsv" 2>/dev/null
 }
 
+remediation_state_exists() {
+  [[ -s "$WORKSTREAMS_TSV" || -s "$UNITS_TSV" || -s "$CHECKPOINT_FILE" ]] && return 0
+  find "$REMEDIATION_DIR/packets" -maxdepth 1 -name 'PX-*.md' -print -quit 2>/dev/null | grep -q .
+}
+
+guard_reused_px_inventory() {
+  local previous_px_tsv="$1"
+  [[ -n "$previous_px_tsv" && -f "$previous_px_tsv" && -f "$PX_TSV" ]] || return 0
+  cmp -s "$previous_px_tsv" "$PX_TSV" && return 0
+  remediation_state_exists || return 0
+
+  if [[ "$FORCE_CATALOG" == "1" && "$REMEDIATION_REWRITE_PACKETS" == "1" && \
+        "$REMEDIATION_REWRITE_WORKSTREAMS" == "1" && "$REMEDIATION_REWRITE_UNITS" == "1" ]]; then
+    printf '[manifest-guard] master PX inventory changed; rewriting packets/workstreams/units because explicit rewrite flags and --force-catalog are set\n' >&2
+    return 0
+  fi
+
+  if [[ "${REMEDIATION_ALLOW_PX_INVENTORY_DRIFT:-0}" == "1" ]]; then
+    printf '[manifest-guard] warning: master PX inventory changed but REMEDIATION_ALLOW_PX_INVENTORY_DRIFT=1 is set; preserving existing state\n' >&2
+    return 0
+  fi
+
+  cat >&2 <<EOF
+[manifest-guard] refusing to reuse remediation state after the master PX inventory changed.
+
+Remediation dir: $REMEDIATION_DIR
+Previous inventory: $previous_px_tsv
+Current inventory: $PX_TSV
+
+Existing packet files, workstreams, implementation units, checkpoints, and
+artifacts are keyed by PX IDs. If the master inventory changes underneath that
+state, a packet such as PX-0021 can point at one defect while manifests or
+artifacts point at another. Running agents in that state can skip real work or
+send implementers after the wrong files.
+
+Fix:
+  - Use a fresh REMEDIATION_DIR for the changed audit inventory, or
+  - Re-run against the exact audit inputs that produced this remediation dir, or
+  - If replacing this run state is intentional, rerun with:
+      REMEDIATION_REWRITE_PACKETS=1
+      REMEDIATION_REWRITE_WORKSTREAMS=1
+      REMEDIATION_REWRITE_UNITS=1
+      --force-catalog
+
+Override only for manual recovery after inspecting the mismatch:
+  REMEDIATION_ALLOW_PX_INVENTORY_DRIFT=1
+EOF
+  exit 2
+}
+
 packet_row_matches_current_run() {
   local px="$1" prior_dir="$2"
   local current_key prior_key
@@ -1278,6 +1388,7 @@ recover_packets_from_prior_remediation_runs() {
 }
 
 build_implemented_packet_set() {
+  local write_stamps="${1:-1}"
   _IMPLEMENTED_PACKETS=()
   [[ ! -f "$UNITS_TSV" ]] && return 0
   while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
@@ -1313,6 +1424,8 @@ build_implemented_packet_set() {
   shopt -u nullglob
 
   recover_packets_from_prior_remediation_runs
+
+  [[ "$write_stamps" == "1" ]] || return 0
 
   # Stamp Status: complete into packet files that are done but unstamped.
   local stamped=0
@@ -2589,7 +2702,7 @@ execute_workstreams() {
     normalize_workstream_sizes
   fi
   normalize_units_tsv
-  build_implemented_packet_set
+  build_implemented_packet_set 0
   rebuild_workstream_coordinator_prompts
 
   if [[ "$REVISE_EXISTING" != "1" ]]; then
@@ -2811,7 +2924,14 @@ execute_revision_rounds() {
 }
 
 if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
+  _previous_px_tsv=""
+  if [[ -f "$PX_TSV" ]]; then
+    _previous_px_tsv="$(mktemp)"
+    cp "$PX_TSV" "$_previous_px_tsv"
+  fi
   extract_findings
+  guard_reused_px_inventory "$_previous_px_tsv"
+  [[ -n "$_previous_px_tsv" ]] && rm -f "$_previous_px_tsv"
   write_master_markdown
   write_packets_and_workstreams
   # Preserve existing implementation units by default. A reused REMEDIATION_DIR
@@ -2870,10 +2990,12 @@ elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
   exit 2
 fi
 
-build_implemented_packet_set
+build_implemented_packet_set 0
 if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+  guard_against_incomplete_unit_coverage
   guard_against_raw_unit_manifest
 fi
+build_implemented_packet_set 1
 build_coordinator_prompt
 
 rebuild_workstream_coordinator_prompts
