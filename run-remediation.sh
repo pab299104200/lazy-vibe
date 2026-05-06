@@ -312,6 +312,7 @@ UNITS_TSV="$REMEDIATION_DIR/03-implementation-units.tsv"
 AUDIT_SOURCE_MANIFEST="$REMEDIATION_DIR/00-audit-source-manifest.tsv"
 SPLIT_CANDIDATES_TSV="$REMEDIATION_DIR/05-split-candidates.tsv"
 SPLIT_PLAN_MD="$REMEDIATION_DIR/05-split-plan.md"
+COMPLETED_PACKETS_TSV="$REMEDIATION_DIR/04-completed-packets.tsv"
 
 case "$VERIFY_SCOPE" in
   implementation|launch) ;;
@@ -1448,6 +1449,20 @@ build_implemented_packet_set() {
   fi
 }
 
+write_completed_packet_manifest() {
+  {
+    printf 'packet\tstatus\tsource\tline\ttitle\n'
+    [[ -f "$PX_TSV" ]] || return 0
+    local id severity group model_class source line title packet
+    while IFS=$'\t' read -r id severity group model_class source line title packet; do
+      [[ "$id" == "id" || -z "${id:-}" ]] && continue
+      if packet_is_done "$REMEDIATION_DIR/packets/$id.md" "$id"; then
+        printf '%s\tcomplete\t%s\t%s\t%s\n' "$id" "$source" "$line" "$title"
+      fi
+    done < "$PX_TSV"
+  } > "$COMPLETED_PACKETS_TSV"
+}
+
 # Returns 0 (true) if a packet is done. Checks in order:
 #   1. Explicit Status: complete/fixed/split-into-child-units/deferred in the packet file.
 #   2. Packet belongs to a unit that was checkpointed with IMPLEMENTATION_RESULT: fixed.
@@ -1640,6 +1655,7 @@ build_catalog_prompt() {
 - Seed workstreams: $WORKSTREAMS_TSV
 - Seed implementation units: $UNITS_TSV
 - Seed packets directory: $REMEDIATION_DIR/packets
+- Completed packet manifest: $COMPLETED_PACKETS_TSV
 - Product profile: ${PRODUCT_PROFILE:-"(none)"}
 
 ## Shared Instructions
@@ -1680,8 +1696,12 @@ Rewrite these files with a deduplicated, implementation-ready catalog:
 
 Catalog requirements:
 
+- First read \`$COMPLETED_PACKETS_TSV\` and the seed packet work logs. Completed packet IDs represent already-fixed work recovered from current or prior same-audit remediation artifacts.
 - One packet should represent one coherent remediation outcome, not every repeated mention of the same defect.
 - Merge duplicate mentions across domain, cross-cutting, spec-addition, runtime, maturity, customer-proof, adversarial, and final-decision reports.
+- When a deduplicated packet consists only of already-completed seed packets, preserve that completion in the merged packet work log and set \`Status: complete\`.
+- When a deduplicated packet includes both completed and incomplete seed packets, keep the merged packet incomplete, but list the completed seed packet IDs and evidence in the work log so the implementer does not redo closed work.
+- Do not convert completed work back to \`not-started\` merely because packet IDs or implementation units are being deduplicated.
 - Treat spec inventory, product profile, and master-prompt deltas as first-class packet sources. If a required product capability appears in the profile/spec prompt but lacks implementation, docs, tests, or launch evidence, create or merge a packet for that missing contract.
 - Do not collapse spec-origin requirements into "evidence pending" when code/docs/tests are missing. Split implementation work from launch-proof work when needed.
 - Keep severity as the highest severity found for the outcome.
@@ -1692,7 +1712,7 @@ Catalog requirements:
 - Select model class per unit: \`high-risk\` for security, tenant isolation, protocol, SCIM/lifecycle, IGA execution, migration runtime correctness, and runtime quality gates; \`complex\` for multi-file architectural changes that require design before implementation (cross-cutting state machines, permission model restructuring, API contract changes); \`standard\` for narrow UI/docs/test-harness/product cleanup. High-risk and complex units run through a planner agent that writes an implementation design before the implementer runs.
 - Every packet must include required docs updates for the documentation locations named by the product profile. If the repo uses \`docs/architecture\`, \`docs/functional\`, or \`docs/manual\`, update the relevant layer when behavior or customer/operator workflows change.
 - Every packet must include verification gates.
-- Every packet must include a \`## Work Log\` section initialized to \`not-started\`.
+- Every packet must include a \`## Work Log\` section. Initialize it to \`not-started\` only when none of the merged seed packets are listed as complete in \`$COMPLETED_PACKETS_TSV\`.
 
 Do not edit product code. Do not start remediation.
 PROMPT
@@ -2950,7 +2970,8 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   # Reconcile completed packet state before any agent phase. A reused
   # REMEDIATION_DIR may have fixed summaries from prior runs, and cataloging can
   # be slow or interrupted before the normal execution resume path is reached.
-  build_implemented_packet_set
+  build_implemented_packet_set 0
+  write_completed_packet_manifest
 
   if [[ "$EXECUTE" == "1" && "$NO_CATALOG" != "1" && "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" ]]; then
     _raw_stats="$(raw_incomplete_unit_manifest_stats)"
