@@ -2506,6 +2506,12 @@ final_result_is_terminal() {
   esac
 }
 
+implementation_summary_is_fixed() {
+  local summary="$1"
+  [[ -s "$summary" ]] || return 1
+  grep -qiE '^IMPLEMENTATION_RESULT:[[:space:]]*fixed([[:space:]]|$)' "$summary" 2>/dev/null
+}
+
 readonly_role_diff_snapshot() {
   local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
   git -C "$REPO_ROOT" diff --binary -- . ":(exclude)${rel_rdir}" 2>/dev/null || true
@@ -2774,15 +2780,15 @@ run_prompt() {
     rm -f "$readonly_before_file" "$readonly_after_file"
   fi
 
-  # Auto-recover: if the agent exited non-zero but the log shows RESULT: PASS
-  # and the summary artifact exists, the work completed — checkpoint it anyway.
+  # Auto-recover: if the agent exited non-zero but the summary artifact records
+  # IMPLEMENTATION_RESULT: fixed, the work completed — checkpoint it anyway.
   # This handles rate-limit disconnects and stall-kills where the agent finished
   # writing output before the connection was lost.
   if [[ "$status" != "0" ]] && [[ "$class" =~ ^(high-risk|standard)$ ]]; then
     local unit_id="${workstream#implement-}"
     local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-    if final_result_is_pass "$log_file" && [[ -s "$summary" ]]; then
-      printf '\n[auto-recover] %s: non-zero exit but RESULT: PASS with summary — treating as success\n' \
+    if implementation_summary_is_fixed "$summary"; then
+      printf '\n[auto-recover] %s: non-zero exit but IMPLEMENTATION_RESULT: fixed summary exists — treating as success\n' \
         "$workstream" >>"$log_file"
       status=0
     fi
@@ -2805,7 +2811,7 @@ wave_job_completed_successfully() {
     implement-*)
       local unit_id="${name#implement-}"
       local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-      final_result_is_pass "$log_file" && [[ -s "$summary" ]]
+      implementation_summary_is_fixed "$summary"
       ;;
     verify-*)
       local unit_id="${name#verify-}"
