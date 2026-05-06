@@ -1372,6 +1372,10 @@ recover_packets_from_prior_remediation_runs() {
   for prior_dir in "$parent_dir"/*-remediation-run; do
     [[ "$prior_dir" != "$REMEDIATION_DIR" ]] || continue
     [[ -f "$prior_dir/00-master-px-list.tsv" ]] || continue
+    if [[ -f "$prior_dir/.remediation-no-import" || -f "$prior_dir/DO-NOT-IMPORT" ]]; then
+      printf '[resume] skipping quarantined prior remediation run: %s\n' "$prior_dir"
+      continue
+    fi
     prior_audit="$(remediation_dir_audit_run "$prior_dir")"
     [[ -n "$prior_audit" && "$prior_audit" == "$current_audit" ]] || continue
     for summary in "$prior_dir"/artifacts/*-summary.md; do
