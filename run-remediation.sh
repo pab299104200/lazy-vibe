@@ -2432,8 +2432,7 @@ run_command_with_heartbeat() {
           prev_size="$size"
         elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
           local stall_secs=$((now - last_change_ts))
-          if [[ "$stall_secs" -ge "$stall_threshold" ]] && \
-             grep -q "^RESULT: " "$log_file" 2>/dev/null; then
+          if [[ "$stall_secs" -ge "$stall_threshold" ]] && final_result_is_terminal "$log_file"; then
             printf '\r[!] %s: stalled after %ds with RESULT — terminating\033[K\n' \
               "$display_name" "$elapsed" >&2
             printf '[stall-kill] log stalled after %ds — terminating process\n' "$elapsed" >>"$log_file"
@@ -2490,7 +2489,7 @@ validate_prompt_outputs() {
 
 final_result_value() {
   local log_file="$1"
-  grep -E '^RESULT:[[:space:]]*(PASS|FAIL|INCOMPLETE|BLOCKED)' "$log_file" 2>/dev/null \
+  grep -aE '^RESULT:[[:space:]]*(PASS|FAIL|INCOMPLETE|BLOCKED)' "$log_file" 2>/dev/null \
     | tail -1 \
     | sed -E 's/^RESULT:[[:space:]]*//; s/[[:space:]].*$//' \
     | tr '[:lower:]' '[:upper:]'
@@ -2510,7 +2509,7 @@ final_result_is_terminal() {
 implementation_summary_is_fixed() {
   local summary="$1"
   [[ -s "$summary" ]] || return 1
-  grep -qiE '^IMPLEMENTATION_RESULT:[[:space:]]*fixed([[:space:]]|$)' "$summary" 2>/dev/null
+  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]]|$)' "$summary" 2>/dev/null
 }
 
 recover_verifier_artifact_from_log() {
@@ -2938,8 +2937,7 @@ wait_for_wave() {
           job_prev_size[$idx]="$size"
         elif [[ "$stall_threshold" -gt 0 ]]; then
           local stall_secs=$(( now2 - job_last_change[$idx] ))
-          if [[ "$stall_secs" -ge "$stall_threshold" ]] && \
-             grep -q "^RESULT: " "${job_log[$idx]}" 2>/dev/null; then
+          if [[ "$stall_secs" -ge "$stall_threshold" ]] && final_result_is_terminal "${job_log[$idx]}"; then
             local elapsed=$(( now2 - job_start[$idx] ))
             printf '\r\033[K[!] %s: stalled after %ds — terminating\n' \
               "${names_ref[$idx]}" "$elapsed" >&2
