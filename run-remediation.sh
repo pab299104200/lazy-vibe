@@ -120,6 +120,7 @@ Environment:
                               Receives: prompt_file remediation_dir workstream_id.
   REMEDIATION_RUNNER          Fallback wrapper for all roles when no role-specific runner is set.
                               Receives: prompt_file remediation_dir workstream_id.
+  CATALOG_AGENT               Built-in cataloger agent. Defaults to IMPLEMENTER_AGENT.
   CATALOG_RUNNER              Optional cataloger wrapper override.
   VERIFICATION_RUNNER         Optional verifier wrapper override.
   REVIEW_RUNNER               Optional final-review wrapper override.
@@ -2841,7 +2842,7 @@ run_prompt() {
   case "$class" in
     cataloger)
       runner="${CATALOG_RUNNER:-${REMEDIATION_RUNNER:-}}"
-      effective_agent="${IMPLEMENTER_AGENT:-codex}"
+      effective_agent="${CATALOG_AGENT:-${IMPLEMENTER_AGENT:-codex}}"
       ;;
     coordinator)
       runner="${REMEDIATION_RUNNER:-}"
@@ -3485,6 +3486,9 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
         printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
         if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
           printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+        else
+          printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
+          exit 1
         fi
       else
         printf '[resume] existing catalog detected; skipping 00-cataloger (use --force-catalog to rewrite)\n'
@@ -3498,6 +3502,9 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
         printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
         if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
           printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+        else
+          printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
+          exit 1
         fi
       fi
     fi

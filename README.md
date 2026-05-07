@@ -264,6 +264,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `PRODUCT_PROFILE` | profile `product-profile.md` | Product profile injected into every agent prompt. |
 | `SHARED_PROMPT` | `shared.md` (or profile override) | Shared rules injected into every prompt. |
 | `IMPLEMENTER_AGENT` | `codex` | Implementation agent: `codex`, `claude`, `gemini`, or `runner`. |
+| `CATALOG_AGENT` | `IMPLEMENTER_AGENT` | Cataloger agent: `codex`, `claude`, or `gemini`. |
 | `PLANNER_AGENT` | `REVIEWER_AGENT`, then `COORDINATOR_AGENT`, then `IMPLEMENTER_AGENT` | Planner agent for `high-risk`/`complex` implementation units. |
 | `REVIEWER_AGENT` | — | Verification agent. Empty disables `--verify`. |
 | `MAX_PARALLEL` | `3` | Maximum implementation units running in parallel. |
