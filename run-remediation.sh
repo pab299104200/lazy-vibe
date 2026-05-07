@@ -42,7 +42,7 @@ RECOORDINATE=0
 NO_NORMALIZE=0
 SPLIT_RUN_UNITS=""
 REMEDIATION_MAX_RETRIES="${REMEDIATION_MAX_RETRIES:-2}"
-REMEDIATION_RAW_UNIT_ABORT_THRESHOLD="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
+REMEDIATION_RAW_UNIT_ABORT_THRESHOLD="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-20}"
 REMEDIATION_ALLOW_RAW_UNITS="${REMEDIATION_ALLOW_RAW_UNITS:-0}"
 REMEDIATION_REWRITE_PACKETS="${REMEDIATION_REWRITE_PACKETS:-0}"
 REMEDIATION_REWRITE_WORKSTREAMS="${REMEDIATION_REWRITE_WORKSTREAMS:-0}"
@@ -79,7 +79,7 @@ Environment:
   REMEDIATION_MAX_RETRIES     Extra retry attempts per workstream on non-zero runner exit. Defaults to 2 (3 total attempts, backoff 15s/30s).
   REMEDIATION_RAW_UNIT_ABORT_THRESHOLD
                               Abort before execution when this many raw one-packet PX-* implementation
-                              units remain after coordination/cataloging. Defaults to 50.
+                              units remain after coordination/cataloging. Defaults to 20.
   REMEDIATION_ALLOW_RAW_UNITS 1 to allow execution of a large raw one-packet manifest. Defaults to 0.
   REMEDIATION_REWRITE_PACKETS
                               1 to overwrite existing packet files when reusing REMEDIATION_DIR. Defaults to 0.
@@ -1259,7 +1259,7 @@ raw_incomplete_unit_manifest_stats() {
 
 raw_incomplete_unit_manifest_is_unsafe() {
   local total="$1" raw="$2" single="$3"
-  local threshold="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-50}"
+  local threshold="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-20}"
   if (( total == 0 || raw < threshold )); then
     return 1
   fi
