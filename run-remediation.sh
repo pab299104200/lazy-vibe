@@ -2513,6 +2513,30 @@ implementation_summary_is_fixed() {
   grep -qiE '^IMPLEMENTATION_RESULT:[[:space:]]*fixed([[:space:]]|$)' "$summary" 2>/dev/null
 }
 
+recover_verifier_artifact_from_log() {
+  local unit_id="$1" log_file="$2"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  local packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" || true)"
+  [[ ! -s "$verifier" ]] || return 0
+  final_result_is_pass "$log_file" || return 1
+  implementation_summary_is_fixed "$summary" || return 1
+
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  {
+    printf '# Verification: %s\n\n' "$unit_id"
+    printf -- '- Decision: accept\n'
+    printf -- '- Implementation decision: fixed\n'
+    printf -- '- Launch evidence decision: pending\n\n'
+    [[ -n "$packets_csv" ]] && printf -- '- Packets: %s\n\n' "$packets_csv"
+    printf 'Recovered from `%s` after the verifier exited non-zero or stalled after writing `RESULT: PASS` but before creating this artifact.\n\n' "$log_file"
+    printf 'The implementation summary records `IMPLEMENTATION_RESULT: fixed`; this recovered verifier artifact exists so resume and commit-on-verify can use the normal artifact contract.\n\n'
+    printf 'RESULT: PASS\n'
+  } > "$verifier"
+  printf '[auto-recover] verify-%s: recovered missing verifier artifact from RESULT: PASS log\n' "$unit_id" >>"$log_file"
+}
+
 readonly_role_diff_snapshot() {
   local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
   git -C "$REPO_ROOT" diff --binary -- . ":(exclude)${rel_rdir}" 2>/dev/null || true
@@ -2796,6 +2820,12 @@ run_prompt() {
       status=0
     fi
   fi
+  if [[ "$status" != "0" && "$workstream" == verify-* ]]; then
+    local unit_id="${workstream#verify-}"
+    if recover_verifier_artifact_from_log "$unit_id" "$log_file"; then
+      status=0
+    fi
+  fi
 
   return "$status"
 }
@@ -2819,6 +2849,7 @@ wave_job_completed_successfully() {
     verify-*)
       local unit_id="${name#verify-}"
       local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+      recover_verifier_artifact_from_log "$unit_id" "$log_file" || true
       final_result_is_terminal "$log_file" && [[ -s "$verifier" ]]
       ;;
     *)
@@ -3095,9 +3126,22 @@ execute_verifier_units() {
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
       continue
     fi
+    local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    local prior_verify_log="$REMEDIATION_DIR/logs/verify-$unit_id.log"
+    if [[ "$REVISE_EXISTING" != "1" ]] && \
+       ! grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null && \
+       recover_verifier_artifact_from_log "$unit_id" "$prior_verify_log"; then
+      printf '[resume] recovered completed verify-%s from existing verifier log\n' "$unit_id"
+      printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
+      if ! commit_verified_unit_changes "$unit_id"; then
+        if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+          exit 1
+        fi
+      fi
+      continue
+    fi
     # Skip already-verified units unless this is a revision pass.
     if [[ "$REVISE_EXISTING" != "1" ]] && grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
       if artifact_mentions_all_packets "$verifier" "$packets_csv"; then
         printf '[resume] skipping completed verify-%s\n' "$unit_id"
         continue
