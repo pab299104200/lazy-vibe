@@ -2765,6 +2765,14 @@ verifier_accepts_unit() {
   grep -qiE '^[[:space:]-]*Implementation decision:[[:space:]]*`?fixed`?' "$verifier" || return 1
 }
 
+verifier_has_terminal_decision() {
+  local unit_id="$1"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  [[ -s "$verifier" ]] || return 1
+  grep -qiE '^[[:space:]-]*Decision:[[:space:]]*`?(accept|revise|stop)`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*Implementation decision:[[:space:]]*`?(fixed|revise|blocked)`?' "$verifier" || return 1
+}
+
 commit_verified_unit_changes() {
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
   local unit_id="$1"
@@ -2960,12 +2968,14 @@ run_prompt() {
       if [[ "$readonly_before_size" == "0" ]]; then
         local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
         git -C "$REPO_ROOT" checkout -- . ":(exclude)${rel_rdir}" >>"$log_file" 2>&1 || true
+        if [[ "$class" != "coordinator" ]]; then
+          status=1
+        fi
       else
         printf 'Pre-existing product diff was present before %s; not reverting to avoid destroying implementation work.\n' \
           "$workstream" >>"$log_file"
-      fi
-      if [[ "$class" != "coordinator" ]]; then
-        status=1
+        printf 'Read-only diff attribution is ambiguous because the product tree was already dirty; continuing without reverting.\n' \
+          >>"$log_file"
       fi
     fi
     rm -f "$readonly_before_file" "$readonly_after_file"
@@ -2988,6 +2998,11 @@ run_prompt() {
     local unit_id="${workstream#verify-}"
     if recover_verifier_artifact_from_log "$unit_id" "$log_file"; then
       status=0
+    elif verifier_has_terminal_decision "$unit_id"; then
+      ensure_verifier_findings_header "$(verifier_findings_tsv_for_unit "$unit_id")"
+      printf '\n[auto-recover] %s: verifier artifact has terminal decision — treating verifier job as complete\n' \
+        "$workstream" >>"$log_file"
+      status=0
     fi
   fi
 
@@ -2996,7 +3011,8 @@ run_prompt() {
 
 wave_job_completed_successfully() {
   local name="$1" log_file="$2"
-  if grep -q '^INTEGRITY VIOLATION:' "$log_file" 2>/dev/null; then
+  if grep -q '^INTEGRITY VIOLATION:' "$log_file" 2>/dev/null && \
+     ! grep -q 'Pre-existing product diff was present before' "$log_file" 2>/dev/null; then
     return 1
   fi
   case "$name" in
@@ -3014,6 +3030,10 @@ wave_job_completed_successfully() {
       local unit_id="${name#verify-}"
       local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
       recover_verifier_artifact_from_log "$unit_id" "$log_file" || true
+      if verifier_has_terminal_decision "$unit_id"; then
+        ensure_verifier_findings_header "$(verifier_findings_tsv_for_unit "$unit_id")"
+        return 0
+      fi
       final_result_is_terminal "$log_file" && [[ -s "$verifier" ]]
       ;;
     *)
