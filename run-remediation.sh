@@ -13,7 +13,8 @@ MAX_PARALLEL="${MAX_PARALLEL:-3}"
 MAX_WORKSTREAM_PACKETS="${MAX_WORKSTREAM_PACKETS:-80}"
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-0}"
 AUTO_REVISE="${REMEDIATION_AUTO_REVISE:-1}"
-MAX_REVISION_ROUNDS="${REMEDIATION_MAX_REVISION_ROUNDS:-2}"
+MAX_REVISION_ROUNDS="${REMEDIATION_MAX_REVISION_ROUNDS:-1}"
+MAX_AUTO_REVISE_FINDINGS="${REMEDIATION_MAX_AUTO_REVISE_FINDINGS:-8}"
 EXECUTE=0
 VERIFY=0
 VERIFY_ONLY=0
@@ -69,7 +70,9 @@ Environment:
   CONTINUE_ON_FAIL            1 to continue after a failed workstream. Defaults to 0.
   REMEDIATION_AUTO_REVISE     1 to rerun verifier-revised units before final review. Defaults to 1.
   REMEDIATION_MAX_REVISION_ROUNDS
-                              Max implement/verify revision rounds after first verification. Defaults to 2.
+                              Max implement/verify revision rounds after first verification. Defaults to 1.
+  REMEDIATION_MAX_AUTO_REVISE_FINDINGS
+                              Max verifier finding rows allowed for automatic revision. Defaults to 8.
   REMEDIATION_REVISION_MAX_PARALLEL
                               Parallelism during revision rounds. Defaults to 2.
   REMEDIATION_VERIFY_SCOPE    implementation or launch. Defaults to implementation.
@@ -356,10 +359,63 @@ file_matches() {
   local pattern="$1" file="$2"
   [[ -f "$file" ]] || return 1
   if command -v rg >/dev/null 2>&1; then
-    rg -qi "$pattern" "$file"
+    rg -aqi "$pattern" "$file"
   else
-    grep -Eiq "$pattern" "$file"
+    grep -Eaiq "$pattern" "$file"
   fi
+}
+
+verifier_findings_tsv_for_unit() {
+  printf '%s/artifacts/verify-%s-findings.tsv\n' "$REMEDIATION_DIR" "$1"
+}
+
+aggregate_verifier_findings_tsv() {
+  printf '%s/05-verifier-findings.tsv\n' "$REMEDIATION_DIR"
+}
+
+ensure_verifier_findings_header() {
+  local file="$1"
+  [[ -s "$file" ]] && return 0
+  mkdir -p "$(dirname "$file")"
+  printf 'unit_id\tseverity\ttype\tfile\tline\tfinding\trequired_fix\n' > "$file"
+}
+
+verifier_finding_type_blocks_auto_revise() {
+  local findings="$1"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' '
+    NR > 1 && ($3 == "contract_conflict" || $3 == "test_harness" || $3 == "blocked" || $3 == "split_required") {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$findings"
+}
+
+verifier_findings_exceed_auto_revise_limit() {
+  local findings="$1"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' -v max="$MAX_AUTO_REVISE_FINDINGS" '
+    NR > 1 && $1 != "" {
+      count += 1
+    }
+    END { exit count > max ? 0 : 1 }
+  ' "$findings"
+}
+
+aggregate_verifier_findings() {
+  local aggregate
+  aggregate="$(aggregate_verifier_findings_tsv)"
+  ensure_verifier_findings_header "$aggregate"
+  [[ -d "$REMEDIATION_DIR/artifacts" ]] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  printf 'unit_id\tseverity\ttype\tfile\tline\tfinding\trequired_fix\n' > "$tmp"
+  find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*-findings.tsv' -print 2>/dev/null \
+    | sort \
+    | while IFS= read -r file; do
+        tail -n +2 "$file"
+      done >> "$tmp"
+  mv "$tmp" "$aggregate"
 }
 
 combine_unit_lists() {
@@ -443,11 +499,26 @@ revised_units_from_verifiers() {
     fi
 
     local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    local findings
+    findings="$(verifier_findings_tsv_for_unit "$unit_id")"
     if [[ ! -s "$verifier" ]]; then
       units+=("$unit_id")
       continue
     fi
-    if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(revise|stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(revise|blocked)' "$verifier"; then
+    if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(blocked)' "$verifier"; then
+      printf '[auto-revise] %s blocked by verifier decision; leaving for manual triage\n' "$unit_id" >&2
+      continue
+    fi
+    if verifier_finding_type_blocks_auto_revise "$findings"; then
+      printf '[auto-revise] %s has contract/test-harness/split/blocking verifier findings; leaving for manual triage\n' "$unit_id" >&2
+      continue
+    fi
+    if verifier_findings_exceed_auto_revise_limit "$findings"; then
+      printf '[auto-revise] %s has more than %s verifier findings; leaving for manual triage/splitting\n' \
+        "$unit_id" "$MAX_AUTO_REVISE_FINDINGS" >&2
+      continue
+    fi
+    if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(revise)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(revise)' "$verifier"; then
       units+=("$unit_id")
     fi
   done < <(tail -n +2 "$UNITS_TSV")
@@ -1996,6 +2067,8 @@ DESIGN
   fi
   local revision_context=""
   if [[ "$REVISE_EXISTING" == "1" ]]; then
+    local findings_tsv
+    findings_tsv="$(verifier_findings_tsv_for_unit "$unit_id")"
     revision_context=$(cat <<REVISION
 
 ## Revision Context
@@ -2006,9 +2079,14 @@ Open these prior artifacts before editing:
 
 - Previous implementation summary: \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\`
 - Previous verifier artifact: \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\`
+- Previous verifier findings TSV: \`$findings_tsv\`
 - Previous implementation log if needed for failure details: \`$REMEDIATION_DIR/logs/implement-$unit_id.log\`
 
-Your work contract is the unresolved implementation/code/docs/test revision list from the verifier artifact. Fix stale active tests, code defects, incomplete implementation, and documentation contradictions. In implementation scope, do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Record those as launch evidence pending or sandbox-blocked, but do not leave fixable code/docs/tests unresolved.
+Your work contract is the unresolved implementation/code/docs/test revision list from the verifier findings TSV. Fix only those findings and the minimum directly required follow-on changes. Do not redesign, recatalog, broaden scope, or revisit accepted packet areas. If the TSV is missing or empty, use the verifier artifact's explicit required revisions and keep the same narrow scope.
+
+If the verifier finding type is \`contract_conflict\`, \`test_harness\`, or \`blocked\`, stop and write \`IMPLEMENTATION_RESULT: blocked\` with the exact human decision or targeted command required. Do not guess the product contract, and do not make broad test-harness rewrites from inside the auto-revise loop.
+
+In implementation scope, do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Record those as launch evidence pending or sandbox-blocked, but do not leave fixable code/docs/tests unresolved.
 REVISION
 )
   fi
@@ -2075,6 +2153,8 @@ PROMPT
 build_verifier_prompt() {
   local unit_id="$1" group="$2" model_class="$3" packets_csv="$4"
   local prompt="$REMEDIATION_DIR/prompts/verify-$unit_id.md"
+  local findings_tsv
+  findings_tsv="$(verifier_findings_tsv_for_unit "$unit_id")"
   local packet_list
   packet_list="$(packet_paths_for_ids "$packets_csv")"
 
@@ -2128,6 +2208,11 @@ This verifier is intentionally independent from the implementation workstream an
 6. Confirm success-path and failure-path tests exist and were run or honestly blocked.
 7. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
 8. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
+9. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
+10. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
+11. If the blocker is a flaky, timing-sensitive, performance, environment-ordering, or broad harness issue, classify it as \`test_harness\` and specify the exact targeted command or human decision required. Do not demand repeated full-suite execution from the auto-revise loop.
+12. Do not reopen an already closed packet solely because the original audit text still exists or because launch evidence is pending under implementation scope. Reopen it only when current code/docs/tests/work-log evidence contradicts the claimed closure, a focused runnable implementation gate fails, or a required implementation artifact is missing.
+13. If the unit requires more than \`$MAX_AUTO_REVISE_FINDINGS\` independent code/docs/test fixes, or the findings span unrelated product areas that should not be revised as one change, classify the excess as \`split_required\` and use \`Decision: stop\` / \`Implementation decision: blocked\`.
 
 Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 
@@ -2138,6 +2223,26 @@ Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 - References opened and wider searches performed.
 - Missing evidence and required revisions.
 - Whether this workstream can be included in final remediation signoff.
+
+Also write \`$findings_tsv\` with this exact tab-separated header:
+
+\`\`\`text
+unit_id	severity	type	file	line	finding	required_fix
+\`\`\`
+
+Use one row per unresolved verifier finding. Valid \`type\` values:
+
+- \`code\` — product/source implementation defect.
+- \`docs\` — stale or contradictory docs with clear intended behavior.
+- \`tests\` — missing or failing normal focused tests.
+- \`test_harness\` — flaky/timing/performance/environment-ordering/broad-suite harness issue that needs a targeted command or explicit human decision before auto-revision.
+- \`contract_conflict\` — code/tests/docs/packet disagree on the intended behavior and a human product/security decision is required.
+- \`launch_evidence\` — launch proof pending but implementation is otherwise fixed.
+- \`sandbox_blocked\` — evidence cannot run in this environment.
+- \`split_required\` — too many independent findings or unrelated product areas for safe automatic revision.
+- \`blocked\` — cannot proceed without external dependency, access, or human input.
+
+For \`accept\` / \`fixed\`, write only the header or only \`launch_evidence\` / \`sandbox_blocked\` rows. Do not include \`contract_conflict\`, \`test_harness\`, \`split_required\`, or \`blocked\` rows on an accepted implementation.
 PROMPT
 }
 
@@ -2475,10 +2580,13 @@ validate_prompt_outputs() {
   elif [[ "$workstream" == verify-* ]]; then
     local unit_id="${workstream#verify-}"
     local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    local findings
+    findings="$(verifier_findings_tsv_for_unit "$unit_id")"
     if [[ ! -s "$verifier" ]]; then
       printf '[postcheck] missing verifier artifact: %s\n' "$verifier" >&2
       return 1
     fi
+    ensure_verifier_findings_header "$findings"
   elif [[ "$class" == "reviewer" ]]; then
     if [[ ! -s "$REMEDIATION_DIR/04-final-remediation-review.md" ]]; then
       printf '[postcheck] missing final remediation review: %s\n' "$REMEDIATION_DIR/04-final-remediation-review.md" >&2
@@ -2533,6 +2641,7 @@ recover_verifier_artifact_from_log() {
     printf 'The implementation summary records `IMPLEMENTATION_RESULT: fixed`; this recovered verifier artifact exists so resume and commit-on-verify can use the normal artifact contract.\n\n'
     printf 'RESULT: PASS\n'
   } > "$verifier"
+  ensure_verifier_findings_header "$(verifier_findings_tsv_for_unit "$unit_id")"
   printf '[auto-recover] verify-%s: recovered missing verifier artifact from RESULT: PASS log\n' "$unit_id" >>"$log_file"
 }
 
@@ -3172,6 +3281,7 @@ execute_verifier_units() {
       fi
     fi
   fi
+  aggregate_verifier_findings
 }
 
 execute_final_review() {
@@ -3198,6 +3308,7 @@ execute_revision_rounds() {
 
   local round=1
   while ((round <= MAX_REVISION_ROUNDS)); do
+    aggregate_verifier_findings
     local revised_units
     revised_units="$(revised_units_from_verifiers)"
     if [[ -z "$revised_units" ]]; then
@@ -3215,6 +3326,7 @@ execute_revision_rounds() {
 
     execute_workstreams
     execute_verifier_units
+    aggregate_verifier_findings
 
     ONLY_UNIT="$previous_only"
     REVISE_EXISTING="$previous_revise"
@@ -3223,6 +3335,7 @@ execute_revision_rounds() {
   done
 
   local remaining_units
+  aggregate_verifier_findings
   remaining_units="$(revised_units_from_verifiers)"
   if [[ -n "$remaining_units" ]]; then
     printf '[auto-revise] max rounds reached; remaining verifier-revised units=%s\n' "$remaining_units" >&2
@@ -3420,6 +3533,88 @@ write_run_summary() {
   printf '==========================================\n'
 }
 
+verifier_finding_type_exists() {
+  local findings="$1" type="$2"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' -v type="$type" '
+    NR > 1 && $3 == type {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$findings"
+}
+
+verifier_findings_count() {
+  local findings="$1"
+  [[ -s "$findings" ]] || {
+    printf '0\n'
+    return 0
+  }
+  awk -F '\t' 'NR > 1 && $1 != "" { count += 1 } END { printf "%d\n", count }' "$findings"
+}
+
+verifier_queue_category() {
+  local unit_id="$1"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+
+  if verifier_accepts_unit "$unit_id"; then
+    if verifier_finding_type_exists "$findings" "launch_evidence" || verifier_finding_type_exists "$findings" "sandbox_blocked"; then
+      printf 'accepted_evidence_pending\n'
+    else
+      printf 'accepted\n'
+    fi
+    return 0
+  fi
+
+  if verifier_finding_type_exists "$findings" "contract_conflict"; then
+    printf 'contract_conflict\n'
+  elif verifier_finding_type_exists "$findings" "test_harness"; then
+    printf 'test_harness\n'
+  elif verifier_finding_type_exists "$findings" "split_required"; then
+    printf 'split_required\n'
+  elif verifier_finding_type_exists "$findings" "blocked"; then
+    printf 'blocked\n'
+  elif [[ ! -s "$verifier" ]]; then
+    printf 'not_verified\n'
+  elif file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(blocked)' "$verifier"; then
+    printf 'blocked\n'
+  elif file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(revise)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(revise)' "$verifier"; then
+    printf 'needs_targeted_revision\n'
+  else
+    printf 'needs_review\n'
+  fi
+}
+
+write_remediation_queue_summary() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  [[ ! -f "$UNITS_TSV" ]] && return 0
+  aggregate_verifier_findings
+
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  printf 'unit_id\tgroup\tmodel_class\tpackets\tcategory\tfinding_count\tverifier_artifact\tfindings_tsv\n' > "$queue"
+
+  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
+    [[ -z "${unit_id:-}" ]] && continue
+    local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    local findings
+    findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$unit_id" \
+      "$group" \
+      "$model_class" \
+      "$packets_csv" \
+      "$(verifier_queue_category "$unit_id")" \
+      "$(verifier_findings_count "$findings")" \
+      "$verifier" \
+      "$findings" >> "$queue"
+  done < <(tail -n +2 "$UNITS_TSV")
+
+  printf 'Queue: %s\n' "$queue"
+  awk -F '\t' 'NR > 1 { count[$5] += 1 } END { for (category in count) printf "  %s: %d\n", category, count[category] }' "$queue" | sort
+}
+
 printf 'Remediation run directory: %s\n' "$REMEDIATION_DIR"
 printf 'Master Px list: %s\n' "$PX_MD"
 printf 'Workstreams: %s\n' "$WORKSTREAMS_TSV"
@@ -3450,3 +3645,4 @@ else
 fi
 
 write_run_summary
+write_remediation_queue_summary

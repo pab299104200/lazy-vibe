@@ -264,12 +264,13 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `PRODUCT_PROFILE` | profile `product-profile.md` | Product profile injected into every agent prompt. |
 | `SHARED_PROMPT` | `shared.md` (or profile override) | Shared rules injected into every prompt. |
 | `IMPLEMENTER_AGENT` | `codex` | Implementation agent: `codex`, `claude`, `gemini`, or `runner`. |
-| `PLANNER_AGENT` | `COORDINATOR_AGENT`, then `IMPLEMENTER_AGENT` | Planner agent for `high-risk`/`complex` implementation units. |
+| `PLANNER_AGENT` | `REVIEWER_AGENT`, then `COORDINATOR_AGENT`, then `IMPLEMENTER_AGENT` | Planner agent for `high-risk`/`complex` implementation units. |
 | `REVIEWER_AGENT` | — | Verification agent. Empty disables `--verify`. |
 | `MAX_PARALLEL` | `3` | Maximum implementation units running in parallel. |
 | `CONTINUE_ON_FAIL` | `0` | Set to `1` to continue past a failed unit instead of stopping. |
-| `REMEDIATION_AUTO_REVISE` | `1` | Re-run units that verifier marks `revise` or `blocked`. |
-| `REMEDIATION_MAX_REVISION_ROUNDS` | `2` | Maximum automatic revision loops before final review. |
+| `REMEDIATION_AUTO_REVISE` | `1` | Re-run units that verifier marks `revise` when findings are safe for targeted automatic revision. |
+| `REMEDIATION_MAX_REVISION_ROUNDS` | `1` | Maximum automatic revision loops before final review. |
+| `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` | `8` | Maximum verifier finding rows allowed for automatic revision; larger units are left for manual triage or splitting. |
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
 | `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing a large raw one-packet-per-PX manifest. |
@@ -310,6 +311,10 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `packets/PX-*.md` | Remediation packets with status, scope, and work log. |
 | `artifacts/*-summary.md` | Post-implementation summaries (changed files, tests, docs, risks). |
 | `artifacts/verify-*.md` | Verifier decisions. |
+| `artifacts/verify-*-findings.tsv` | Structured verifier findings used as the narrow auto-revision contract. Accepted units may have only the header or launch/sandbox evidence rows. |
+| `05-verifier-findings.tsv` | Aggregate verifier findings across units. |
+| `06-run-summary.tsv` | Implementation and verifier decision summary by unit. |
+| `07-remediation-queue.tsv` | Triage queue that classifies units as accepted, targeted revision, contract conflict, test harness, split required, blocked, or not verified. |
 | `logs/*.log` | Full agent logs. |
 | `04-final-remediation-review.md` | Final read-only signoff. |
 
