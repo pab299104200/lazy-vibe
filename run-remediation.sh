@@ -1143,7 +1143,7 @@ guard_against_auto_revise_raw_unit_manifest() {
   [[ "$REMEDIATION_ALLOW_RAW_UNITS" == "1" ]] && return 0
 
   local stats total raw single
-  stats="$(raw_incomplete_unit_manifest_stats)"
+  stats="$(raw_unit_manifest_stats)"
   IFS=$'\t' read -r total raw single <<< "$stats"
 
   if ! raw_incomplete_unit_manifest_is_unsafe "$total" "$raw" "$single"; then
@@ -1233,6 +1233,25 @@ Override only for a deliberate partial run:
   REMEDIATION_ALLOW_INCOMPLETE_UNIT_COVERAGE=1
 EOF
   return 2
+}
+
+raw_unit_manifest_stats() {
+  [[ -f "$UNITS_TSV" ]] || {
+    printf '0\t0\t0\n'
+    return 0
+  }
+  local total=0 raw=0 single=0 unit_id packets_csv _group _model _sev _rat
+  while IFS=$'\t' read -r unit_id packets_csv _group _model _sev _rat; do
+    [[ -z "${unit_id:-}" ]] && continue
+    total=$((total + 1))
+    if [[ "$unit_id" =~ ^PX-[0-9]+$ ]]; then
+      raw=$((raw + 1))
+    fi
+    if [[ "$packets_csv" != *,* ]]; then
+      single=$((single + 1))
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+  printf '%d\t%d\t%d\n' "$total" "$raw" "$single"
 }
 
 raw_incomplete_unit_manifest_stats() {
