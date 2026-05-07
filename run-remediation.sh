@@ -3410,6 +3410,8 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   # here would disconnect resume state from completed artifacts.
   if [[ "$REMEDIATION_REWRITE_UNITS" == "1" || ! -f "$UNITS_TSV" ]]; then
     write_default_units
+  elif [[ "$FORCE_CATALOG" == "1" && "$EXECUTE" == "1" && "$NO_CATALOG" != "1" ]]; then
+    printf '[catalog] preserving existing implementation units as catalog seed; --force-catalog will rerun 00-cataloger: %s\n' "$UNITS_TSV"
   else
     printf '[resume] preserving existing implementation units: %s\n' "$UNITS_TSV"
   fi
@@ -3430,6 +3432,12 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
   fi
 
   if [[ "$CATALOG_WITH_CODEX" == "1" ]]; then
+    if [[ "$FORCE_CATALOG" == "1" && -f "$CHECKPOINT_FILE" ]]; then
+      _catalog_checkpoint_tmp="$(mktemp)"
+      grep -vxF "00-cataloger" "$CHECKPOINT_FILE" > "$_catalog_checkpoint_tmp" || true
+      mv "$_catalog_checkpoint_tmp" "$CHECKPOINT_FILE"
+      printf '[force-catalog] cleared 00-cataloger checkpoint; cataloger will rerun\n'
+    fi
     if [[ "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" && -s "$WORKSTREAMS_TSV" ]]; then
       _raw_stats="$(raw_incomplete_unit_manifest_stats)"
       IFS=$'\t' read -r _raw_total _raw_units _raw_single <<< "$_raw_stats"
