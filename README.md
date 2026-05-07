@@ -273,7 +273,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` | `8` | Maximum verifier finding rows allowed for automatic revision; larger units are left for manual triage or splitting. |
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
-| `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing a large raw one-packet-per-PX manifest. |
+| `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing or auto-revising a large raw one-packet-per-PX manifest. |
 | `REMEDIATION_RAW_UNIT_ABORT_THRESHOLD` | `50` | Raw `PX-*` unit count that triggers the execution guard. |
 | `REMEDIATION_REWRITE_PACKETS` | `0` | Set to `1` to overwrite existing packet files when reusing `REMEDIATION_DIR`. |
 | `REMEDIATION_REWRITE_WORKSTREAMS` | `0` | Set to `1` to overwrite an existing workstream TSV when reusing `REMEDIATION_DIR`. |

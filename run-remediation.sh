@@ -1138,6 +1138,43 @@ EOF
   return 2
 }
 
+guard_against_auto_revise_raw_unit_manifest() {
+  [[ -f "$UNITS_TSV" ]] || return 0
+  [[ "$REMEDIATION_ALLOW_RAW_UNITS" == "1" ]] && return 0
+
+  local stats total raw single
+  stats="$(raw_incomplete_unit_manifest_stats)"
+  IFS=$'\t' read -r total raw single <<< "$stats"
+
+  if ! raw_incomplete_unit_manifest_is_unsafe "$total" "$raw" "$single"; then
+    return 0
+  fi
+
+  cat >&2 <<EOF
+[auto-revise-guard] refusing to auto-revise a raw one-packet implementation manifest.
+
+Manifest: $UNITS_TSV
+Rows: total=$total raw_px_unit_ids=$raw single_packet_rows=$single
+
+Automatic revision internally narrows execution with ONLY_UNIT. That must not
+bypass the raw-manifest guard, because a stale catalog can otherwise launch one
+revision implementer per PX packet.
+
+Fix:
+  - Stop this run.
+  - Re-run with --force-catalog and the rewrite flags if this remediation state
+    is being intentionally rebuilt:
+      REMEDIATION_REWRITE_PACKETS=1
+      REMEDIATION_REWRITE_WORKSTREAMS=1
+      REMEDIATION_REWRITE_UNITS=1
+  - Or provide a merged implementation-unit TSV before resuming.
+
+Override only when you intentionally want raw per-PX auto-revision:
+  REMEDIATION_ALLOW_RAW_UNITS=1
+EOF
+  return 2
+}
+
 guard_against_incomplete_unit_coverage() {
   [[ "${REMEDIATION_ALLOW_INCOMPLETE_UNIT_COVERAGE:-0}" == "1" ]] && return 0
   [[ -f "$PX_TSV" && -f "$UNITS_TSV" ]] || return 0
@@ -3304,6 +3341,11 @@ execute_verifiers() {
 execute_revision_rounds() {
   if [[ "$AUTO_REVISE" != "1" || "$EXECUTE" != "1" || "$VERIFY" != "1" || "$VERIFY_SCOPE" != "implementation" || "$DRY_RUN" == "1" ]]; then
     return 0
+  fi
+
+  local user_selected_units="$ONLY_UNIT"
+  if [[ -z "$user_selected_units" ]]; then
+    guard_against_auto_revise_raw_unit_manifest
   fi
 
   local round=1
