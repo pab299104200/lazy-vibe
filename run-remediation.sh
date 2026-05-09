@@ -577,6 +577,9 @@ source_kind() {
     */11-maturity-stage-simulation.md|*/12-customer-playbook.md|*/artifacts/15*/*|*/logs/15*) printf 'maturity-customer-proof\n' ;;
     */13-adversarial-review.md|*/14-final-release-decision.md|*/logs/16*) printf 'adversarial-final-decision\n' ;;
     */artifacts/00-bootstrap/spec-inventory.txt|*/artifacts/00-bootstrap/master-prompt-excerpts.txt) printf 'spec-addition\n' ;;
+    # Dynamic deep-dive outputs land in 01-domain/ and are already covered above.
+    # Runtime scan artifacts: SAST, Lighthouse, accessibility, external-services, load-test.
+    */artifacts/*/sast/*|*/artifacts/*/lighthouse/*|*/artifacts/*/accessibility/*|*/artifacts/*/external-services/*|*/artifacts/load-test/*) printf 'runtime-verification\n' ;;
     *) printf 'synthesis\n' ;;
   esac
 }
@@ -588,6 +591,8 @@ audit_source_files() {
     find "$AUDIT_RUN/artifacts/00-bootstrap" -maxdepth 1 -type f \( -name 'spec-inventory.txt' -o -name 'master-prompt-excerpts.txt' \) 2>/dev/null || true
     find "$AUDIT_RUN/logs" -maxdepth 1 -type f \( -name '14*.log' -o -name '15*.log' -o -name '16*.log' \) 2>/dev/null || true
     find "$AUDIT_RUN/logs" -maxdepth 1 -type f -name '16c-adversarial-product.log' 2>/dev/null || true
+    # Runtime artifact reports: SAST, Lighthouse, accessibility, external-services, load-test
+    find "$AUDIT_RUN/artifacts" -mindepth 2 -type f -name '*.md' 2>/dev/null || true
   } | sort -u
 }
 
@@ -611,6 +616,16 @@ classify_group() {
   case "$haystack" in
     *spec-inventory*|*master-prompt-excerpts*|*spec*addition*|*must\ implement*|*contract\ gap*) printf 'spec-contract-gaps\n' ;;
     *runtime-backend*|*runtime-frontend*|*runtime-protocol*|*quality*|*ruff*|*postgres*|*migration-table*|*smoke*) printf 'runtime-quality-gates\n' ;;
+    # SAST/CVE findings → security-auth (highest-risk workstream for vulnerability findings)
+    *bandit*|*semgrep*|*pip-audit*|*npm\ audit*|*cve-*|*cvss*|*sql\ injection*|*command\ injection*|*xss*|*sast*|*dependency\ vulnerability*|*supply\ chain*) printf 'security-auth\n' ;;
+    # Accessibility violations → frontend-ux-tests
+    *wcag*|*axe-core*|*axe\ violation*|*accessibility\ violation*|*aria-*|*color\ contrast*|*screen\ reader*) printf 'frontend-ux-tests\n' ;;
+    # Lighthouse / Core Web Vitals performance findings → runtime-quality-gates
+    *lighthouse*|*core\ web\ vitals*|*lcp\ *|*cls\ *|*inp\ *|*ttfb\ *|*performance\ score*|*cumulative\ layout\ shift*|*largest\ contentful\ paint*) printf 'runtime-quality-gates\n' ;;
+    # External services connectivity failures → product-integrations
+    *external\ service*|*external-service*|*oauth\ provider*|*smtp*|*saas\ api*|*webhook\ probe*|*cloud\ sdk*) printf 'product-integrations\n' ;;
+    # Load test failures → runtime-quality-gates
+    *load\ test*|*load-test*|*p95\ *|*p99\ *|*error\ rate*|*baseline\ scenario*|*ramp\ scenario*|*spike\ scenario*|*k6*|*locust*|*artillery*) printf 'runtime-quality-gates\n' ;;
     *csrf*|*tenant-isolation*|*support-access*|*mfa-pending*|*rbac*|*auth-boundar*|*data-protection*|*guest-invite*|*guest-access*|*public*invite*|*tenants*|*roles-permissions*) printf 'security-auth\n' ;;
     *scim*|*lifecycle*|*provisioning*|*joiner*|*mover*|*leaver*) printf 'scim-lifecycle\n' ;;
     *saml*|*oidc*|*oauth*|*federation*|*jwks*|*authnrequest*|*replay*|*signing-key*) printf 'protocol-federation\n' ;;
@@ -1932,6 +1947,8 @@ Use the generated seed inventory as a starting point, then inspect the audit rep
 - \`$AUDIT_RUN/14-final-release-decision.md\`
 - \`$AUDIT_RUN/logs/14*.log\`, \`$AUDIT_RUN/logs/15*.log\`, and \`$AUDIT_RUN/logs/16*.log\` when the markdown artifacts cite missing or incomplete evidence.
 - \`$AUDIT_RUN/logs/16c-adversarial-product.log\` if it exists, because the final decision says 16C was not fully merged.
+- \`$AUDIT_RUN/artifacts/load-test/load-test-report.md\` if it exists — contains load test scenario results, p95/p99 latencies, and error rates.
+- Any \`*.md\` files under \`$AUDIT_RUN/artifacts/\` subdirectories (e.g., \`sast/\`, \`lighthouse/\`, \`accessibility/\`, \`external-services/\`, deep-dive job reports) — these contain SAST/CVE findings, Core Web Vitals results, WCAG violations, and external service probe results that must be cataloged as packets alongside the main audit reports.
 
 Rewrite these files with a deduplicated, implementation-ready catalog:
 
