@@ -37,10 +37,12 @@ The audit runs 10 sequential groups. Within each group, jobs execute in parallel
 | **03** | `03a` `03b` `03c` | Cross-cutting synthesis in parallel: security, auth, and data boundaries (3A), observability, recovery, and operations (3B), test coverage, docs accuracy, and maintainability (3C). |
 | **04** | `04-market-comparison` | Web research — compares the product against market alternatives using claims from the product profile. |
 | **05** | `05-synthesis` | Full launch-readiness synthesis: ranked blockers, launchable subset, and a remediation register. |
-| **06** | `06-runtime` | Runs the supported test commands listed in the product profile. Only commands listed there are executed — nothing is invented. |
-| **07** | `07-customer-simulation` | Simulates critical customer/operator journeys end-to-end. If browser automation is configured (URL + credentials + Playwright command in the profile), it drives the UI. Journeys with no harness are marked `unverified`. |
+| **06** | `06-runtime` | Runs the supported test commands listed in the product profile, plus SAST/CVE scanning (Bandit, Semgrep, pip-audit, npm audit), Lighthouse Core Web Vitals, and external service connectivity probes. |
+| **07** | `07-customer-simulation` | Simulates critical customer/operator journeys end-to-end. Runs axe-core WCAG 2.1 AA accessibility scans and Lighthouse on each page visited. Journeys with no harness are marked `unverified`. |
 | **08** | `08-adversarial` | A hostile reviewer attacks the launch claims and tries to find gaps the earlier jobs missed. |
 | **09** | `09-final-decision` | Issues the final release decision based on all prior findings. |
+| *(dynamic)* | `deep-<parent>-<topic>` | When a discovery or synthesis job hits its budget on a P0/P1 area it could not finish, it logs the boundary to `artifacts/pending-jobs.tsv`. The launcher drains that file after each group and runs follow-up deep-dive jobs automatically, up to `DYNAMIC_DEPTH_CAP` levels deep. |
+| *(optional)* | `load-test` | When `LOAD_TEST_ENABLED=1`, the launcher runs a three-scenario load test (baseline 10 VU / ramp 1→50 VU / spike 100 VU) after all runtime jobs complete. Fails if p95 > 2000ms, p99 > 5000ms, or error rate exceeds threshold. |
 
 The remediation phase reads the audit output, extracts findings into packets, and runs an implementer–verifier loop that fixes code, tests, and docs.
 
@@ -55,7 +57,9 @@ The audit reads what is already in the repo. The quality of its findings depends
 | Supported test commands in product profile | Group 06 | Runtime job is skipped — it will not invent commands |
 | Critical journeys in product profile | Group 07 | Simulation job has no journeys to drive; marks all unverified |
 | Competitors/alternatives in product profile | Group 04 | Market comparison job is skipped |
-| `docs/ux/.creds` + staging URL + E2E command | Group 07 | Browser journeys are marked `unverified`; non-browser journeys still run |
+| `docs/ux/.creds` + staging URL + E2E command | Groups 06–07 | Browser journeys are marked `unverified`; external-services probe and Lighthouse also depend on the base URL |
+| Python/Node.js source files in repo | Group 06 (`SAST_ENABLED=1`) | SAST and CVE scanning reports no findings — not a failure, just nothing to scan |
+| `Performance SLOs` in product profile | Load test | Load test uses default thresholds (p95 < 2000ms, p99 < 5000ms, error rate < 1%) |
 
 Groups 01–03 can infer domain structure from code alone, but they will flag every missing doc as a finding. If the repo is pre-docs, expect a high finding volume in those groups. If docs exist but are not listed in the product profile, add their paths under **Documentation Locations** so agents read them before judging gaps.
 
@@ -197,6 +201,14 @@ Splits the launch-readiness audit into parallel job batches, builds one bounded 
 | `MAX_PARALLEL` | `3` | Maximum jobs running in parallel per group. |
 | `AUDIT_MAX_RETRIES` | `2` | Retry attempts per job on non-zero exit. |
 | `VERBOSE` | `0` | Set to `1` to print log size after each job completes. |
+| `DYNAMIC_DEPTH_CAP` | `2` | Maximum depth for dynamically spawned deep-dive jobs. Depth-1 jobs are spawned by standard jobs; depth-2 by depth-1 jobs. Beyond the cap, remaining gaps are logged as findings only. |
+| `ACCESSIBILITY_SCAN` | `1` | Run axe-core WCAG 2.1 AA accessibility scans on every page visited during runtime and simulation jobs. Set to `0` to disable. |
+| `LIGHTHOUSE_SCAN` | `1` | Run Lighthouse Core Web Vitals (LCP, CLS, INP, TTFB, performance score) during runtime and simulation jobs. A poor rating or score < 50 is a launch blocker. Set to `0` to disable. |
+| `EXTERNAL_SERVICES_TEST` | `1` | Probe external service integrations (OAuth providers, SaaS APIs, SMTP, webhooks, cloud SDKs) during the runtime job. Uses credentials from `docs/ux/.creds` when available. Set to `0` to disable. |
+| `SAST_ENABLED` | `1` | Run SAST (Bandit, Semgrep) and dependency CVE scanning (pip-audit, npm audit) during the runtime job. Critical CVEs in direct dependencies or high-severity SAST findings with documented exploits are launch blockers. Set to `0` to disable. |
+| `LOAD_TEST_ENABLED` | `0` | Set to `1` to inject a load test job after all standard runtime jobs complete. Runs three scenarios: baseline (10 VU / 60s), ramp (1→50 VU), spike (100 VU / 30s). |
+| `LOAD_TEST_TARGET` | — | Base URL to load-test. Auto-detected from `docs/ux/.creds` or deployment docs when unset. |
+| `LOAD_TEST_TOOL` | `k6` | Preferred load testing tool: `k6`, `wrk`, `artillery`, or `locust`. Falls back to whatever is installed. |
 
 ### Model overrides (Codex)
 
@@ -219,6 +231,8 @@ Reasoning effort follows the same pattern: `CODEX_REASONING_EFFORT` overrides al
 | `CLAUDE_MODEL` | per-kind defaults |
 | `CLAUDE_MODEL_DISCOVERY` | `claude-sonnet-4-6` |
 | `CLAUDE_MODEL_SYNTHESIS` | `claude-opus-4-7` |
+| `CLAUDE_MODEL_RUNTIME` | `claude-sonnet-4-6` |
+| `CLAUDE_MODEL_SIMULATION` | `claude-opus-4-7` |
 | `CLAUDE_MODEL_ADVERSARIAL` | `claude-opus-4-7` |
 | `CLAUDE_MODEL_FINAL` | `claude-opus-4-7` |
 

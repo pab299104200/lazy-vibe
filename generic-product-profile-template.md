@@ -67,6 +67,29 @@ List products the launch will be compared against. The audit can use web researc
 - Dev/staging URL and credential source, if any:
 - Commands that must not be run:
 
+## Performance SLOs
+
+Leave blank to use default thresholds (p95 < 2000ms, p99 < 5000ms, error rate < 1% baseline/ramp, < 5% spike).
+
+- API p95 response time target (ms):
+- API p99 response time target (ms):
+- Error rate limit under sustained load (%):
+- Error rate limit under spike (%):
+- Throughput floor (req/s), if applicable:
+
+## Accessibility Requirements
+
+- Required WCAG level (default: 2.1 AA):
+- Pages or flows excluded from accessibility audit:
+
+## External Services
+
+List integrations that the external-services connectivity probe should verify.
+
+| Service | Type | Credential key in docs/ux/.creds |
+| --- | --- | --- |
+| | | |
+
 ## Documentation Locations
 
 - Architecture docs:
