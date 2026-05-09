@@ -15,6 +15,14 @@ CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
 DRY_RUN=0
 VERBOSE="${VERBOSE:-0}"
 AUDIT_MAX_RETRIES="${AUDIT_MAX_RETRIES:-2}"
+DYNAMIC_DEPTH_CAP="${DYNAMIC_DEPTH_CAP:-2}"
+ACCESSIBILITY_SCAN="${ACCESSIBILITY_SCAN:-1}"
+EXTERNAL_SERVICES_TEST="${EXTERNAL_SERVICES_TEST:-1}"
+LOAD_TEST_ENABLED="${LOAD_TEST_ENABLED:-0}"
+LOAD_TEST_TARGET="${LOAD_TEST_TARGET:-}"
+LOAD_TEST_TOOL="${LOAD_TEST_TOOL:-k6}"
+SAST_ENABLED="${SAST_ENABLED:-1}"
+LIGHTHOUSE_SCAN="${LIGHTHOUSE_SCAN:-1}"
 
 usage() {
   cat <<'USAGE'
@@ -35,6 +43,36 @@ Environment:
   CONTINUE_ON_FAIL     1 to keep going after a failed group. Defaults to 1 (jobs are independent; use 0 to stop on first failure).
   AUDIT_MAX_RETRIES    Extra retry attempts per job on non-zero runner exit. Defaults to 2 (3 total attempts, backoff 10s/20s).
   AUDIT_RUNNER         Optional executable wrapper (overrides RUNNER). Receives: prompt_file run_dir job_id.
+  DYNAMIC_DEPTH_CAP    Max depth for dynamically spawned deep-dive jobs. Defaults to 2.
+                       Discovery/synthesis jobs log unexplored P0/P1 areas to pending-jobs.tsv; the launcher
+                       queues them as follow-up deep-dive jobs after each group completes. Entries beyond the
+                       cap are logged in pending-jobs.tsv as findings but not run.
+
+Accessibility scanning (RUNNER=claude|codex|gemini, runtime/simulation jobs):
+  ACCESSIBILITY_SCAN   1 to run axe-core accessibility scans during Playwright E2E jobs. Defaults to 1.
+                       Results written to RUN_DIR/artifacts/<job_id>/accessibility/. Set to 0 to disable.
+
+External services testing (runtime jobs):
+  EXTERNAL_SERVICES_TEST  1 to probe external service connectivity during runtime verification. Defaults to 1.
+                          Uses credentials from docs/ux/.creds when available. Set to 0 to disable.
+
+Load testing (optional, auto-injected after runtime jobs):
+  LOAD_TEST_ENABLED    1 to inject a load test job after all standard runtime jobs complete. Defaults to 0.
+  LOAD_TEST_TARGET     Base URL to load-test. Auto-detected from docs/ux/.creds or product profile if unset.
+  LOAD_TEST_TOOL       Load testing tool: k6 (default), wrk, artillery, or locust.
+                       The agent installs/uses whichever tool is already present or available to install.
+
+Security scanning (runtime jobs):
+  SAST_ENABLED         1 to run SAST and dependency CVE scanning during runtime verification. Defaults to 1.
+                       Runs Bandit (Python SAST), Semgrep (multi-language SAST), pip-audit, and npm audit as
+                       applicable to the detected languages. Results written to RUN_DIR/artifacts/<job_id>/sast/.
+                       Critical CVEs in direct dependencies or high-severity SAST findings are launch blockers.
+                       Set to 0 to disable.
+
+Performance scanning (runtime and simulation jobs):
+  LIGHTHOUSE_SCAN      1 to run Lighthouse against key pages during runtime and simulation jobs. Defaults to 1.
+                       Reports Core Web Vitals (LCP, CLS, INP, TTFB) and performance/accessibility/SEO scores.
+                       Results written to RUN_DIR/artifacts/<job_id>/lighthouse/. Set to 0 to disable.
 
 Codex runner (RUNNER=codex):
   CODEX_MODEL            Override model for all jobs.
@@ -246,6 +284,7 @@ PRIOR
       >> "$prompt_file"
   fi
 
+  # ── Core job instructions ────────────────────────────────────────────────
   cat >> "$prompt_file" <<INSTRUCTIONS
 ## Job Instructions
 
@@ -259,11 +298,154 @@ Budget guardrails for this job:
 - If you hit the budget or cannot confidently finish, write \`RESULT: INCOMPLETE\` and list the remaining exact files/workflows.
 - Discovery jobs: report at most 5 findings total, ranked by severity. If you identify more, drop the lowest-priority ones and note how many were dropped. The 5-item cap applies to all reported items — do not repackage additional findings as sub-bullets, caveats, or observations.
 
+## Exploration Boundary Protocol
+
+When you reach the job budget, context limit, or encounter a critical unexplored module you could not fully analyze, log it as a pending deep-dive by **appending** a tab-separated row to:
+
+\`$RUN_DIR/artifacts/pending-jobs.tsv\`
+
+If the file does not exist, create it first with this exact tab-separated header line:
+
+\`job_id<TAB>parent_job<TAB>depth<TAB>entry_point<TAB>files<TAB>scope<TAB>rationale\`
+
+Then append one row per unexplored boundary with these fields (all tab-separated):
+
+- **job_id** — unique slug, e.g. \`deep-$job_id-<topic>\` (no spaces, no slashes, no tabs)
+- **parent_job** — \`$job_id\`
+- **depth** — \`1\`
+- **entry_point** — \`file:line\` or function/module name to start from
+- **files** — comma-separated repo-relative paths for the follow-up agent to focus on
+- **scope** — one sentence: what specifically to investigate
+- **rationale** — one sentence: why this is a P0/P1 launch risk worth a follow-up job
+
+Only log boundaries for P0/P1 risk areas you identified but could not finish. Do not log for completeness. The launcher queues logged entries as follow-up deep-dive jobs automatically after this group completes.
+
 For discovery and synthesis jobs, do not run tests or start servers. For runtime and simulation jobs, run the commands/browser automation required by the master prompt and write raw outputs under:
 
 \`$RUN_DIR/artifacts/$job_id/\`
 
 For dev VPS browser or customer-path work, read \`docs/ux/.creds\` only as needed and redact secrets from all outputs.
+INSTRUCTIONS
+
+  # ── Accessibility scanning (runtime and simulation jobs) ─────────────────
+  if [[ "$kind" =~ ^(runtime|simulation)$ && "${ACCESSIBILITY_SCAN:-1}" == "1" ]]; then
+    cat >> "$prompt_file" <<ACCESSIBILITY
+
+## Accessibility Scanning
+
+For every page your Playwright browser automation visits during this job, run an axe-core accessibility scan. If `@axe-core/playwright` is available in the frontend dev dependencies, use it. Otherwise use the `axe-playwright` npm package or inject the axe-core CDN bundle via `page.addScriptTag`.
+
+For each page scanned:
+
+1. Call `AxeBuilder({ page }).analyze()` (or equivalent) after the page reaches a stable loaded state.
+2. Record violations grouped by impact level: **critical**, **serious**, **moderate**, **minor**.
+3. For each critical or serious violation, record: rule ID, element selector, WCAG criterion, and page URL.
+4. Determine overall WCAG 2.1 AA conformance status for the page: pass / partial / fail.
+
+Save the raw JSON reports to \`$RUN_DIR/artifacts/$job_id/accessibility/<page-slug>.json\`.
+
+Write a summary table in your report output with one row per page: page URL, critical count, serious count, overall WCAG status. If axe-core is unavailable after a reasonable install attempt, record ACCESSIBILITY: UNVERIFIED and explain why.
+ACCESSIBILITY
+  fi
+
+  # ── Lighthouse / Core Web Vitals (runtime and simulation jobs) ───────────
+  if [[ "$kind" =~ ^(runtime|simulation)$ && "${LIGHTHOUSE_SCAN:-1}" == "1" ]]; then
+    cat >> "$prompt_file" <<LIGHTHOUSE
+
+## Lighthouse / Core Web Vitals
+
+Run the Lighthouse CLI against each key page visited during this job. Derive the target base URL from the running dev server or the VPS base URL in \`docs/ux/.creds\`.
+
+For each key page (at minimum: login, primary operator dashboard, and any page flagged as performance-sensitive in prior discovery findings):
+
+\`\`\`bash
+npx lighthouse "<page-url>" \\
+  --output=json \\
+  --output-path="$RUN_DIR/artifacts/$job_id/lighthouse/<page-slug>.json" \\
+  --chrome-flags="--headless --no-sandbox" \\
+  --only-categories=performance,accessibility,best-practices,seo \\
+  --quiet
+\`\`\`
+
+For each page, extract and record:
+
+- **Performance score** (0–100)
+- **LCP** — good < 2.5s | needs-improvement 2.5–4s | poor > 4s
+- **CLS** — good < 0.1 | needs-improvement 0.1–0.25 | poor > 0.25
+- **INP** — good < 200ms | needs-improvement 200–500ms | poor > 500ms
+- **TTFB** — good < 800ms
+- **Accessibility score** (0–100, complements axe-core violation details)
+
+A performance score < 50 or any **poor** Core Web Vital rating is a **launch blocker**.
+
+Save raw JSON reports to \`$RUN_DIR/artifacts/$job_id/lighthouse/\`. Include a summary table in your report: page, perf score, LCP, CLS, INP, result. If Lighthouse cannot be installed via npx, record LIGHTHOUSE: UNVERIFIED.
+LIGHTHOUSE
+  fi
+
+  # ── External services connectivity (runtime jobs) ────────────────────────
+  if [[ "$kind" == "runtime" && "${EXTERNAL_SERVICES_TEST:-1}" == "1" ]]; then
+    cat >> "$prompt_file" <<EXTERNAL
+
+## External Services Connectivity
+
+Identify all external service integrations configured in the repo (OAuth providers, SaaS APIs, cloud services, SMTP/email, Slack, payment processors, identity providers, etc.) by reading environment config files, connector registrations, and integration docs.
+
+For each integration found:
+
+1. Check whether credentials are available in \`docs/ux/.creds\` or environment variables. If not, mark the service as UNVERIFIED and skip.
+2. If credentials exist, perform a minimal connectivity check — authenticate, call a low-impact read endpoint (e.g. `/me`, `/ping`, `/status`), or verify a webhook signature round-trip.
+3. Record: service name, endpoint tested, HTTP status, latency (ms), and pass/fail.
+4. Redact all credential values from outputs before writing.
+
+Save raw HTTP logs to \`$RUN_DIR/artifacts/$job_id/external-services/\`.
+
+Include an external services table in your report: service, endpoint, status, latency, result. If no external integrations are configured, record EXTERNAL_SERVICES: none-configured.
+EXTERNAL
+  fi
+
+  # ── SAST and dependency CVE scanning (runtime jobs) ──────────────────────
+  if [[ "$kind" == "runtime" && "${SAST_ENABLED:-1}" == "1" ]]; then
+    cat >> "$prompt_file" <<SAST
+
+## Static Analysis and Dependency CVE Scanning
+
+Detect the primary languages in the repo and run all applicable tools below. Install missing tools via pip or npm as needed. Save all raw outputs to \`$RUN_DIR/artifacts/$job_id/sast/\`.
+
+**Python SAST** (if \`*.py\` files exist — run from repo root):
+\`\`\`bash
+pip install bandit 2>/dev/null
+bandit -r . -f json -o "$RUN_DIR/artifacts/$job_id/sast/bandit.json" -ll 2>/dev/null || true
+\`\`\`
+
+**Multi-language SAST via Semgrep**:
+\`\`\`bash
+pip install semgrep 2>/dev/null
+semgrep --config=auto --json --output="$RUN_DIR/artifacts/$job_id/sast/semgrep.json" . 2>/dev/null || true
+\`\`\`
+
+**Python dependency CVEs** (if \`requirements*.txt\` or \`pyproject.toml\` exist):
+\`\`\`bash
+pip install pip-audit 2>/dev/null
+pip-audit --format=json --output="$RUN_DIR/artifacts/$job_id/sast/pip-audit.json" 2>/dev/null || true
+\`\`\`
+
+**Node.js dependency CVEs** (run in each directory containing \`package.json\`):
+\`\`\`bash
+npm audit --json > "$RUN_DIR/artifacts/$job_id/sast/npm-audit.json" 2>/dev/null || true
+\`\`\`
+
+For each tool that produced output, report:
+- Totals by severity: critical, high, medium, low
+- Every **critical** and **high** finding in full: tool, CVE or rule ID, affected file or package, description, fix version if available
+
+A critical CVE in a direct dependency, or a high-severity SAST finding with a documented exploit, is a **launch blocker**.
+
+Include a SAST/CVE summary table in your report: tool, critical count, high count, medium count, result (pass / warn / fail).
+SAST
+  fi
+
+  # ── Closing instructions (all jobs) ─────────────────────────────────────
+  cat >> "$prompt_file" <<CLOSING
 
 End with a concise final response:
 
@@ -276,7 +458,7 @@ TOP FINDINGS:
 BLOCKERS:
 - ...
 \`\`\`
-INSTRUCTIONS
+CLOSING
 
   printf '%s\n' "$prompt_file"
 }
@@ -286,13 +468,13 @@ _model_for_kind() {
   local disc="$3" synth="$4" runtime="$5" sim="$6" adv="$7" final="$8"
   if [[ -n "$override" ]]; then printf '%s' "$override"; return; fi
   case "$kind" in
-    discovery)          printf '%s' "$disc" ;;
-    synthesis|web)      printf '%s' "$synth" ;;
-    runtime)            printf '%s' "$runtime" ;;
-    simulation)         printf '%s' "$sim" ;;
-    adversarial)        printf '%s' "$adv" ;;
-    final)              printf '%s' "$final" ;;
-    *)                  printf '%s' "$disc" ;;
+    discovery|deep-dive) printf '%s' "$disc" ;;
+    synthesis|web)       printf '%s' "$synth" ;;
+    runtime|load)        printf '%s' "$runtime" ;;
+    simulation)          printf '%s' "$sim" ;;
+    adversarial)         printf '%s' "$adv" ;;
+    final)               printf '%s' "$final" ;;
+    *)                   printf '%s' "$disc" ;;
   esac
 }
 
@@ -504,11 +686,11 @@ run_prompt() {
     attempt=$((attempt + 1))
   done
 
-  # Discovery and synthesis jobs are read-only audit phases — they must not
+  # Discovery, synthesis, and deep-dive jobs are read-only audit phases — they must not
   # modify source files. Detect any changes and revert them so an over-eager
   # agent can't corrupt the repo or the audit baseline. Integrity check runs
   # only after the final attempt so retries on a clean repo still get caught.
-  if [[ "$kind" =~ ^(discovery|synthesis|web)$ ]]; then
+  if [[ "$kind" =~ ^(discovery|synthesis|web|deep-dive)$ ]]; then
     if git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null; then
       if ! git -C "$REPO_ROOT" diff --exit-code --quiet 2>>"$log_file"; then
         printf '\nAUDIT INTEGRITY VIOLATION: job %s modified source files; reverting\n' "$job_id" >>"$log_file"
@@ -574,6 +756,280 @@ flush_group() {
   active_count=0
 }
 
+# ── Dynamic deep-dive spawning ─────────────────────────────────────────────
+# Discovery/synthesis jobs write unexplored P0/P1 boundaries to
+# $RUN_DIR/artifacts/pending-jobs.tsv. After each group and at the end of the
+# run, drain_pending_jobs() reads that file, deduplicates against already-
+# queued entries, and spawns follow-up deep-dive jobs up to DYNAMIC_DEPTH_CAP.
+
+_DRAIN_STARTED=0
+
+build_deep_dive_prompt() {
+  local job_id="$1" parent_job="$2" depth="$3" entry_point="$4" files="$5" scope="$6" rationale="$7"
+  local prompt_file="$RUN_DIR/prompts/$job_id.md"
+  local output="01-domain/$job_id.md"
+  local next_depth=$(( depth + 1 ))
+
+  cat > "$prompt_file" <<DDHEADER
+# Launch-Readiness Audit Deep-Dive: $job_id
+
+## Job Metadata
+
+- RUN_DIR: $RUN_DIR
+- Repo root: $REPO_ROOT
+- Job id: $job_id
+- Job kind: deep-dive
+- Depth: $depth / ${DYNAMIC_DEPTH_CAP} (cap)
+- Parent job: $parent_job
+- Required output: $RUN_DIR/$output
+
+## Shared Instructions
+
+$(cat "$SHARED_PROMPT")
+
+## Product Profile
+
+$(if [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then cat "$PRODUCT_PROFILE"; else printf 'No product profile provided. Infer cautiously from repo docs and mark assumptions explicitly.'; fi)
+
+## Prior Discovery Outputs
+
+Ground your analysis in findings already produced by prior jobs before reading source code:
+
+- \`$RUN_DIR/01-domain/\` — domain-level discovery findings; start with the parent job output at \`$RUN_DIR/01-domain/$parent_job.md\`
+
+Do not re-derive findings already captured there unless you are directly challenging or extending them.
+
+## Deep-Dive Scope
+
+This job was queued by **$parent_job** because it reached an exploration boundary.
+
+- **Entry point**: $entry_point
+- **Files**: $files
+- **Scope**: $scope
+- **Rationale**: $rationale
+
+## Job Instructions
+
+Focus exclusively on the scope above. Do not re-read or re-examine areas already covered by the parent job.
+
+Budget guardrails:
+- Prioritize P0/P1 readiness issues only.
+- Report at most 5 findings, ranked by severity.
+- Do not run tests or start servers.
+
+DDHEADER
+
+  if (( depth < DYNAMIC_DEPTH_CAP )); then
+    cat >> "$prompt_file" <<DDPROTOCOL
+## Exploration Boundary Protocol
+
+If you reach a sub-boundary that is materially P0/P1 relevant and cannot be finished in this job, append a tab-separated row to \`$RUN_DIR/artifacts/pending-jobs.tsv\`:
+
+Fields (tab-separated): **job_id**, **parent_job**, **depth**, **entry_point**, **files**, **scope**, **rationale**
+
+Use **depth=$next_depth** and **parent_job=$job_id**. Only log genuine P0/P1 gaps. The launcher will queue them automatically.
+
+DDPROTOCOL
+  else
+    printf 'You are at the maximum spawn depth (%s). Do not append to pending-jobs.tsv — record remaining gaps as findings in your report instead.\n\n' \
+      "${DYNAMIC_DEPTH_CAP}" >> "$prompt_file"
+  fi
+
+  cat >> "$prompt_file" <<DDEND
+End with a concise final response:
+
+\`\`\`
+JOB: $job_id
+REPORT: $RUN_DIR/$output
+RESULT: PASS / FAIL / INCOMPLETE
+TOP FINDINGS:
+1. ...
+BLOCKERS:
+- ...
+\`\`\`
+DDEND
+
+  printf '%s\n' "$prompt_file"
+}
+
+drain_pending_jobs() {
+  _DRAIN_STARTED=0
+  local pending_file="$RUN_DIR/artifacts/pending-jobs.tsv"
+  [[ -f "$pending_file" ]] || return 0
+
+  local queued_file="$RUN_DIR/artifacts/queued-deep-dives.txt"
+  touch "$queued_file"
+
+  # Reuse the global group arrays (guaranteed empty after flush_group).
+  # Set current_group to "dynamic" so flush_group prints a clear label.
+  local saved_group="$current_group"
+  current_group="dynamic"
+
+  while IFS=$'\t' read -r dj_id parent_job depth entry_point files scope rationale; do
+    # Skip header and blank/malformed rows.
+    [[ -z "${dj_id:-}" || "$dj_id" == "job_id" ]] && continue
+    local depth_int="${depth:-1}"
+    [[ "$depth_int" =~ ^[0-9]+$ ]] || continue
+
+    if (( depth_int > DYNAMIC_DEPTH_CAP )); then
+      printf '[deep-dive] depth-capped: %s (depth=%s cap=%s)\n' "$dj_id" "$depth_int" "$DYNAMIC_DEPTH_CAP"
+      continue
+    fi
+
+    if grep -qxF "$dj_id" "$CHECKPOINT_FILE" 2>/dev/null; then
+      printf '[resume] skipping completed deep-dive %s\n' "$dj_id"
+      continue
+    fi
+
+    if grep -qxF "$dj_id" "$queued_file" 2>/dev/null; then
+      continue
+    fi
+
+    local prompt_file
+    prompt_file="$(build_deep_dive_prompt "$dj_id" "$parent_job" "$depth_int" "$entry_point" "$files" "$scope" "$rationale")"
+    printf '[start] group=dynamic job=%s kind=deep-dive depth=%s parent=%s\n' "$dj_id" "$depth_int" "$parent_job"
+
+    printf '%s\n' "$dj_id" >> "$queued_file"
+    _DRAIN_STARTED=$(( _DRAIN_STARTED + 1 ))
+
+    run_prompt "$prompt_file" "$dj_id" "deep-dive" &
+    group_pids+=("$!")
+    group_names+=("$dj_id")
+    group_outputs+=("01-domain/$dj_id.md")
+    active_count=$(( active_count + 1 ))
+
+    if (( active_count >= MAX_PARALLEL )); then
+      flush_group
+      current_group="dynamic"
+    fi
+  done < "$pending_file"
+
+  flush_group
+  current_group="$saved_group"
+}
+
+# ── Optional load testing ──────────────────────────────────────────────────
+# Auto-injected after all standard runtime/simulation jobs when LOAD_TEST_ENABLED=1.
+# Uses the same global group arrays as flush_group; must be called after flush_group
+# empties them.
+
+build_load_test_prompt() {
+  local job_id="load-test"
+  local prompt_file="$RUN_DIR/prompts/$job_id.md"
+  local output="artifacts/load-test/load-test-report.md"
+  local tool="${LOAD_TEST_TOOL:-k6}"
+  local target="${LOAD_TEST_TARGET:-}"
+
+  mkdir -p "$RUN_DIR/artifacts/load-test"
+
+  cat > "$prompt_file" <<LTHEAD
+# Launch-Readiness Audit: Load Test
+
+## Job Metadata
+
+- RUN_DIR: $RUN_DIR
+- Repo root: $REPO_ROOT
+- Job id: $job_id
+- Job kind: load
+- Required output: $RUN_DIR/$output
+
+## Shared Instructions
+
+$(cat "$SHARED_PROMPT")
+
+## Product Profile
+
+$(if [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then cat "$PRODUCT_PROFILE"; else printf 'No product profile provided. Infer the base URL from docs/ux/.creds or deployment docs.'; fi)
+
+## Prior Discovery Outputs
+
+Ground your test scenarios in findings from prior jobs:
+
+- \`$RUN_DIR/10-runtime-verification.md\` — runtime verification results
+- \`$RUN_DIR/11-maturity-stage-simulation.md\` — customer journey simulation results
+- \`$RUN_DIR/01-domain/\` — domain discovery findings
+
+## Load Test Scope
+
+**Tool preference**: ${tool}. Use whichever of k6, wrk, artillery, or locust is already installed, or install the preferred tool if it is not present.
+
+**Target base URL**: ${target:-"(auto-detect from docs/ux/.creds or deployment docs — read APP_URL, BASE_URL, or equivalent)"}
+
+### Test Scenarios
+
+Run three scenarios against the target:
+
+1. **Baseline** — 10 virtual users, 60 seconds steady state. Establishes per-request latency baseline.
+2. **Ramp** — ramp from 1 to 50 VUs over 2 minutes, hold 1 minute, ramp down. Identifies the throughput ceiling and where latency degrades.
+3. **Spike** — jump to 100 VUs for 30 seconds. Tests resilience under sudden traffic bursts.
+
+For each scenario, target the following critical endpoints identified from prior discovery:
+- Auth/login endpoint
+- Primary read API endpoint (tenant dashboard, list endpoint, or equivalent)
+- Primary write/mutation endpoint
+- Any endpoint flagged as a latency risk in prior discovery findings
+
+Read docs/ux/.creds for auth credentials. Redact all credential values from outputs.
+
+### Thresholds
+
+Flag as FAIL if any scenario exceeds:
+- p95 response time > 2000ms for API endpoints
+- p99 response time > 5000ms
+- Error rate > 1% under baseline or ramp
+- Error rate > 5% under spike
+
+If the product profile specifies SLO targets, use those instead.
+
+### Outputs
+
+Save raw tool output and any generated script to \`$RUN_DIR/artifacts/load-test/\`.
+
+Write \`$RUN_DIR/$output\` with:
+- Summary table: scenario, VUs, duration, p50, p95, p99 latency, throughput (req/s), error rate, result
+- Bottleneck analysis: which endpoint degraded first and at what VU count
+- Comparison to thresholds: pass / fail / partial per scenario
+- Any errors encountered (HTTP 5xx, connection resets, timeouts)
+
+## Job Instructions
+
+Do not modify source files. Run only read or simulated-traffic operations.
+
+End with a concise final response:
+
+\`\`\`
+JOB: $job_id
+REPORT: $RUN_DIR/$output
+RESULT: PASS / FAIL / INCOMPLETE
+TOP FINDINGS:
+1. ...
+BLOCKERS:
+- ...
+\`\`\`
+LTHEAD
+
+  printf '%s\n' "$prompt_file"
+}
+
+run_load_test_job() {
+  if grep -qxF "load-test" "$CHECKPOINT_FILE" 2>/dev/null; then
+    printf '[resume] skipping completed job load-test\n'
+    return 0
+  fi
+
+  local prompt_file
+  prompt_file="$(build_load_test_prompt)"
+  printf '[start] group=load job=load-test kind=load tool=%s\n' "${LOAD_TEST_TOOL:-k6}"
+
+  current_group="load"
+  run_prompt "$prompt_file" "load-test" "load" &
+  group_pids+=("$!")
+  group_names+=("load-test")
+  group_outputs+=("artifacts/load-test/load-test-report.md")
+  active_count=$(( active_count + 1 ))
+  flush_group
+}
+
 write_run_summary() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   local summary="$RUN_DIR/00-run-summary.tsv"
@@ -606,6 +1062,52 @@ write_run_summary() {
     esac
   done < <(tail -n +2 "$JOBS_FILE")
 
+  # Include dynamically-spawned deep-dive jobs in the summary.
+  local queued_file="$RUN_DIR/artifacts/queued-deep-dives.txt"
+  if [[ -f "$queued_file" ]]; then
+    while IFS= read -r dj_id; do
+      [[ -z "${dj_id:-}" ]] && continue
+      local dj_log="$RUN_DIR/logs/$dj_id.log"
+      local dj_result
+      if grep -qxF "$dj_id" "$CHECKPOINT_FILE" 2>/dev/null; then
+        dj_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$dj_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//')"
+        [[ -z "$dj_result" ]] && dj_result="completed"
+      elif [[ -f "$dj_log" ]]; then
+        dj_result="FAIL"
+      else
+        dj_result="not-run"
+      fi
+      printf '%s\t%s\t%s\n' "$dj_id" "deep-dive" "$dj_result" >> "$summary"
+      total=$(( total + 1 ))
+      case "$dj_result" in
+        PASS|completed) pass=$(( pass + 1 )) ;;
+        INCOMPLETE) incomplete=$(( incomplete + 1 )) ;;
+        *) fail=$(( fail + 1 )) ;;
+      esac
+    done < "$queued_file"
+  fi
+
+  # Include auto-injected load test job if it ran.
+  if [[ "${LOAD_TEST_ENABLED:-0}" == "1" ]]; then
+    local lt_log="$RUN_DIR/logs/load-test.log"
+    local lt_result
+    if grep -qxF "load-test" "$CHECKPOINT_FILE" 2>/dev/null; then
+      lt_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$lt_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//')"
+      [[ -z "$lt_result" ]] && lt_result="completed"
+    elif [[ -f "$lt_log" ]]; then
+      lt_result="FAIL"
+    else
+      lt_result="not-run"
+    fi
+    printf '%s\t%s\t%s\n' "load-test" "load" "$lt_result" >> "$summary"
+    total=$(( total + 1 ))
+    case "$lt_result" in
+      PASS|completed) pass=$(( pass + 1 )) ;;
+      INCOMPLETE) incomplete=$(( incomplete + 1 )) ;;
+      *) fail=$(( fail + 1 )) ;;
+    esac
+  fi
+
   printf '\n=== Audit Run Summary (%d jobs) ===\n' "$total"
   printf 'PASS/completed: %d  INCOMPLETE: %d  FAIL/not-run: %d\n' "$pass" "$incomplete" "$fail"
   if ((incomplete > 0 || fail > 0)); then
@@ -634,6 +1136,7 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       current_group="$group"
     elif [[ "$group" != "$current_group" ]]; then
       flush_group
+      drain_pending_jobs
       current_group="$group"
     fi
 
@@ -658,6 +1161,21 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
 } < "$JOBS_FILE"
 
 flush_group
+
+# Optional load test — runs after all standard runtime/simulation jobs complete
+# so the agent can ground its scenario selection in prior discovery findings.
+if [[ "${LOAD_TEST_ENABLED:-0}" == "1" ]]; then
+  run_load_test_job
+fi
+
+# Drain any pending deep-dives accumulated during the run. Loop until stable:
+# depth-1 jobs run first; their completions may add depth-2 entries to
+# pending-jobs.tsv, which the next drain pass picks up. Stops when no new
+# jobs are started (all entries are depth-capped, already queued, or done).
+drain_pending_jobs
+while (( _DRAIN_STARTED > 0 )); do
+  drain_pending_jobs
+done
 
 write_run_summary
 printf 'Audit launcher complete. Run directory: %s\n' "$RUN_DIR"

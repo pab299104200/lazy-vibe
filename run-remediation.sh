@@ -919,6 +919,21 @@ write_packet() {
   } > "$packet"
 }
 
+purge_orphaned_packets() {
+  [[ -f "$PX_TSV" ]] || return 0
+  [[ -d "$REMEDIATION_DIR/packets" ]] || return 0
+  local _stale_count=0 _base
+  while IFS= read -r _base; do
+    rm -f "$REMEDIATION_DIR/packets/$_base"
+    _stale_count=$(( _stale_count + 1 ))
+  done < <(comm -23 \
+    <(find "$REMEDIATION_DIR/packets" -maxdepth 1 -name 'PX-*.md' -printf '%f\n' 2>/dev/null | sort) \
+    <(awk 'NR > 1 && $1 ~ /^PX-/ { print $1 ".md" }' "$PX_TSV" | sort))
+  if (( _stale_count > 0 )); then
+    printf '[catalog] purged %d orphaned packet file(s) not in current master inventory\n' "$_stale_count" >&2
+  fi
+}
+
 write_packets_and_workstreams() {
   # Preserve existing run state by default. Reusing REMEDIATION_DIR means packet
   # work logs, normalized workstreams, and cataloged units are durable state.
@@ -944,6 +959,10 @@ write_packets_and_workstreams() {
   tail -n +2 "$PX_TSV" | while IFS=$'\t' read -r id severity group model_class source line title _packet; do
     write_packet "$id" "$severity" "$group" "$model_class" "$source" "$line" "$title"
   done
+
+  if [[ "$REMEDIATION_REWRITE_PACKETS" == "1" ]]; then
+    purge_orphaned_packets
+  fi
 }
 
 write_default_units() {
@@ -1195,7 +1214,7 @@ guard_against_incomplete_unit_coverage() {
   local total_current=0 incomplete_current=0 missing_count=0 sample_missing=()
   local id severity group model_class source line title packet
   while IFS=$'\t' read -r id severity group model_class source line title packet; do
-    [[ "$id" == "id" || -z "${id:-}" ]] && continue
+    [[ "$id" =~ ^PX-[0-9]+$ ]] || continue
     total_current=$((total_current + 1))
     packet_is_done "$REMEDIATION_DIR/packets/$id.md" "$id" && continue
     incomplete_current=$((incomplete_current + 1))
@@ -1306,12 +1325,14 @@ normalize_workstream_sizes() {
   head -1 "$WORKSTREAMS_TSV" > "$tmp"
   local any_split=0
 
-  while IFS=$'\t' read -r f1 f2 f3 f4 _rest; do
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8; do
     local group model_class packets_csv
+    # packets are always the last populated column (4-col Meridian or 8-col Portal)
+    local _last_col="${f8:-${f4}}"
     if [[ "$f1" == WS-* ]]; then
-      group="$f1"; model_class="$f3"; packets_csv="$f4"
+      group="$f1"; model_class="$f3"; packets_csv="$_last_col"
     else
-      group="$f1"; model_class="$f2"; packets_csv="$f4"
+      group="$f1"; model_class="$f2"; packets_csv="$_last_col"
     fi
     [[ -z "${group:-}" ]] && continue
 
@@ -1322,7 +1343,7 @@ normalize_workstream_sizes() {
     IFS=',' read -ra all_pxs <<< "$packets_csv"
     for px in "${all_pxs[@]}"; do
       local kind
-      kind=$(grep "^- Source kind:" "$packets_dir/$px.md" 2>/dev/null | head -1 | grep -oP '`[^`]+`' | tr -d '`')
+      kind=$(grep "^- Source kind:" "$packets_dir/$px.md" 2>/dev/null | head -1 | grep -oP '`[^`]+`' | tr -d '`') || true
       [[ -z "$kind" ]] && kind="other"
       kind="${kind// /-}"
       kind_map[$kind]="${kind_map[$kind]:+${kind_map[$kind]},}$px"
@@ -1444,7 +1465,8 @@ stamp_packet_complete() {
 
 remediation_dir_audit_run() {
   local rdir="$1"
-  sed -n 's/^- Audit run: `\(.*\)`$/\1/p' "$rdir/01-master-px-list.md" 2>/dev/null | head -1
+  [[ -f "$rdir/01-master-px-list.md" ]] || return 0
+  sed -n 's/^- Audit run: `\(.*\)`$/\1/p' "$rdir/01-master-px-list.md" 2>/dev/null | head -1 || true
 }
 
 packet_row_key() {
@@ -1680,7 +1702,7 @@ write_completed_packet_manifest() {
     [[ -f "$PX_TSV" ]] || return 0
     local id severity group model_class source line title packet
     while IFS=$'\t' read -r id severity group model_class source line title packet; do
-      [[ "$id" == "id" || -z "${id:-}" ]] && continue
+      [[ "$id" =~ ^PX-[0-9]+$ ]] || continue
       if packet_is_done "$REMEDIATION_DIR/packets/$id.md" "$id"; then
         printf '%s\tcomplete\t%s\t%s\t%s\n' "$id" "$source" "$line" "$title"
       fi
@@ -2498,10 +2520,12 @@ execute_planners() {
     if grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
       if artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
         printf '[resume] skipping completed plan-%s\n' "$unit_id"
-        continue
+      else
+        # Design artifact may not cover all packets yet (e.g. verifier hasn't
+        # run), but the planner already ran successfully. Trust the checkpoint.
+        printf '[resume] skipping checkpointed plan-%s (design artifact pending)\n' "$unit_id"
       fi
-      printf '[resume] re-running plan-%s; checkpoint exists but design does not cover merged packets=%s\n' \
-        "$unit_id" "$packets_csv"
+      continue
     fi
     local prompt="$REMEDIATION_DIR/prompts/plan-$unit_id.md"
     printf '[plan] unit=%s group=%s model_class=%s\n' "$unit_id" "$group" "$model_class"
@@ -2525,16 +2549,17 @@ execute_planners() {
 }
 
 rebuild_workstream_coordinator_prompts() {
-  tail -n +2 "$WORKSTREAMS_TSV" | while IFS=$'\t' read -r f1 f2 f3 f4 f5 _f6 _f7; do
+  tail -n +2 "$WORKSTREAMS_TSV" | while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8; do
     local group model_class packets_csv
+    local _last_col="${f8:-${f4}}"
     if [[ "$f1" == WS-* ]]; then
       group="$f1"
       model_class="$f3"
-      packets_csv="$f4"
+      packets_csv="$_last_col"
     else
       group="$f1"
       model_class="$f2"
-      packets_csv="$f4"
+      packets_csv="$_last_col"
     fi
     [[ -z "${group:-}" ]] && continue
     build_workstream_coordinator_prompt "$group" "$model_class" "$packets_csv"
@@ -3184,16 +3209,17 @@ execute_workstreams() {
   rebuild_workstream_coordinator_prompts
 
   if [[ "$REVISE_EXISTING" != "1" ]]; then
-    while IFS=$'\t' read -r f1 f2 f3 f4 f5 _f6 _f7; do
+    while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8; do
       local group model_class packets_csv
+      local _last_col="${f8:-${f4}}"
       if [[ "$f1" == WS-* ]]; then
         group="$f1"
         model_class="$f3"
-        packets_csv="$f4"
+        packets_csv="$_last_col"
       else
         group="$f1"
         model_class="$f2"
-        packets_csv="$f4"
+        packets_csv="$_last_col"
       fi
       [[ -z "${group:-}" ]] && continue
       if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
@@ -3263,8 +3289,11 @@ execute_workstreams() {
         printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
         continue
       else
-        printf '[resume] re-running %s; checkpoint exists but packets remain incomplete: %s\n' \
-          "implement-$unit_id" "$_remaining_packets"
+        # Packets not yet marked complete (verifier hasn't run), but the
+        # implementer already ran successfully. Trust the checkpoint and skip
+        # rather than re-running the same implementation again.
+        printf '[resume] skipping checkpointed unit %s (packets pending verification)\n' "implement-$unit_id"
+        continue
       fi
     fi
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
@@ -3486,6 +3515,7 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
         printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
         if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
           printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+          purge_orphaned_packets
         else
           printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
           exit 1
@@ -3502,6 +3532,7 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
         printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
         if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
           printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+          purge_orphaned_packets
         else
           printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
           exit 1
