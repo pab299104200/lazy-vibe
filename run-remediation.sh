@@ -94,6 +94,10 @@ Environment:
                               Defaults to 0. Forces serialized implementation/verification waves.
   REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
                               REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to backend,frontend.
+  REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL
+                              1 to allow parallel execution when REPO_ROOT is not a git root.
+                              This is unsafe for general use because units edit the same live
+                              workspace without git worktree isolation.
   REMEDIATION_AUTO_SPLIT      1 to auto-detect oversized units before execution. Defaults to 1.
   REMEDIATION_MAX_UNIT_PACKET_COUNT
                               Max packets per implementation unit before split preflight. Defaults to 3.
@@ -272,18 +276,23 @@ while (($#)); do
 done
 
 if [[ -z "$AUDIT_RUN" ]]; then
-  echo "--audit-run is required" >&2
-  usage >&2
-  exit 2
-fi
-
-if [[ ! -d "$AUDIT_RUN" ]]; then
+  # Auto-detect latest audit run
+  AUDIT_RUN=$(find "$REPO_ROOT/docs/audit" "$REPO_ROOT/project-audit" "$REPO_ROOT" -maxdepth 2 -type d \( -name "*-launch-readiness-run" -o -name "*-audit-run" \) 2>/dev/null | sort | tail -n 1 || true)
+  if [[ -z "$AUDIT_RUN" ]]; then
+    echo "--audit-run is required and could not be auto-detected" >&2
+    usage >&2
+    exit 2
+  fi
+  printf '[auto-detect] using audit run: %s\n' "$AUDIT_RUN"
+elif [[ ! -d "$AUDIT_RUN" ]]; then
   echo "Audit run directory not found: $AUDIT_RUN" >&2
   exit 2
 fi
 
 if [[ -z "$REMEDIATION_DIR" ]]; then
-  REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/$(date +%Y-%m-%d)-remediation-run"
+  _audit_date=$(basename "$AUDIT_RUN" | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || date +%Y-%m-%d)
+  REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/${_audit_date}-remediation-run"
+  printf '[auto-detect] using remediation dir: %s\n' "$REMEDIATION_DIR"
 fi
 
 if [[ -n "$PROFILE" ]]; then
@@ -308,6 +317,23 @@ if [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]]; then
     printf '[commit-on-verify] forcing REMEDIATION_REVISION_MAX_PARALLEL=1 so revision diffs remain attributable\n'
     REMEDIATION_REVISION_MAX_PARALLEL=1
   fi
+fi
+
+if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && \
+   ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 && \
+   [[ "${REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL:-0}" != "1" ]]; then
+  if [[ "$MAX_PARALLEL" != "1" ]]; then
+    printf '[workspace] REPO_ROOT is not a git root; forcing MAX_PARALLEL=1 so implementation units do not edit the live shared workspace concurrently\n'
+    MAX_PARALLEL=1
+  fi
+  if [[ "${REMEDIATION_REVISION_MAX_PARALLEL:-2}" != "1" ]]; then
+    printf '[workspace] REPO_ROOT is not a git root; forcing REMEDIATION_REVISION_MAX_PARALLEL=1 for the same reason\n'
+    REMEDIATION_REVISION_MAX_PARALLEL=1
+  fi
+elif [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && \
+     ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  printf '[workspace] REPO_ROOT is not a git root; REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL=1 set, preserving MAX_PARALLEL=%s and REMEDIATION_REVISION_MAX_PARALLEL=%s\n' \
+    "$MAX_PARALLEL" "${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
 fi
 
 # Auto-enable the cataloger for fresh execution only. Existing implementation
@@ -567,6 +593,193 @@ product_profile_block() {
   fi
 }
 
+trim_inline_value() {
+  local value="$1"
+  value="${value#\`}"
+  value="${value%\`}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  printf '%s\n' "$value"
+}
+
+profile_runtime_values() {
+  local key="$1"
+  [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]] || return 0
+  awk -v key="$key" '
+    BEGIN { in_section = 0; capture = 0 }
+    /^## / {
+      if (in_section && $0 !~ /^## Runtime Verification[[:space:]]*$/) exit
+      in_section = ($0 ~ /^## Runtime Verification[[:space:]]*$/)
+      capture = 0
+      next
+    }
+    !in_section { next }
+    $0 ~ "^- " key ":" {
+      line = $0
+      sub("^- " key ":[[:space:]]*", "", line)
+      if (line != "") print line
+      capture = 1
+      next
+    }
+    capture {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^- /) {
+        capture = 0
+        next
+      }
+      if ($0 ~ /^[[:space:]][[:space:]]*-[[:space:]]+/) {
+        line = $0
+        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+        print line
+        next
+      }
+      if ($0 ~ /^[[:space:]]+/) {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        print line
+        next
+      }
+      capture = 0
+    }
+  ' "$PRODUCT_PROFILE"
+}
+
+append_unique_line() {
+  local value="$1"
+  local array_name="$2"
+  local -n target="$array_name"
+  local existing
+  [[ -n "$value" ]] || return 0
+  for existing in "${target[@]}"; do
+    [[ "$existing" == "$value" ]] && return 0
+  done
+  target+=("$value")
+}
+
+normalize_profile_commands() {
+  local key="$1"
+  local raw cleaned lower
+  while IFS= read -r raw; do
+    cleaned="$(trim_inline_value "$raw")"
+    [[ -n "$cleaned" ]] || continue
+    lower="$(printf '%s' "$cleaned" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+      tbd|n/a|none|none-configured|not-applicable|_pending_|pending) continue ;;
+    esac
+    printf '%s\n' "$cleaned"
+  done < <(profile_runtime_values "$key")
+}
+
+command_is_forbidden() {
+  local candidate="$1"
+  local forbidden
+  while IFS= read -r forbidden; do
+    forbidden="$(trim_inline_value "$forbidden")"
+    [[ -n "$forbidden" ]] || continue
+    if [[ "$candidate" == "$forbidden" || "$candidate" == *"$forbidden"* || "$forbidden" == *"$candidate"* ]]; then
+      return 0
+    fi
+  done < <(normalize_profile_commands "Commands that must not be run")
+  return 1
+}
+
+unit_packet_source_kinds() {
+  local unit_id="$1"
+  local packets_csv packet_id packet_file kind
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  [[ -n "$packets_csv" ]] || return 0
+  local IFS=,
+  for packet_id in $packets_csv; do
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    [[ -f "$packet_file" ]] || continue
+    kind="$(sed -n 's/^- Source kind: `\(.*\)`$/\1/p' "$packet_file" | head -1)"
+    [[ -n "$kind" ]] && printf '%s\n' "$kind"
+  done | awk '!seen[$0]++'
+}
+
+preferred_verification_scopes_for_unit() {
+  local unit_id="$1" group="$2"
+  local -a scopes=()
+  case "$group" in
+    frontend-ux-tests) scopes+=(frontend e2e) ;;
+    runtime-quality-gates) scopes+=(backend frontend e2e) ;;
+    *) scopes+=(backend frontend e2e) ;;
+  esac
+
+  if unit_packet_source_kinds "$unit_id" | grep -qx 'maturity-customer-proof'; then
+    scopes=(e2e "${scopes[@]}")
+  elif unit_packet_source_kinds "$unit_id" | grep -qx 'runtime-verification'; then
+    scopes=(backend frontend e2e "${scopes[@]}")
+  fi
+
+  printf '%s\n' "${scopes[@]}" | awk '!seen[$0]++'
+}
+
+fallback_verification_cmds() {
+  local worktree="$1"
+  if [[ -f "$worktree/Makefile" ]] && grep -q '^[[:space:]]*test:' "$worktree/Makefile"; then
+    printf 'make test\n'
+  fi
+  if [[ -f "$worktree/package.json" ]] && grep -q '"test"' "$worktree/package.json"; then
+    printf 'npm test\n'
+  fi
+  if [[ -f "$worktree/pytest.ini" || -f "$worktree/conftest.py" ]]; then
+    printf 'pytest\n'
+  fi
+  if [[ -f "$worktree/Cargo.toml" ]]; then
+    printf 'cargo test\n'
+  fi
+}
+
+collect_verification_cmds() {
+  local unit_id="$1" group="$2" worktree="$3"
+  local -a commands=()
+  local scope key raw
+
+  if [[ -n "${EXTERNAL_VERIFICATION_CMD:-}" ]]; then
+    printf '%s\n' "$EXTERNAL_VERIFICATION_CMD"
+    return 0
+  fi
+
+  while IFS= read -r scope; do
+    [[ -n "$scope" ]] || continue
+    case "$scope" in
+      backend) key="Supported backend test commands" ;;
+      frontend) key="Supported frontend test commands" ;;
+      e2e) key="Supported E2E/browser commands" ;;
+      *) continue ;;
+    esac
+    while IFS= read -r raw; do
+      raw="$(trim_inline_value "$raw")"
+      [[ -n "$raw" ]] || continue
+      command_is_forbidden "$raw" && continue
+      append_unique_line "$raw" commands
+    done < <(normalize_profile_commands "$key")
+  done < <(preferred_verification_scopes_for_unit "$unit_id" "$group")
+
+  if ((${#commands[@]} == 0)); then
+    while IFS= read -r raw; do
+      raw="$(trim_inline_value "$raw")"
+      [[ -n "$raw" ]] || continue
+      command_is_forbidden "$raw" && continue
+      append_unique_line "$raw" commands
+    done < <(fallback_verification_cmds "$worktree")
+  fi
+
+  printf '%s\n' "${commands[@]}" | awk 'NF && !seen[$0]++ { print }'
+}
+
+native_test_results_block() {
+  local unit_id="$1"
+  local test_log="$REMEDIATION_DIR/artifacts/$unit_id-native-test.log"
+  if [[ -f "$test_log" ]]; then
+    cat "$test_log"
+  else
+    printf 'No native test output available.\n'
+  fi
+}
+
 source_kind() {
   local source="$1"
   case "$source" in
@@ -712,7 +925,7 @@ select_gemini_model() {
 # stream-json+verbose writes each conversation turn as a JSON event immediately rather than
 # buffering until task completion. The python3 filter converts events to human-readable text.
 _exec_claude() {
-  local prompt_file="$1" class="$2"
+  local prompt_file="$1" class="$2" worktree_dir="${3:-$REPO_ROOT}"
   local cmd=(claude -p --verbose --output-format stream-json
     --no-session-persistence --dangerously-skip-permissions)
   local model effort mcp_cfg
@@ -726,10 +939,14 @@ _exec_claude() {
     cmd+=("${extra_args[@]}")
   fi
   mcp_cfg="$(mktemp --suffix=.json)"
-  printf '{"mcpServers":{}}\n' > "$mcp_cfg"
+  if [[ -f "$REPO_ROOT/.gemini/settings.json" ]]; then
+    cp "$REPO_ROOT/.gemini/settings.json" "$mcp_cfg"
+  else
+    printf '{"mcpServers":{}}\n' > "$mcp_cfg"
+  fi
   cmd+=(--strict-mcp-config --mcp-config "$mcp_cfg")
   (
-    cd "$REPO_ROOT"
+    cd "$worktree_dir"
     "${cmd[@]}" < "$prompt_file" | python3 -u -c "
 import sys, json
 for line in sys.stdin:
@@ -761,7 +978,7 @@ for line in sys.stdin:
 
 # gemini has no -C flag; same subshell workaround.
 _exec_gemini() {
-  local prompt_file="$1" class="$2"
+  local prompt_file="$1" class="$2" worktree_dir="${3:-$REPO_ROOT}"
   local cmd=(gemini --yolo)
   local model
   model="$(select_gemini_model "$class")"
@@ -771,12 +988,12 @@ _exec_gemini() {
     local extra_args=($GEMINI_EXTRA_ARGS)
     cmd+=("${extra_args[@]}")
   fi
-  (cd "$REPO_ROOT" && "${cmd[@]}" -p "$(cat "$prompt_file")")
+  (cd "$worktree_dir" && "${cmd[@]}" -p "$(cat "$prompt_file")")
 }
 
 _exec_codex() {
-  local prompt_file="$1" class="$2"
-  local cmd=(codex exec --ephemeral --full-auto --skip-git-repo-check -C "$REPO_ROOT")
+  local prompt_file="$1" class="$2" worktree_dir="${3:-$REPO_ROOT}"
+  local cmd=(codex exec --ephemeral --full-auto --skip-git-repo-check -C "$worktree_dir")
   local model reasoning
   model="$(select_model "$class")"
   reasoning="$(select_reasoning "$class")"
@@ -1324,6 +1541,15 @@ raw_incomplete_unit_manifest_is_unsafe() {
     return 1
   fi
 
+  return 0
+}
+
+catalog_outputs_are_ready() {
+  [[ -s "$PX_TSV" && -s "$PX_MD" && -s "$WORKSTREAMS_TSV" && -s "$UNITS_TSV" ]] || return 1
+  local stats total raw single
+  stats="$(raw_incomplete_unit_manifest_stats)"
+  IFS=$'\t' read -r total raw single <<< "$stats"
+  raw_incomplete_unit_manifest_is_unsafe "$total" "$raw" "$single" && return 1
   return 0
 }
 
@@ -2192,7 +2418,7 @@ REVISION
 
 ## Metadata
 
-- Repo root: $REPO_ROOT
+- Repo root: $REMEDIATION_DIR/worktrees/$unit_id
 - Audit run: $AUDIT_RUN
 - Remediation run: $REMEDIATION_DIR
 - Workstream: $group
@@ -2253,6 +2479,8 @@ build_verifier_prompt() {
   findings_tsv="$(verifier_findings_tsv_for_unit "$unit_id")"
   local packet_list
   packet_list="$(packet_paths_for_ids "$packets_csv")"
+  local native_test_results
+  native_test_results="$(native_test_results_block "$unit_id")"
 
   cat > "$prompt" <<PROMPT
 # Remediation Verification: $unit_id
@@ -2339,6 +2567,13 @@ Use one row per unresolved verifier finding. Valid \`type\` values:
 - \`blocked\` — cannot proceed without external dependency, access, or human input.
 
 For \`accept\` / \`fixed\`, write only the header or only \`launch_evidence\` / \`sandbox_blocked\` rows. Do not include \`contract_conflict\`, \`test_harness\`, \`split_required\`, or \`blocked\` rows on an accepted implementation.
+
+## Native Test Results
+The harness executed the selected supported verification commands natively. Do NOT run the same commands again unless the log shows they were missing or could not start. Evaluate this output:
+
+\`\`\`text
+$native_test_results
+\`\`\`
 PROMPT
 }
 
@@ -2696,7 +2931,15 @@ validate_prompt_outputs() {
 
 final_result_value() {
   local log_file="$1"
-  grep -aE '^RESULT:[[:space:]]*(PASS|FAIL|INCOMPLETE|BLOCKED)' "$log_file" 2>/dev/null \
+  awk '
+    /^assistant$/ || /^codex$/ || /^claude$/ || /^gemini$/ { marker = NR }
+    { lines[NR] = $0 }
+    END {
+      start = marker ? marker + 1 : 1
+      for (i = start; i <= NR; i += 1) print lines[i]
+    }
+  ' "$log_file" 2>/dev/null \
+    | grep -aE '^RESULT:[[:space:]]*(PASS|FAIL|INCOMPLETE|BLOCKED)' 2>/dev/null \
     | tail -1 \
     | sed -E 's/^RESULT:[[:space:]]*//; s/[[:space:]].*$//' \
     | tr '[:lower:]' '[:upper:]'
@@ -2744,9 +2987,120 @@ recover_verifier_artifact_from_log() {
   printf '[auto-recover] verify-%s: recovered missing verifier artifact from RESULT: PASS log\n' "$unit_id" >>"$log_file"
 }
 
+repo_root_is_git_root() {
+  git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1
+}
+
+workspace_git_roots() {
+  local seen_file
+  seen_file="$(mktemp)"
+
+  if repo_root_is_git_root; then
+    printf '%s\n' "$REPO_ROOT" >> "$seen_file"
+  fi
+
+  local IFS=',' root root_path
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    root_path="$(commit_root_path "$root")"
+    [[ -d "$root_path" ]] || continue
+    if git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1; then
+      printf '%s\n' "$root_path" >> "$seen_file"
+    fi
+  done
+
+  local child
+  for child in "$REPO_ROOT"/*; do
+    [[ -d "$child" ]] || continue
+    if git -C "$child" rev-parse --git-dir >/dev/null 2>&1; then
+      printf '%s\n' "$child" >> "$seen_file"
+    fi
+  done
+
+  awk '!seen[$0]++' "$seen_file"
+  rm -f "$seen_file"
+}
+
+workspace_has_git_roots() {
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] && return 0
+  done < <(workspace_git_roots)
+  return 1
+}
+
+workspace_root_relative_remediation_dir() {
+  local root="$1"
+  if [[ "$REMEDIATION_DIR" == "$root/"* ]]; then
+    printf '%s\n' "${REMEDIATION_DIR#"$root/"}"
+  fi
+}
+
 readonly_role_diff_snapshot() {
-  local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
-  git -C "$REPO_ROOT" diff --binary -- . ":(exclude)${rel_rdir}" 2>/dev/null || true
+  local root rel_rdir
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    printf 'ROOT\t%s\n' "$root"
+    rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
+    local pathspec=(.)
+    if [[ -n "$rel_rdir" ]]; then
+      pathspec+=(":(exclude)$rel_rdir")
+    fi
+    git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}" 2>/dev/null || true
+  done < <(workspace_git_roots)
+}
+
+readonly_restore_workspace_changes() {
+  local root rel_rdir
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
+    local pathspec=(.)
+    if [[ -n "$rel_rdir" ]]; then
+      pathspec+=(":(exclude)$rel_rdir")
+    fi
+
+    local restore_list
+    restore_list="$(mktemp)"
+    {
+      git -C "$root" diff --name-only -- "${pathspec[@]}"
+      git -C "$root" diff --cached --name-only -- "${pathspec[@]}"
+    } | awk 'NF && !seen[$0]++ { print }' > "$restore_list"
+
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      git -C "$root" restore --source=HEAD --staged --worktree -- "$path" >/dev/null 2>&1 || true
+    done < "$restore_list"
+    rm -f "$restore_list"
+
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      rm -rf "$root/$path"
+    done < <(git -C "$root" ls-files --others --exclude-standard -- "${pathspec[@]}")
+  done < <(workspace_git_roots)
+}
+
+prepare_unit_workspace() {
+  local unit_id="$1"
+  local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+
+  if ! repo_root_is_git_root; then
+    printf '[workspace] %s: REPO_ROOT is not a git root; using %s directly\n' "$unit_id" "$REPO_ROOT" >&2
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+
+  if [[ ! -d "$worktree_dir" ]]; then
+    mkdir -p "$REMEDIATION_DIR/worktrees"
+    if ! git -C "$REPO_ROOT" worktree add -b "remediation-$unit_id" "$worktree_dir" HEAD >/dev/null 2>&1; then
+      printf '[workspace] %s: failed to create git worktree under %s; using %s directly\n' \
+        "$unit_id" "$worktree_dir" "$REPO_ROOT" >&2
+      printf '%s\n' "$REPO_ROOT"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$worktree_dir"
 }
 
 commit_root_path() {
@@ -2824,53 +3178,91 @@ commit_verified_unit_changes() {
     return 0
   }
 
-  local packets_csv baseline_dir
-  packets_csv="$(unit_packets_csv "$unit_id" || true)"
-  baseline_dir="$(commit_baseline_dir_for_unit "$unit_id")"
-  [[ -d "$baseline_dir" ]] || {
-    printf '[commit-on-verify] %s: missing clean baseline; not committing\n' "$unit_id" >&2
-    return 1
-  }
+  if ! repo_root_is_git_root; then
+    printf '[commit-on-verify] %s: REPO_ROOT is not a git root; auto-commit is disabled in split-root mode\n' "$unit_id"
+    return 0
+  fi
 
-  local IFS=',' root root_path label status_file current_status commit_msg
-  for root in $REMEDIATION_COMMIT_ROOTS; do
-    [[ -n "$root" ]] || continue
-    root_path="$(commit_root_path "$root")"
-    [[ -d "$root_path" ]] || continue
-    if ! git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1; then
-      continue
-    fi
-    label="$(commit_root_label "$root_path")"
-    status_file="$baseline_dir/$label.status"
-    if [[ ! -f "$status_file" ]]; then
-      printf '[commit-on-verify] %s: no baseline for %s; not committing that root\n' "$unit_id" "$root_path" >&2
-      continue
-    fi
-    if [[ -s "$status_file" ]]; then
-      printf '[commit-on-verify] %s: %s was dirty before implementation; leaving changes uncommitted\n' \
-        "$unit_id" "$root_path" >&2
-      continue
-    fi
-    current_status="$(git -C "$root_path" status --porcelain=v1 -uall)"
-    if [[ -z "$current_status" ]]; then
-      printf '[commit-on-verify] %s: no %s changes to commit\n' "$unit_id" "$label"
-      continue
+  local branch_name="remediation-$unit_id"
+  local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+
+  if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
+    # Commit changes in the worktree
+    if [[ -n "$(git -C "$worktree_dir" status --porcelain)" ]]; then
+       git -C "$worktree_dir" add -A
+       git -C "$worktree_dir" commit -m "fix(remediation): complete $unit_id" || true
     fi
 
-    git -C "$root_path" add -A
-    commit_msg="$(printf 'fix(remediation): complete %s %s\n\nPackets: %s\nVerifier: accept/fixed\nAudit run: %s\n' \
-      "$unit_id" "$label" "${packets_csv:-unknown}" "$(basename "$AUDIT_RUN")")"
-    if git -C "$root_path" commit -m "$commit_msg"; then
-      printf '[commit-on-verify] %s: committed %s changes in %s\n' "$unit_id" "$label" "$root_path"
+    printf '[commit-on-verify] %s: merging branch %s\n' "$unit_id" "$branch_name"
+    if git -C "$REPO_ROOT" merge --no-ff "$branch_name" -m "Merge branch '$branch_name' into HEAD for $unit_id"; then
+      printf '[commit-on-verify] %s: successfully merged\n' "$unit_id"
+      # Cleanup
+      git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || true
+      git -C "$REPO_ROOT" branch -d "$branch_name" >/dev/null 2>&1 || true
     else
-      printf '[commit-on-verify] %s: git commit failed in %s\n' "$unit_id" "$root_path" >&2
+      printf '[commit-on-verify] %s: merge conflict on %s\n' "$unit_id" "$branch_name" >&2
+      git -C "$REPO_ROOT" merge --abort >/dev/null 2>&1 || true
       return 1
     fi
-  done
+  else
+    printf '[commit-on-verify] %s: branch %s not found\n' "$unit_id" "$branch_name" >&2
+    return 1
+  fi
+}
+
+run_implementer_and_test() {
+  local prompt_file="$1" workstream="$2" class="$3" worktree_dir="$4" unit_id="$5"
+
+  run_prompt "$prompt_file" "$workstream" "$class" "$worktree_dir"
+  local status=$?
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return "$status"
+  fi
+
+  if [[ "$status" == "0" ]]; then
+    local group
+    group="$(awk -F '\t' -v unit_id="$unit_id" 'NR > 1 && $1 == unit_id { print $3; exit }' "$UNITS_TSV")"
+    local test_log="$REMEDIATION_DIR/artifacts/$unit_id-native-test.log"
+    local -a test_cmds=()
+    local test_cmd
+    while IFS= read -r test_cmd; do
+      [[ -n "$test_cmd" ]] || continue
+      test_cmds+=("$test_cmd")
+    done < <(collect_verification_cmds "$unit_id" "$group" "$worktree_dir")
+
+    if ((${#test_cmds[@]} > 0)); then
+      : > "$test_log"
+      local test_status=0
+      local cmd_status=0
+      for test_cmd in "${test_cmds[@]}"; do
+        printf '\n[native-test] running: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+        {
+          printf '$ %s\n' "$test_cmd"
+          (cd "$worktree_dir" && eval "$test_cmd")
+        } >> "$test_log" 2>&1
+        cmd_status=$?
+        if [[ "$cmd_status" == "0" ]]; then
+          printf '[native-test] passed: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+        else
+          printf '[native-test] failed (exit %d): %s\n' "$cmd_status" "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+          test_status="$cmd_status"
+          break
+        fi
+      done
+      if [[ "$test_status" != "0" ]]; then
+        return "$test_status"
+      fi
+    else
+      printf '\n[native-test] no supported verification commands detected\n' >> "$REMEDIATION_DIR/logs/$workstream.log"
+      echo "No supported verification commands were configured in the product profile or detected from repo defaults." > "$test_log"
+    fi
+  fi
+  return "$status"
 }
 
 run_prompt() {
-  local prompt_file="$1" workstream="$2" class="$3"
+  local prompt_file="$1" workstream="$2" class="$3" worktree_dir="${4:-$REPO_ROOT}"
   local log_file="$REMEDIATION_DIR/logs/$workstream.log"
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -2942,8 +3334,7 @@ run_prompt() {
   local attempt=1
   local status=0
   local readonly_integrity=0 readonly_before_file="" readonly_before_hash="" readonly_before_size=0
-  if [[ "$class" =~ ^(cataloger|coordinator|verifier|reviewer)$ ]] && \
-     git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null 2>&1; then
+  if [[ "$class" =~ ^(cataloger|coordinator|verifier|reviewer)$ ]] && workspace_has_git_roots; then
     readonly_integrity=1
     readonly_before_file="$(mktemp)"
     readonly_role_diff_snapshot > "$readonly_before_file"
@@ -2966,15 +3357,15 @@ run_prompt() {
     else
       case "${effective_agent:-codex}" in
         claude)
-          run_command_with_heartbeat "$workstream" "$log_file" _exec_claude "$prompt_file" "$class"
+          run_command_with_heartbeat "$workstream" "$log_file" _exec_claude "$prompt_file" "$class" "$worktree_dir"
           status="$?"
           ;;
         gemini)
-          run_command_with_heartbeat "$workstream" "$log_file" _exec_gemini "$prompt_file" "$class"
+          run_command_with_heartbeat "$workstream" "$log_file" _exec_gemini "$prompt_file" "$class" "$worktree_dir"
           status="$?"
           ;;
         codex)
-          run_command_with_heartbeat "$workstream" "$log_file" _exec_codex "$prompt_file" "$class"
+          run_command_with_heartbeat "$workstream" "$log_file" _exec_codex "$prompt_file" "$class" "$worktree_dir"
           status="$?"
           ;;
         *)
@@ -3009,8 +3400,7 @@ run_prompt() {
       printf '\nINTEGRITY VIOLATION: %s (class=%s) modified source files outside remediation dir; reverting\n' \
         "$workstream" "$class" >>"$log_file"
       if [[ "$readonly_before_size" == "0" ]]; then
-        local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT/"}"
-        git -C "$REPO_ROOT" checkout -- . ":(exclude)${rel_rdir}" >>"$log_file" 2>&1 || true
+        readonly_restore_workspace_changes >>"$log_file" 2>&1 || true
         if [[ "$class" != "coordinator" ]]; then
           status=1
         fi
@@ -3048,6 +3438,13 @@ run_prompt() {
       status=0
     fi
   fi
+  if [[ "$status" != "0" && "$class" == "cataloger" ]]; then
+    if catalog_outputs_are_ready; then
+      printf '\n[auto-recover] %s: catalog outputs exist and the implementation-unit manifest is no longer raw — treating cataloger as complete\n' \
+        "$workstream" >>"$log_file"
+      status=0
+    fi
+  fi
 
   return "$status"
 }
@@ -3078,6 +3475,9 @@ wave_job_completed_successfully() {
         return 0
       fi
       final_result_is_terminal "$log_file" && [[ -s "$verifier" ]]
+      ;;
+    00-cataloger)
+      catalog_outputs_are_ready
       ;;
     *)
       return 1
@@ -3313,10 +3713,14 @@ execute_workstreams() {
         continue
       fi
     fi
+    local worktree_dir
+    worktree_dir="$(prepare_unit_workspace "$unit_id")"
+
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
     record_commit_baseline_for_unit "$unit_id"
-    run_prompt "$prompt" "implement-$unit_id" "$model_class" &
+
+    run_implementer_and_test "$prompt" "implement-$unit_id" "$model_class" "$worktree_dir" "$unit_id" &
     pids+=("$!")
     names+=("implement-$unit_id")
     active=$((active + 1))

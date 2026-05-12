@@ -122,7 +122,14 @@ Runtime verification. Run repo-supported build/lint/typecheck/test/migration/bro
 
 ## GENERIC 7
 
-Customer/operator simulation. Execute critical launch journeys from the product profile using supported runtime/browser/API harnesses. If a journey lacks a runnable harness, mark it unverified.
+Customer/operator simulation. Execute critical launch journeys from the product profile.
+
+**CRITICAL UI TESTING PROTOCOL:** Do NOT attempt to write or execute raw JavaScript/Playwright scripts. You must use the provided `mcp_playwright_browser_*` tools to interactively drive the browser.
+1. Navigate to the local staging URL.
+2. Use `browser_snapshot` after every action to understand the current page state.
+3. Use `browser_click`, `browser_fill_form`, etc., to progress through the journey step-by-step.
+4. If you encounter an error toast or unexpected state, log it as a UI failure.
+If a journey cannot be completed via interactive browser tools, or if you need to manipulate backend state (e.g. seeding test data), use the `lattice` tools if available. If UI interaction fails entirely, mark it as FAILED and explain where the UI blocked you.
 
 **Accessibility** (when `ACCESSIBILITY_SCAN=1`, injected by launcher): Run axe-core scans on each page reached during simulated journeys. A critical or serious WCAG violation on an operator-facing page is a launch blocker.
 

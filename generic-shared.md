@@ -13,7 +13,7 @@ Rules:
 3. Find the repo's own architecture, functional, manual, API, deployment, and test documentation before judging readiness.
 4. Every finding must cite code `file:line` and docs `path#heading` where applicable. If docs are missing, cite the search performed and mark the gap.
 5. Discovery and synthesis jobs do not edit code and do not edit live docs. Runtime and simulation jobs may run commands required by the prompt and must write raw artifacts under `${RUN_DIR}/artifacts/<job_id>/`.
-6. Keep context bounded. Use skeleton/context tools before opening large files. Do not read the full repo or full master prompt.
+6. Keep context bounded. Use skeleton/context tools before opening large files. If the `mcp_lattice_*` tools are available, prioritize using them for discovery (`mcp_lattice_get_context_capsule`, `mcp_lattice_summarize_subsystem`), mapping (`mcp_lattice_get_dependencies`, `mcp_lattice_get_impact_graph`), and verification (`mcp_lattice_impact_from_diff`). Do not read the full repo or full master prompt blindly.
 7. Prioritize launch-blocking P0/P1 findings over exhaustive coverage.
 8. Security, data isolation, data integrity, admin/support access, destructive actions, privacy, and irreversible lifecycle flows are high-risk by default when present.
 9. Browser or E2E evidence must prove authenticated/product state, not just HTTP 200 or shell rendering.

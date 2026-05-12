@@ -23,6 +23,15 @@ LOAD_TEST_TARGET="${LOAD_TEST_TARGET:-}"
 LOAD_TEST_TOOL="${LOAD_TEST_TOOL:-k6}"
 SAST_ENABLED="${SAST_ENABLED:-1}"
 LIGHTHOUSE_SCAN="${LIGHTHOUSE_SCAN:-1}"
+AUDIT_TOOLING_AUTO_INSTALL="${AUDIT_TOOLING_AUTO_INSTALL:-1}"
+AUDIT_TOOLING_VENV="${AUDIT_TOOLING_VENV:-$RUN_DIR/.audit-tooling/venv}"
+AUDIT_NODE_TOOLING_AUTO_INSTALL="${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}"
+AUDIT_NODE_TOOLING_DIR="${AUDIT_NODE_TOOLING_DIR:-$RUN_DIR/.audit-tooling/node}"
+AUDIT_BASE_URL="${AUDIT_BASE_URL:-}"
+ACCESSIBILITY_PATHS="${ACCESSIBILITY_PATHS:-/,/login}"
+LIGHTHOUSE_PATHS="${LIGHTHOUSE_PATHS:-/,/login}"
+LOAD_TEST_PATHS="${LOAD_TEST_PATHS:-/}"
+EXTERNAL_SERVICE_TIMEOUT="${EXTERNAL_SERVICE_TIMEOUT:-10}"
 
 usage() {
   cat <<'USAGE'
@@ -68,6 +77,24 @@ Security scanning (runtime jobs):
                        applicable to the detected languages. Results written to RUN_DIR/artifacts/<job_id>/sast/.
                        Critical CVEs in direct dependencies or high-severity SAST findings are launch blockers.
                        Set to 0 to disable.
+  AUDIT_TOOLING_AUTO_INSTALL
+                       1 to auto-install missing native Python audit tooling into AUDIT_TOOLING_VENV.
+                       Defaults to 1. Set to 0 to require preinstalled tooling.
+  AUDIT_TOOLING_VENV   Virtualenv path used for native audit tooling installs. Defaults to
+                       RUN_DIR/.audit-tooling/venv.
+  AUDIT_NODE_TOOLING_AUTO_INSTALL
+                       1 to auto-install missing native Node/browser tooling into AUDIT_NODE_TOOLING_DIR.
+                       Defaults to 1. Set to 0 to require preinstalled tooling.
+  AUDIT_NODE_TOOLING_DIR
+                       Tooling directory used for native Lighthouse/accessibility dependencies.
+                       Defaults to RUN_DIR/.audit-tooling/node.
+  AUDIT_BASE_URL       Optional explicit base URL for native runtime/simulation/load probes.
+  ACCESSIBILITY_PATHS  Comma-separated paths or absolute URLs for native axe scans. Defaults to /,/login.
+  LIGHTHOUSE_PATHS     Comma-separated paths or absolute URLs for native Lighthouse runs. Defaults to /,/login.
+  LOAD_TEST_PATHS      Comma-separated paths or absolute URLs targeted by the native load-test runner.
+                       Defaults to /.
+  EXTERNAL_SERVICE_TIMEOUT
+                       Timeout in seconds for native external-service probes. Defaults to 10.
 
 Performance scanning (runtime and simulation jobs):
   LIGHTHOUSE_SCAN      1 to run Lighthouse against key pages during runtime and simulation jobs. Defaults to 1.
@@ -148,6 +175,351 @@ extract_section() {
       print
     }
   ' "$file"
+}
+
+audit_readonly_kind() {
+  [[ "$1" =~ ^(discovery|synthesis|web|deep-dive)$ ]]
+}
+
+audit_relative_run_dir() {
+  if [[ "$RUN_DIR" == "$REPO_ROOT/"* ]]; then
+    printf '%s\n' "${RUN_DIR#"$REPO_ROOT/"}"
+  fi
+}
+
+audit_readonly_diff_snapshot() {
+  local rel_run_dir
+  rel_run_dir="$(audit_relative_run_dir)"
+  local pathspec=(.)
+  if [[ -n "$rel_run_dir" ]]; then
+    pathspec+=(":(exclude)$rel_run_dir")
+  fi
+  git -C "$REPO_ROOT" status --porcelain=v1 -uall -- "${pathspec[@]}"
+}
+
+audit_restore_readonly_changes() {
+  local rel_run_dir
+  rel_run_dir="$(audit_relative_run_dir)"
+  local pathspec=(.)
+  if [[ -n "$rel_run_dir" ]]; then
+    pathspec+=(":(exclude)$rel_run_dir")
+  fi
+
+  local restore_list
+  restore_list="$(mktemp)"
+  {
+    git -C "$REPO_ROOT" diff --name-only -- "${pathspec[@]}"
+    git -C "$REPO_ROOT" diff --cached --name-only -- "${pathspec[@]}"
+  } | awk 'NF && !seen[$0]++ { print }' > "$restore_list"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    git -C "$REPO_ROOT" restore --source=HEAD --staged --worktree -- "$path" >/dev/null 2>&1 || true
+  done < "$restore_list"
+  rm -f "$restore_list"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    rm -rf "$REPO_ROOT/$path"
+  done < <(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- "${pathspec[@]}")
+}
+
+trim_inline_value() {
+  local value="$1"
+  value="${value#\`}"
+  value="${value%\`}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  printf '%s\n' "$value"
+}
+
+profile_section_values() {
+  local section="$1" key="$2"
+  [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]] || return 0
+  awk -v section="$section" -v key="$key" '
+    BEGIN { in_section = 0; capture = 0 }
+    /^## / {
+      line = $0
+      sub(/^##[[:space:]]+/, "", line)
+      if (in_section && line != section) exit
+      in_section = (line == section)
+      capture = 0
+      next
+    }
+    !in_section { next }
+    $0 ~ "^- " key ":" {
+      line = $0
+      sub("^- " key ":[[:space:]]*", "", line)
+      if (line != "") print line
+      capture = 1
+      next
+    }
+    capture {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^- /) {
+        capture = 0
+        next
+      }
+      if ($0 ~ /^[[:space:]][[:space:]]*-[[:space:]]+/) {
+        line = $0
+        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+        print line
+        next
+      }
+      if ($0 ~ /^[[:space:]]+/) {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        print line
+        next
+      }
+      capture = 0
+    }
+  ' "$PRODUCT_PROFILE"
+}
+
+extract_first_url() {
+  local text="$1"
+  printf '%s\n' "$text" | grep -Eo 'https?://[^[:space:]`")]+'
+}
+
+profile_runtime_value() {
+  local key="$1"
+  local value
+  value="$(profile_section_values "Runtime Verification" "$key" | head -1)"
+  trim_inline_value "$value"
+}
+
+audit_creds_file() {
+  local creds="$REPO_ROOT/docs/ux/.creds"
+  [[ -f "$creds" ]] || return 1
+  printf '%s\n' "$creds"
+}
+
+audit_cred_value() {
+  local key="$1"
+  local creds
+  creds="$(audit_creds_file 2>/dev/null)" || return 1
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, "", $0); print $0; exit }' "$creds"
+}
+
+detect_base_url() {
+  if [[ -n "${AUDIT_BASE_URL:-}" ]]; then
+    printf '%s\n' "$AUDIT_BASE_URL"
+    return 0
+  fi
+  local key value
+  for key in APP_URL BASE_URL APPLICATION_URL STAGING_URL DEV_URL; do
+    value="$(audit_cred_value "$key" 2>/dev/null || true)"
+    value="$(trim_inline_value "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  value="$(profile_runtime_value "Dev/staging URL and credential source, if any")"
+  value="$(extract_first_url "$value" | head -1)"
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$value"
+}
+
+csv_to_unique_lines() {
+  printf '%s\n' "$1" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | awk '!seen[$0]++'
+}
+
+join_url() {
+  local base="$1" path="$2"
+  if [[ "$path" =~ ^https?:// ]]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+  if [[ -z "$base" ]]; then
+    return 1
+  fi
+  base="${base%/}"
+  if [[ "$path" == /* ]]; then
+    printf '%s%s\n' "$base" "$path"
+  else
+    printf '%s/%s\n' "$base" "$path"
+  fi
+}
+
+collect_target_urls() {
+  local base_url="$1" paths_csv="$2"
+  local path
+  while IFS= read -r path; do
+    path="$(trim_inline_value "$path")"
+    [[ -n "$path" ]] || continue
+    join_url "$base_url" "$path"
+  done < <(csv_to_unique_lines "$paths_csv") | awk 'NF && !seen[$0]++ { print }'
+}
+
+slugify() {
+  local raw="$1"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's#https\?://##; s#[^a-z0-9]\+#-#g; s#^-##; s#-$##')"
+  [[ -n "$raw" ]] || raw="page"
+  printf '%s\n' "$raw"
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+audit_tooling_bin() {
+  printf '%s/bin/%s\n' "$AUDIT_TOOLING_VENV" "$1"
+}
+
+audit_tooling_pip() {
+  audit_tooling_bin pip
+}
+
+audit_ensure_python_tool_venv() {
+  [[ -x "$(audit_tooling_pip)" ]] && return 0
+  command_exists python3 || return 1
+  mkdir -p "$(dirname "$AUDIT_TOOLING_VENV")"
+  python3 -m venv "$AUDIT_TOOLING_VENV" >/dev/null 2>&1 || return 1
+}
+
+audit_install_python_tool() {
+  local package="$1" log_file="$2"
+  if [[ "${AUDIT_TOOLING_AUTO_INSTALL:-1}" != "1" ]]; then
+    printf '[native-tooling] auto-install disabled; missing package=%s\n' "$package" >> "$log_file"
+    return 1
+  fi
+  if ! audit_ensure_python_tool_venv; then
+    printf '[native-tooling] failed to create tooling venv at %s for package=%s\n' "$AUDIT_TOOLING_VENV" "$package" >> "$log_file"
+    return 1
+  fi
+  printf '[native-tooling] installing %s into %s\n' "$package" "$AUDIT_TOOLING_VENV" >> "$log_file"
+  "$(audit_tooling_pip)" install "$package" >> "$log_file" 2>&1 || {
+    printf '[native-tooling] install failed for %s\n' "$package" >> "$log_file"
+    return 1
+  }
+}
+
+audit_ensure_python_tool() {
+  local cmd_name="$1" package="$2" log_file="$3"
+  if command_exists "$cmd_name"; then
+    return 0
+  fi
+  local tool_path
+  tool_path="$(audit_tooling_bin "$cmd_name")"
+  if [[ -x "$tool_path" ]]; then
+    return 0
+  fi
+  audit_install_python_tool "$package" "$log_file" || return 1
+  [[ -x "$tool_path" ]]
+}
+
+audit_resolve_python_tool() {
+  local cmd_name="$1"
+  if command_exists "$cmd_name"; then
+    command -v "$cmd_name"
+    return 0
+  fi
+  local tool_path
+  tool_path="$(audit_tooling_bin "$cmd_name")"
+  [[ -x "$tool_path" ]] || return 1
+  printf '%s\n' "$tool_path"
+}
+
+audit_node_bin() {
+  printf '%s/node_modules/.bin/%s\n' "$AUDIT_NODE_TOOLING_DIR" "$1"
+}
+
+audit_ensure_node_project() {
+  command_exists node || return 1
+  command_exists npm || return 1
+  mkdir -p "$AUDIT_NODE_TOOLING_DIR"
+  if [[ ! -f "$AUDIT_NODE_TOOLING_DIR/package.json" ]]; then
+    (cd "$AUDIT_NODE_TOOLING_DIR" && npm init -y >/dev/null 2>&1) || return 1
+  fi
+}
+
+audit_node_package_dir() {
+  local package="$1"
+  printf '%s/node_modules/%s\n' "$AUDIT_NODE_TOOLING_DIR" "$package"
+}
+
+audit_node_package_present() {
+  [[ -d "$(audit_node_package_dir "$1")" ]]
+}
+
+audit_install_node_packages() {
+  local log_file="$1"
+  shift
+  [[ "${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}" == "1" ]] || {
+    printf '[native-tooling] node auto-install disabled; missing packages=%s\n' "$*" >> "$log_file"
+    return 1
+  }
+  audit_ensure_node_project || {
+    printf '[native-tooling] failed to initialize node tooling dir %s\n' "$AUDIT_NODE_TOOLING_DIR" >> "$log_file"
+    return 1
+  }
+  printf '[native-tooling] installing node packages into %s: %s\n' "$AUDIT_NODE_TOOLING_DIR" "$*" >> "$log_file"
+  (cd "$AUDIT_NODE_TOOLING_DIR" && npm install --no-save "$@") >> "$log_file" 2>&1 || {
+    printf '[native-tooling] node install failed for packages=%s\n' "$*" >> "$log_file"
+    return 1
+  }
+}
+
+audit_ensure_node_packages() {
+  local log_file="$1"
+  shift
+  local missing=()
+  local package
+  for package in "$@"; do
+    audit_node_package_present "$package" || missing+=("$package")
+  done
+  if ((${#missing[@]} == 0)); then
+    return 0
+  fi
+  audit_install_node_packages "$log_file" "${missing[@]}"
+}
+
+audit_ensure_node_bin() {
+  local bin_name="$1" log_file="$2"
+  shift 2
+  if command_exists "$bin_name"; then
+    return 0
+  fi
+  local tool_path
+  tool_path="$(audit_node_bin "$bin_name")"
+  if [[ -x "$tool_path" ]]; then
+    return 0
+  fi
+  audit_install_node_packages "$log_file" "$@" || return 1
+  [[ -x "$tool_path" ]]
+}
+
+audit_resolve_node_bin() {
+  local bin_name="$1"
+  if command_exists "$bin_name"; then
+    command -v "$bin_name"
+    return 0
+  fi
+  local tool_path
+  tool_path="$(audit_node_bin "$bin_name")"
+  [[ -x "$tool_path" ]] || return 1
+  printf '%s\n' "$tool_path"
+}
+
+audit_ensure_playwright_chromium() {
+  local log_file="$1"
+  audit_ensure_node_bin "playwright" "$log_file" "playwright" || return 1
+  local browser_dir="$AUDIT_NODE_TOOLING_DIR/playwright-browsers"
+  if [[ -d "$browser_dir" ]] && find "$browser_dir" -mindepth 1 -maxdepth 1 -type d | read; then
+    return 0
+  fi
+  [[ "${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}" == "1" ]] || {
+    printf '[native-tooling] browser auto-install disabled; chromium not present\n' >> "$log_file"
+    return 1
+  }
+  printf '[native-tooling] installing playwright chromium into %s\n' "$browser_dir" >> "$log_file"
+  PLAYWRIGHT_BROWSERS_PATH="$browser_dir" "$(audit_resolve_node_bin "playwright")" install chromium >> "$log_file" 2>&1 || {
+    printf '[native-tooling] playwright chromium install failed\n' >> "$log_file"
+    return 1
+  }
 }
 
 FROM_GROUP=""
@@ -320,7 +692,7 @@ Then append one row per unexplored boundary with these fields (all tab-separated
 
 Only log boundaries for P0/P1 risk areas you identified but could not finish. Do not log for completeness. The launcher queues logged entries as follow-up deep-dive jobs automatically after this group completes.
 
-For discovery and synthesis jobs, do not run tests or start servers. For runtime and simulation jobs, run the commands/browser automation required by the master prompt and write raw outputs under:
+For discovery and synthesis jobs, do not run tests or start servers. For runtime and simulation jobs, analyze the native harness artifacts under:
 
 \`$RUN_DIR/artifacts/$job_id/\`
 
@@ -333,18 +705,14 @@ INSTRUCTIONS
 
 ## Accessibility Scanning
 
-For every page your Playwright browser automation visits during this job, run an axe-core accessibility scan. If `@axe-core/playwright` is available in the frontend dev dependencies, use it. Otherwise use the `axe-playwright` npm package or inject the axe-core CDN bundle via `page.addScriptTag`.
+The harness has already attempted native axe scans against the configured accessibility target URLs.
 
-For each page scanned:
+Required evidence inputs:
 
-1. Call `AxeBuilder({ page }).analyze()` (or equivalent) after the page reaches a stable loaded state.
-2. Record violations grouped by impact level: **critical**, **serious**, **moderate**, **minor**.
-3. For each critical or serious violation, record: rule ID, element selector, WCAG criterion, and page URL.
-4. Determine overall WCAG 2.1 AA conformance status for the page: pass / partial / fail.
+- Raw JSON reports: \`$RUN_DIR/artifacts/$job_id/accessibility/<page-slug>.json\`
+- Native summary: \`$RUN_DIR/artifacts/$job_id/accessibility/summary.md\`
 
-Save the raw JSON reports to \`$RUN_DIR/artifacts/$job_id/accessibility/<page-slug>.json\`.
-
-Write a summary table in your report output with one row per page: page URL, critical count, serious count, overall WCAG status. If axe-core is unavailable after a reasonable install attempt, record ACCESSIBILITY: UNVERIFIED and explain why.
+Read those artifacts directly. If the summary reports \`STATUS: UNVERIFIED\`, carry that forward as missing evidence and cite the exact reason from the native summary instead of inventing a browser pass.
 ACCESSIBILITY
   fi
 
@@ -354,31 +722,14 @@ ACCESSIBILITY
 
 ## Lighthouse / Core Web Vitals
 
-Run the Lighthouse CLI against each key page visited during this job. Derive the target base URL from the running dev server or the VPS base URL in \`docs/ux/.creds\`.
+The harness has already attempted native Lighthouse runs against the configured target URLs.
 
-For each key page (at minimum: login, primary operator dashboard, and any page flagged as performance-sensitive in prior discovery findings):
+Required evidence inputs:
 
-\`\`\`bash
-npx lighthouse "<page-url>" \\
-  --output=json \\
-  --output-path="$RUN_DIR/artifacts/$job_id/lighthouse/<page-slug>.json" \\
-  --chrome-flags="--headless --no-sandbox" \\
-  --only-categories=performance,accessibility,best-practices,seo \\
-  --quiet
-\`\`\`
+- Raw JSON reports: \`$RUN_DIR/artifacts/$job_id/lighthouse/<page-slug>.json\`
+- Native summary: \`$RUN_DIR/artifacts/$job_id/lighthouse/summary.md\`
 
-For each page, extract and record:
-
-- **Performance score** (0–100)
-- **LCP** — good < 2.5s | needs-improvement 2.5–4s | poor > 4s
-- **CLS** — good < 0.1 | needs-improvement 0.1–0.25 | poor > 0.25
-- **INP** — good < 200ms | needs-improvement 200–500ms | poor > 500ms
-- **TTFB** — good < 800ms
-- **Accessibility score** (0–100, complements axe-core violation details)
-
-A performance score < 50 or any **poor** Core Web Vital rating is a **launch blocker**.
-
-Save raw JSON reports to \`$RUN_DIR/artifacts/$job_id/lighthouse/\`. Include a summary table in your report: page, perf score, LCP, CLS, INP, result. If Lighthouse cannot be installed via npx, record LIGHTHOUSE: UNVERIFIED.
+Read those artifacts directly. Treat a performance score < 50 or any **poor** Core Web Vital rating as a launch blocker. If the summary reports \`STATUS: UNVERIFIED\`, carry that forward as missing evidence and cite the exact reason from the native summary.
 LIGHTHOUSE
   fi
 
@@ -388,18 +739,14 @@ LIGHTHOUSE
 
 ## External Services Connectivity
 
-Identify all external service integrations configured in the repo (OAuth providers, SaaS APIs, cloud services, SMTP/email, Slack, payment processors, identity providers, etc.) by reading environment config files, connector registrations, and integration docs.
+The harness has already attempted native external-service connectivity probes using URL/credential material from \`docs/ux/.creds\`.
 
-For each integration found:
+Required evidence inputs:
 
-1. Check whether credentials are available in \`docs/ux/.creds\` or environment variables. If not, mark the service as UNVERIFIED and skip.
-2. If credentials exist, perform a minimal connectivity check — authenticate, call a low-impact read endpoint (e.g. `/me`, `/ping`, `/status`), or verify a webhook signature round-trip.
-3. Record: service name, endpoint tested, HTTP status, latency (ms), and pass/fail.
-4. Redact all credential values from outputs before writing.
+- Native summary: \`$RUN_DIR/artifacts/$job_id/external-services/summary.md\`
+- Per-service raw artifacts: \`$RUN_DIR/artifacts/$job_id/external-services/*.json\`
 
-Save raw HTTP logs to \`$RUN_DIR/artifacts/$job_id/external-services/\`.
-
-Include an external services table in your report: service, endpoint, status, latency, result. If no external integrations are configured, record EXTERNAL_SERVICES: none-configured.
+Read those artifacts directly. If the summary reports \`STATUS: UNVERIFIED\`, carry that forward as missing evidence and cite the exact reason from the native summary rather than retrying ad hoc probes.
 EXTERNAL
   fi
 
@@ -409,30 +756,13 @@ EXTERNAL
 
 ## Static Analysis and Dependency CVE Scanning
 
-Detect the primary languages in the repo and run all applicable tools below. Install missing tools via pip or npm as needed. Save all raw outputs to \`$RUN_DIR/artifacts/$job_id/sast/\`.
+The harness has already executed or attempted the following tools natively:
+- **Bandit** (Python SAST)
+- **Semgrep** (Multi-language SAST)
+- **pip-audit** (Python dependency CVEs)
+- **npm audit** (Node.js dependency CVEs)
 
-**Python SAST** (if \`*.py\` files exist — run from repo root):
-\`\`\`bash
-pip install bandit 2>/dev/null
-bandit -r . -f json -o "$RUN_DIR/artifacts/$job_id/sast/bandit.json" -ll 2>/dev/null || true
-\`\`\`
-
-**Multi-language SAST via Semgrep**:
-\`\`\`bash
-pip install semgrep 2>/dev/null
-semgrep --config=auto --json --output="$RUN_DIR/artifacts/$job_id/sast/semgrep.json" . 2>/dev/null || true
-\`\`\`
-
-**Python dependency CVEs** (if \`requirements*.txt\` or \`pyproject.toml\` exist):
-\`\`\`bash
-pip install pip-audit 2>/dev/null
-pip-audit --format=json --output="$RUN_DIR/artifacts/$job_id/sast/pip-audit.json" 2>/dev/null || true
-\`\`\`
-
-**Node.js dependency CVEs** (run in each directory containing \`package.json\`):
-\`\`\`bash
-npm audit --json > "$RUN_DIR/artifacts/$job_id/sast/npm-audit.json" 2>/dev/null || true
-\`\`\`
+Raw JSON outputs have been saved to \`$RUN_DIR/artifacts/$job_id/sast/\`. Read these files directly to analyze the findings.
 
 For each tool that produced output, report:
 - Totals by severity: critical, high, medium, low
@@ -529,7 +859,11 @@ _run_claude() {
   fi
   local mcp_cfg
   mcp_cfg="$(mktemp --suffix=.json)"
-  printf '{"mcpServers":{}}\n' > "$mcp_cfg"
+  if [[ -f "$REPO_ROOT/.gemini/settings.json" ]]; then
+    cp "$REPO_ROOT/.gemini/settings.json" "$mcp_cfg"
+  else
+    printf '{"mcpServers":{}}\n' > "$mcp_cfg"
+  fi
   cmd+=(--strict-mcp-config --mcp-config "$mcp_cfg")
   (
     cd "$REPO_ROOT"
@@ -586,7 +920,8 @@ run_with_spinner() {
   local job_id="$1" log_file="$2"
   shift 2
 
-  local stall_threshold=$(( ${AUDIT_STALL_INTERVALS:-5} * ${AUDIT_HEARTBEAT_SECONDS:-60} ))
+  local heartbeat_interval="${AUDIT_HEARTBEAT_SECONDS:-60}"
+  local stall_intervals="${AUDIT_STALL_INTERVALS:-5}"
   local start_ts
   start_ts="$(date +%s)"
 
@@ -594,47 +929,53 @@ run_with_spinner() {
   "$@" &
   local cmd_pid="$!"
 
-  (
-    local spin_chars='-\|/'
-    local spin_idx=0
-    local prev_size=-1
-    local last_change_ts="$start_ts"
-    while sleep 0.5; do
-      local now elapsed size
-      now="$(date +%s)"
-      elapsed=$((now - start_ts))
-      local spin_char="${spin_chars:$((spin_idx % 4)):1}"
-      spin_idx=$((spin_idx + 1))
-      printf '\r[%s] %s (%ds)  ' "$spin_char" "$job_id" "$elapsed"
-      if [[ -f "$log_file" ]]; then
-        size="$(wc -c <"$log_file" | tr -d ' ')"
-      else
-        size=0
-      fi
-      if [[ "$size" -ne "$prev_size" ]]; then
-        last_change_ts="$now"
-        prev_size="$size"
-      elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
-        local stall_secs=$((now - last_change_ts))
-        if [[ "$stall_secs" -ge "$stall_threshold" ]]; then
-          printf '\r[!] %s: stalled after %ds — terminating\033[K\n' "$job_id" "$elapsed" >&2
-          printf '[stall-kill] log stalled after %ds — terminating\n' "$elapsed" >>"$log_file"
-          kill "$cmd_pid" 2>/dev/null || true
-          break
+  if [[ "${_WAVE_DISPLAY:-0}" != "1" ]]; then
+    (
+      local spin_chars='-\|/'
+      local spin_idx=0
+      local prev_size=-1
+      local last_change_ts="$start_ts"
+      local stall_threshold=$(( stall_intervals * heartbeat_interval ))
+      while sleep 0.5; do
+        local now elapsed size
+        now="$(date +%s)"
+        elapsed=$((now - start_ts))
+        local spin_char="${spin_chars:$((spin_idx % 4)):1}"
+        spin_idx=$((spin_idx + 1))
+        printf '\r[%s] %s (%ds)  ' "$spin_char" "$job_id" "$elapsed"
+        if [[ -f "$log_file" ]]; then
+          size="$(wc -c <"$log_file" | tr -d ' ')"
+        else
+          size=0
         fi
-      fi
-    done
-  ) &
-  local heartbeat_pid="$!"
+        if [[ "$size" -ne "$prev_size" ]]; then
+          last_change_ts="$now"
+          prev_size="$size"
+        elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
+          local stall_secs=$((now - last_change_ts))
+          if [[ "$stall_secs" -ge "$stall_threshold" ]]; then
+            printf '\r[!] %s: stalled after %ds — terminating\033[K\n' "$job_id" "$elapsed" >&2
+            printf '[stall-kill] log stalled after %ds — terminating\n' "$elapsed" >>"$log_file"
+            kill "$cmd_pid" 2>/dev/null || true
+            break
+          fi
+        fi
+      done
+    ) &
+    local heartbeat_pid="$!"
+    wait "$cmd_pid"
+    local status="$?"
+    set -e
+    kill "$heartbeat_pid" >/dev/null 2>&1 || true
+    wait "$heartbeat_pid" >/dev/null 2>&1 || true
+    printf '\n'
+  else
+    wait "$cmd_pid"
+    local status="$?"
+    set -e
+  fi
 
-  wait "$cmd_pid"
-  local status="$?"
-  set -e
-
-  kill "$heartbeat_pid" >/dev/null 2>&1 || true
-  wait "$heartbeat_pid" >/dev/null 2>&1 || true
-  printf '\n'
-  if [[ "${VERBOSE:-0}" == "1" && -f "$log_file" ]]; then
+  if [[ "${VERBOSE:-0}" == "1" && "${_WAVE_DISPLAY:-0}" != "1" && -f "$log_file" ]]; then
     local final_size
     final_size="$(wc -c <"$log_file" | tr -d ' ')"
     printf '    log_bytes=%s log=%s\n' "$final_size" "$log_file"
@@ -642,13 +983,549 @@ run_with_spinner() {
   return "$status"
 }
 
+run_native_sast() {
+  local job_id="$1"
+  local sast_dir="$RUN_DIR/artifacts/$job_id/sast"
+  local log_file="$RUN_DIR/logs/$job_id.log"
+  mkdir -p "$sast_dir"
+
+  printf '\n[native-sast] running bandit, semgrep, pip-audit, npm audit\n' >> "$log_file"
+
+  local bandit_cmd="" semgrep_cmd="" pip_audit_cmd=""
+  if audit_ensure_python_tool "bandit" "bandit" "$log_file"; then
+    bandit_cmd="$(audit_resolve_python_tool "bandit")"
+  else
+    printf '[native-sast] bandit unavailable after install check; skipping\n' >> "$log_file"
+  fi
+  if audit_ensure_python_tool "semgrep" "semgrep" "$log_file"; then
+    semgrep_cmd="$(audit_resolve_python_tool "semgrep")"
+  else
+    printf '[native-sast] semgrep unavailable after install check; skipping\n' >> "$log_file"
+  fi
+  if audit_ensure_python_tool "pip-audit" "pip-audit" "$log_file"; then
+    pip_audit_cmd="$(audit_resolve_python_tool "pip-audit")"
+  else
+    printf '[native-sast] pip-audit unavailable after install check; skipping\n' >> "$log_file"
+  fi
+
+  # Python SAST
+  if [[ -n "$bandit_cmd" ]] && find . -name "*.py" | read; then
+    "$bandit_cmd" -r . -f json -o "$sast_dir/bandit.json" -ll 2>/dev/null || true
+  fi
+
+  # Multi-language SAST
+  if [[ -n "$semgrep_cmd" ]]; then
+    "$semgrep_cmd" --config=auto --json --output="$sast_dir/semgrep.json" . 2>/dev/null || true
+  fi
+
+  # Python dependency CVEs
+  if [[ -n "$pip_audit_cmd" ]] && [[ -f "requirements.txt" || -f "pyproject.toml" ]]; then
+    "$pip_audit_cmd" --format=json --output="$sast_dir/pip-audit.json" 2>/dev/null || true
+  fi
+
+  # Node.js dependency CVEs
+  if [[ -f "package.json" ]]; then
+    if command_exists npm; then
+      npm audit --json > "$sast_dir/npm-audit.json" 2>/dev/null || true
+    else
+      printf '[native-sast] npm unavailable; skipping npm audit\n' >> "$log_file"
+    fi
+  fi
+}
+
+write_unverified_summary() {
+  local summary_file="$1" title="$2" reason="$3"
+  mkdir -p "$(dirname "$summary_file")"
+  {
+    printf '# %s\n\n' "$title"
+    printf 'STATUS: UNVERIFIED\n\n'
+    printf '%s\n' "$reason"
+  } > "$summary_file"
+}
+
+run_native_accessibility() {
+  local job_id="$1"
+  local log_file="$RUN_DIR/logs/$job_id.log"
+  local out_dir="$RUN_DIR/artifacts/$job_id/accessibility"
+  local summary_md="$out_dir/summary.md"
+  local summary_json="$out_dir/summary.json"
+  mkdir -p "$out_dir"
+
+  local base_url
+  base_url="$(detect_base_url 2>/dev/null || true)"
+  if [[ -z "$base_url" ]]; then
+    write_unverified_summary "$summary_md" "Accessibility Summary" "Base URL unavailable. Set AUDIT_BASE_URL or provide docs/ux/.creds / product-profile runtime URL."
+    return 0
+  fi
+
+  if ! audit_ensure_node_packages "$log_file" "playwright" "@axe-core/playwright"; then
+    write_unverified_summary "$summary_md" "Accessibility Summary" "Playwright tooling unavailable after install check. See $log_file."
+    return 0
+  fi
+  if ! audit_ensure_node_bin "playwright" "$log_file" "playwright"; then
+    write_unverified_summary "$summary_md" "Accessibility Summary" "Playwright tooling unavailable after install check. See $log_file."
+    return 0
+  fi
+  if ! audit_ensure_playwright_chromium "$log_file"; then
+    write_unverified_summary "$summary_md" "Accessibility Summary" "Playwright Chromium unavailable after install check. See $log_file."
+    return 0
+  fi
+
+  local urls_file script_file
+  urls_file="$out_dir/urls.txt"
+  script_file="$out_dir/run-axe.cjs"
+  collect_target_urls "$base_url" "${ACCESSIBILITY_PATHS:-/,/login}" > "$urls_file"
+  if [[ ! -s "$urls_file" ]]; then
+    write_unverified_summary "$summary_md" "Accessibility Summary" "No accessibility target URLs were resolved."
+    return 0
+  fi
+
+  cat > "$script_file" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const { chromium } = require("playwright");
+const { AxeBuilder } = require("@axe-core/playwright");
+
+const urls = fs.readFileSync(process.env.AXE_URLS_FILE, "utf8").split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+const outDir = process.env.AXE_OUTPUT_DIR;
+const summaryJson = process.env.AXE_SUMMARY_JSON;
+const summaryMd = process.env.AXE_SUMMARY_MD;
+const timeoutMs = Number(process.env.AXE_TIMEOUT_MS || "30000");
+
+function slugify(input) {
+  return input.toLowerCase().replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "page";
+}
+
+function countsFor(violations) {
+  const counts = { critical: 0, serious: 0, moderate: 0, minor: 0 };
+  for (const violation of violations || []) {
+    const impact = violation.impact || "minor";
+    if (counts[impact] !== undefined) counts[impact] += 1;
+  }
+  return counts;
+}
+
+function wcagStatus(counts, error) {
+  if (error) return "unverified";
+  if ((counts.critical || 0) > 0 || (counts.serious || 0) > 0) return "fail";
+  if ((counts.moderate || 0) > 0 || (counts.minor || 0) > 0) return "partial";
+  return "pass";
+}
+
+(async () => {
+  const summary = [];
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({ ignoreHTTPSErrors: true });
+    for (const url of urls) {
+      const page = await context.newPage();
+      const slug = slugify(url);
+      try {
+        await page.goto(url, { waitUntil: "networkidle", timeout: timeoutMs });
+        const results = await new AxeBuilder({ page }).analyze();
+        const counts = countsFor(results.violations);
+        fs.writeFileSync(path.join(outDir, `${slug}.json`), JSON.stringify(results, null, 2));
+        summary.push({ url, slug, counts, status: wcagStatus(counts, null), error: null });
+      } catch (error) {
+        summary.push({
+          url,
+          slug,
+          counts: { critical: 0, serious: 0, moderate: 0, minor: 0 },
+          status: "unverified",
+          error: String(error && error.message ? error.message : error),
+        });
+      } finally {
+        await page.close().catch(() => {});
+      }
+    }
+    await context.close().catch(() => {});
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+
+  fs.writeFileSync(summaryJson, JSON.stringify(summary, null, 2));
+  let md = "# Accessibility Summary\n\n| URL | Critical | Serious | Moderate | Minor | Status | Error |\n| --- | --- | --- | --- | --- | --- | --- |\n";
+  for (const row of summary) {
+    md += `| ${row.url} | ${row.counts.critical} | ${row.counts.serious} | ${row.counts.moderate} | ${row.counts.minor} | ${row.status} | ${row.error || ""} |\n`;
+  }
+  fs.writeFileSync(summaryMd, md);
+})().catch((error) => {
+  fs.writeFileSync(summaryJson, JSON.stringify([{ status: "unverified", error: String(error && error.message ? error.message : error) }], null, 2));
+  fs.writeFileSync(summaryMd, `# Accessibility Summary\n\nSTATUS: UNVERIFIED\n\n${String(error && error.message ? error.message : error)}\n`);
+  process.exit(0);
+});
+NODE
+
+  AXE_URLS_FILE="$urls_file" \
+  AXE_OUTPUT_DIR="$out_dir" \
+  AXE_SUMMARY_JSON="$summary_json" \
+  AXE_SUMMARY_MD="$summary_md" \
+  AXE_TIMEOUT_MS="${AUDIT_BROWSER_TIMEOUT_MS:-30000}" \
+  NODE_PATH="$AUDIT_NODE_TOOLING_DIR/node_modules" \
+  PLAYWRIGHT_BROWSERS_PATH="$AUDIT_NODE_TOOLING_DIR/playwright-browsers" \
+  node "$script_file" >> "$log_file" 2>&1 || true
+}
+
+run_native_lighthouse() {
+  local job_id="$1"
+  local log_file="$RUN_DIR/logs/$job_id.log"
+  local out_dir="$RUN_DIR/artifacts/$job_id/lighthouse"
+  local summary_md="$out_dir/summary.md"
+  local summary_json="$out_dir/summary.json"
+  mkdir -p "$out_dir"
+
+  local base_url
+  base_url="$(detect_base_url 2>/dev/null || true)"
+  if [[ -z "$base_url" ]]; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Base URL unavailable. Set AUDIT_BASE_URL or provide docs/ux/.creds / product-profile runtime URL."
+    return 0
+  fi
+
+  if ! audit_ensure_node_packages "$log_file" "lighthouse" "playwright"; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Lighthouse tooling unavailable after install check. See $log_file."
+    return 0
+  fi
+  if ! audit_ensure_node_bin "lighthouse" "$log_file" "lighthouse" "playwright"; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Lighthouse tooling unavailable after install check. See $log_file."
+    return 0
+  fi
+  if ! audit_ensure_playwright_chromium "$log_file"; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Chromium unavailable for Lighthouse after install check. See $log_file."
+    return 0
+  fi
+
+  local urls_file
+  urls_file="$out_dir/urls.txt"
+  collect_target_urls "$base_url" "${LIGHTHOUSE_PATHS:-/,/login}" > "$urls_file"
+  if [[ ! -s "$urls_file" ]]; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "No Lighthouse target URLs were resolved."
+    return 0
+  fi
+
+  local chrome_path
+  chrome_path="$(
+    cd "$AUDIT_NODE_TOOLING_DIR" && \
+    PLAYWRIGHT_BROWSERS_PATH="$AUDIT_NODE_TOOLING_DIR/playwright-browsers" \
+    node -e 'console.log(require("playwright").chromium.executablePath())' 2>>"$log_file" || true
+  )"
+  if [[ -z "$chrome_path" ]]; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Could not resolve Chromium executable path for Lighthouse."
+    return 0
+  fi
+
+  local url slug
+  while IFS= read -r url; do
+    [[ -n "$url" ]] || continue
+    slug="$(slugify "$url")"
+    "$(audit_resolve_node_bin "lighthouse")" "$url" \
+      --output=json \
+      --output-path="$out_dir/$slug.json" \
+      --chrome-path="$chrome_path" \
+      --chrome-flags="--headless --no-sandbox" \
+      --only-categories=performance,accessibility,best-practices,seo \
+      --quiet >> "$log_file" 2>&1 || true
+  done < "$urls_file"
+
+  if ! find "$out_dir" -maxdepth 1 -type f -name '*.json' ! -name 'summary.json' | read; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Native Lighthouse did not produce any JSON reports. See $log_file."
+    return 0
+  fi
+
+  LIGHTHOUSE_DIR="$out_dir" LIGHTHOUSE_SUMMARY_JSON="$summary_json" LIGHTHOUSE_SUMMARY_MD="$summary_md" python3 - <<'PY'
+import json, os, pathlib
+
+out_dir = pathlib.Path(os.environ["LIGHTHOUSE_DIR"])
+summary_json = pathlib.Path(os.environ["LIGHTHOUSE_SUMMARY_JSON"])
+summary_md = pathlib.Path(os.environ["LIGHTHOUSE_SUMMARY_MD"])
+rows = []
+for path in sorted(out_dir.glob("*.json")):
+    if path.name == "summary.json":
+        continue
+    try:
+        data = json.loads(path.read_text())
+        audits = data.get("audits", {})
+        perf = data.get("categories", {}).get("performance", {}).get("score")
+        perf_score = int(round((perf or 0) * 100))
+        metrics = {
+            "lcp": audits.get("largest-contentful-paint", {}).get("numericValue"),
+            "cls": audits.get("cumulative-layout-shift", {}).get("numericValue"),
+            "inp": audits.get("interaction-to-next-paint", {}).get("numericValue"),
+            "ttfb": audits.get("server-response-time", {}).get("numericValue"),
+        }
+        poor = (
+            perf_score < 50
+            or (metrics["lcp"] or 0) > 4000
+            or (metrics["cls"] or 0) > 0.25
+            or (metrics["inp"] or 0) > 500
+        )
+        rows.append({
+            "page": path.stem,
+            "perf_score": perf_score,
+            "lcp_ms": metrics["lcp"],
+            "cls": metrics["cls"],
+            "inp_ms": metrics["inp"],
+            "ttfb_ms": metrics["ttfb"],
+            "status": "fail" if poor else "pass",
+            "error": None,
+        })
+    except Exception as exc:
+        rows.append({"page": path.stem, "status": "unverified", "error": str(exc)})
+
+summary_json.write_text(json.dumps(rows, indent=2))
+lines = [
+    "# Lighthouse Summary",
+    "",
+    "| Page | Perf | LCP ms | CLS | INP ms | TTFB ms | Status | Error |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
+]
+for row in rows:
+    lines.append(
+        f"| {row.get('page','')} | {row.get('perf_score','')} | {row.get('lcp_ms','')} | {row.get('cls','')} | {row.get('inp_ms','')} | {row.get('ttfb_ms','')} | {row.get('status','')} | {row.get('error','') or ''} |"
+    )
+summary_md.write_text("\n".join(lines) + "\n")
+PY
+}
+
+run_native_external_services() {
+  local job_id="$1"
+  local log_file="$RUN_DIR/logs/$job_id.log"
+  local out_dir="$RUN_DIR/artifacts/$job_id/external-services"
+  local summary_md="$out_dir/summary.md"
+  mkdir -p "$out_dir"
+
+  local creds
+  creds="$(audit_creds_file 2>/dev/null || true)"
+  if [[ -z "$creds" ]]; then
+    write_unverified_summary "$summary_md" "External Services Summary" "No docs/ux/.creds file found. Native external-service probes require URL/credential material."
+    return 0
+  fi
+  command_exists curl || {
+    write_unverified_summary "$summary_md" "External Services Summary" "curl is unavailable; external-service probes could not run."
+    return 0
+  }
+
+  {
+    printf '# External Services Summary\n\n'
+    printf '| Service | URL key | Status | Latency ms | Result |\n'
+    printf '| --- | --- | --- | --- | --- |\n'
+  } > "$summary_md"
+
+  local url_key url_value prefix token user password path probe_url body_file meta_file
+  local found=0
+  while IFS='=' read -r url_key url_value; do
+    [[ -n "${url_key:-}" ]] || continue
+    case "$url_key" in
+      APP_URL|BASE_URL|APPLICATION_URL|STAGING_URL|DEV_URL) continue ;;
+    esac
+    if [[ ! "$url_key" =~ (_URL|_BASE_URL|_API_URL)$ ]]; then
+      continue
+    fi
+    found=1
+    url_value="$(trim_inline_value "$url_value")"
+    [[ -n "$url_value" ]] || continue
+    prefix="${url_key%_URL}"
+    prefix="${prefix%_BASE_URL}"
+    prefix="${prefix%_API_URL}"
+    path="$(audit_cred_value "${prefix}_HEALTHCHECK_PATH" 2>/dev/null || audit_cred_value "${prefix}_PING_PATH" 2>/dev/null || audit_cred_value "${prefix}_STATUS_PATH" 2>/dev/null || true)"
+    path="$(trim_inline_value "$path")"
+    probe_url="$(join_url "$url_value" "${path:-/}")"
+    token="$(trim_inline_value "$(audit_cred_value "${prefix}_TOKEN" 2>/dev/null || audit_cred_value "${prefix}_API_KEY" 2>/dev/null || true)")"
+    user="$(trim_inline_value "$(audit_cred_value "${prefix}_USERNAME" 2>/dev/null || true)")"
+    password="$(trim_inline_value "$(audit_cred_value "${prefix}_PASSWORD" 2>/dev/null || true)")"
+    body_file="$out_dir/${prefix,,}.body.txt"
+    meta_file="$out_dir/${prefix,,}.json"
+
+    local curl_args=(curl -sS -L --max-time "${EXTERNAL_SERVICE_TIMEOUT:-10}" -o "$body_file" -w '%{http_code}\t%{time_total}')
+    if [[ -n "$token" ]]; then
+      curl_args+=(-H "Authorization: Bearer $token")
+    elif [[ -n "$user" && -n "$password" ]]; then
+      curl_args+=(-u "$user:$password")
+    fi
+
+    local probe_result http_status latency
+    probe_result="$("${curl_args[@]}" "$probe_url" 2>>"$log_file" || true)"
+    http_status="${probe_result%%$'\t'*}"
+    latency="${probe_result#*$'\t'}"
+    [[ "$http_status" == "$probe_result" ]] && latency=""
+    {
+      printf '{\n'
+      printf '  "service": "%s",\n' "${prefix,,}"
+      printf '  "url_key": "%s",\n' "$url_key"
+      printf '  "probe_url": "%s",\n' "$probe_url"
+      printf '  "http_status": "%s",\n' "$http_status"
+      printf '  "latency_seconds": "%s"\n' "$latency"
+      printf '}\n'
+    } > "$meta_file"
+
+    local result="unverified"
+    if [[ "$http_status" =~ ^2[0-9][0-9]$ || "$http_status" =~ ^3[0-9][0-9]$ ]]; then
+      result="pass"
+    elif [[ "$http_status" =~ ^[0-9][0-9][0-9]$ ]]; then
+      result="warn"
+    fi
+    printf '| %s | %s | %s | %s | %s |\n' "${prefix,,}" "$url_key" "${http_status:-none}" "${latency:-}" "$result" >> "$summary_md"
+  done < "$creds"
+  if [[ "$found" == "0" ]]; then
+    printf '\nSTATUS: EXTERNAL_SERVICES_NONE_CONFIGURED\n' >> "$summary_md"
+  fi
+}
+
+run_native_load_test() {
+  local log_file="$RUN_DIR/logs/load-test.log"
+  local out_dir="$RUN_DIR/artifacts/load-test"
+  local summary_md="$out_dir/native-load-test-summary.md"
+  local summary_json="$out_dir/native-load-test-summary.json"
+  mkdir -p "$out_dir"
+
+  local base_url
+  base_url="${LOAD_TEST_TARGET:-}"
+  if [[ -z "$base_url" ]]; then
+    base_url="$(detect_base_url 2>/dev/null || true)"
+  fi
+  if [[ -z "$base_url" ]]; then
+    write_unverified_summary "$summary_md" "Native Load Test Summary" "Base URL unavailable. Set AUDIT_BASE_URL or provide docs/ux/.creds / product-profile runtime URL."
+    return 0
+  fi
+
+  local urls_file
+  urls_file="$out_dir/urls.txt"
+  collect_target_urls "$base_url" "${LOAD_TEST_PATHS:-/}" > "$urls_file"
+  if [[ ! -s "$urls_file" ]]; then
+    write_unverified_summary "$summary_md" "Native Load Test Summary" "No load-test target URLs were resolved."
+    return 0
+  fi
+
+  LOAD_URLS_FILE="$urls_file" LOAD_SUMMARY_JSON="$summary_json" LOAD_SUMMARY_MD="$summary_md" python3 - <<'PY'
+import concurrent.futures
+import json
+import os
+import pathlib
+import time
+import urllib.request
+
+urls = [line.strip() for line in pathlib.Path(os.environ["LOAD_URLS_FILE"]).read_text().splitlines() if line.strip()]
+summary_json = pathlib.Path(os.environ["LOAD_SUMMARY_JSON"])
+summary_md = pathlib.Path(os.environ["LOAD_SUMMARY_MD"])
+
+scenarios = [
+    ("baseline", 10, 60),
+    ("ramp", 50, 180),
+    ("spike", 100, 30),
+]
+
+def hit(url):
+    start = time.time()
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            status = response.getcode()
+            response.read(256)
+    except Exception:
+        status = 0
+    elapsed = (time.time() - start) * 1000.0
+    return status, elapsed
+
+rows = []
+for name, workers, duration in scenarios:
+    samples = []
+    errors = 0
+    stop_at = time.time() + min(duration, 5)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, 32)) as pool:
+        futures = []
+        while time.time() < stop_at:
+          for url in urls:
+            futures.append(pool.submit(hit, url))
+          if len(futures) >= workers:
+            done, futures = futures[:workers], futures[workers:]
+            for future in done:
+              status, elapsed = future.result()
+              samples.append(elapsed)
+              if status < 200 or status >= 400:
+                errors += 1
+        for future in futures:
+            status, elapsed = future.result()
+            samples.append(elapsed)
+            if status < 200 or status >= 400:
+                errors += 1
+    samples.sort()
+    total = len(samples)
+    if total:
+        p50 = samples[int(total * 0.50) - 1 if int(total * 0.50) else 0]
+        p95 = samples[int(total * 0.95) - 1 if int(total * 0.95) else 0]
+        p99 = samples[int(total * 0.99) - 1 if int(total * 0.99) else 0]
+    else:
+        p50 = p95 = p99 = 0.0
+    error_rate = (errors / total) if total else 1.0
+    status = "fail" if (p95 > 2000 or p99 > 5000 or (name != "spike" and error_rate > 0.01) or (name == "spike" and error_rate > 0.05)) else "pass"
+    rows.append({
+        "scenario": name,
+        "virtual_users": workers,
+        "duration_seconds_requested": duration,
+        "duration_seconds_executed": min(duration, 5),
+        "samples": total,
+        "p50_ms": round(p50, 2),
+        "p95_ms": round(p95, 2),
+        "p99_ms": round(p99, 2),
+        "error_rate": round(error_rate, 4),
+        "status": status,
+    })
+
+summary_json.write_text(json.dumps(rows, indent=2))
+lines = [
+    "# Native Load Test Summary",
+    "",
+    "The built-in runner clamps execution time to 5 seconds per scenario in this harness pass so it can produce deterministic baseline evidence without monopolizing the audit process.",
+    "",
+    "| Scenario | VUs | Requested s | Executed s | Samples | p50 ms | p95 ms | p99 ms | Error rate | Status |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+]
+for row in rows:
+    lines.append(
+        f"| {row['scenario']} | {row['virtual_users']} | {row['duration_seconds_requested']} | {row['duration_seconds_executed']} | {row['samples']} | {row['p50_ms']} | {row['p95_ms']} | {row['p99_ms']} | {row['error_rate']} | {row['status']} |"
+    )
+summary_md.write_text("\n".join(lines) + "\n")
+PY
+}
+
+run_native_runtime_checks() {
+  local job_id="$1" kind="$2"
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  if [[ "$kind" == "runtime" && "${SAST_ENABLED:-1}" == "1" ]]; then
+    run_native_sast "$job_id"
+  fi
+  if [[ "$kind" =~ ^(runtime|simulation)$ && "${ACCESSIBILITY_SCAN:-1}" == "1" ]]; then
+    run_native_accessibility "$job_id"
+  fi
+  if [[ "$kind" =~ ^(runtime|simulation)$ && "${LIGHTHOUSE_SCAN:-1}" == "1" ]]; then
+    run_native_lighthouse "$job_id"
+  fi
+  if [[ "$kind" == "runtime" && "${EXTERNAL_SERVICES_TEST:-1}" == "1" ]]; then
+    run_native_external_services "$job_id"
+  fi
+}
+
+run_native_checks_and_prompt() {
+  local prompt_file="$1" job_id="$2" kind="$3"
+  run_native_runtime_checks "$job_id" "$kind"
+  run_prompt "$prompt_file" "$job_id" "$kind"
+}
+
 run_prompt() {
   local prompt_file="$1" job_id="$2" kind="$3"
   local log_file="$RUN_DIR/logs/$job_id.log"
+  local readonly_integrity=0 readonly_before_file="" readonly_before_hash="" readonly_before_size=0
 
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '[dry-run] %s -> %s\n' "$job_id" "$prompt_file"
     return 0
+  fi
+
+  if audit_readonly_kind "$kind" && git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null; then
+    readonly_integrity=1
+    readonly_before_file="$(mktemp)"
+    audit_readonly_diff_snapshot > "$readonly_before_file"
+    readonly_before_hash="$(sha256sum "$readonly_before_file" | awk '{print $1}')"
+    readonly_before_size="$(wc -c <"$readonly_before_file" | tr -d ' ')"
   fi
 
   local max_attempts=$((AUDIT_MAX_RETRIES + 1))
@@ -686,18 +1563,26 @@ run_prompt() {
     attempt=$((attempt + 1))
   done
 
-  # Discovery, synthesis, and deep-dive jobs are read-only audit phases — they must not
-  # modify source files. Detect any changes and revert them so an over-eager
-  # agent can't corrupt the repo or the audit baseline. Integrity check runs
-  # only after the final attempt so retries on a clean repo still get caught.
-  if [[ "$kind" =~ ^(discovery|synthesis|web|deep-dive)$ ]]; then
-    if git -C "$REPO_ROOT" rev-parse --git-dir &>/dev/null; then
-      if ! git -C "$REPO_ROOT" diff --exit-code --quiet 2>>"$log_file"; then
-        printf '\nAUDIT INTEGRITY VIOLATION: job %s modified source files; reverting\n' "$job_id" >>"$log_file"
-        git -C "$REPO_ROOT" checkout -- . >>"$log_file" 2>&1
-        return 1
+  # Read-only audit phases must not modify product files. Compare against the
+  # pre-run snapshot so existing user changes are preserved and only new writes
+  # introduced by this job are treated as violations.
+  if [[ "$readonly_integrity" == "1" ]]; then
+    local readonly_after_file readonly_after_hash
+    readonly_after_file="$(mktemp)"
+    audit_readonly_diff_snapshot > "$readonly_after_file"
+    readonly_after_hash="$(sha256sum "$readonly_after_file" | awk '{print $1}')"
+    if [[ "$readonly_after_hash" != "$readonly_before_hash" ]]; then
+      printf '\nAUDIT INTEGRITY VIOLATION: job %s modified product files outside RUN_DIR\n' "$job_id" >>"$log_file"
+      if [[ "$readonly_before_size" == "0" ]]; then
+        printf 'Restoring unexpected tracked/untracked changes because the repo was clean before this job.\n' >>"$log_file"
+        audit_restore_readonly_changes
+      else
+        printf 'Pre-existing product diff was present before %s; leaving files untouched to avoid destroying user changes.\n' "$job_id" >>"$log_file"
       fi
+      rm -f "$readonly_before_file" "$readonly_after_file"
+      return 1
     fi
+    rm -f "$readonly_before_file" "$readonly_after_file"
   fi
 
   return "$cmd_exit"
@@ -709,6 +1594,133 @@ declare -a group_names=()
 declare -a group_outputs=()
 active_count=0
 
+wait_for_group() {
+  local -n pids_ref=$1
+  local -n names_ref=$2
+  local -n outputs_ref=$3
+  local failed=0
+  local n=${#pids_ref[@]}
+  if [[ $n -eq 0 ]]; then
+    return 0
+  fi
+
+  local heartbeat_interval="${AUDIT_HEARTBEAT_SECONDS:-60}"
+  local stall_intervals="${AUDIT_STALL_INTERVALS:-5}"
+  local stall_threshold=$(( stall_intervals * heartbeat_interval ))
+  local now
+  now="$(date +%s)"
+
+  local -a job_start=() job_log=() job_prev_size=() job_last_change=()
+  local idx
+  for idx in "${!names_ref[@]}"; do
+    job_start+=("$now")
+    job_log+=("$RUN_DIR/logs/${names_ref[$idx]}.log")
+    job_prev_size+=(-1)
+    job_last_change+=("$now")
+  done
+
+  local spin_chars='-\|/'
+  local spin_idx=0
+  local -a remaining=("${!pids_ref[@]}")
+
+  while [[ ${#remaining[@]} -gt 0 ]]; do
+    sleep 0.5
+    local now2 spin_char
+    now2="$(date +%s)"
+    spin_char="${spin_chars:$((spin_idx % 4)):1}"
+    spin_idx=$(( (spin_idx + 1) % 4 ))
+
+    local -a still_running=()
+    for idx in "${remaining[@]}"; do
+      if ! kill -0 "${pids_ref[$idx]}" 2>/dev/null; then
+        wait "${pids_ref[$idx]}"
+        local status=$?
+        local term_width
+        term_width=$(tput cols 2>/dev/null || echo 120)
+        printf '\r%-*s\r' $(( term_width - 1 )) ''
+
+        local job_name="${names_ref[$idx]}"
+        local job_log_file="${job_log[$idx]}"
+        local job_passed=0
+        if [[ "$status" == "0" ]]; then
+          job_passed=1
+          if [[ "$DRY_RUN" != "1" && -n "${outputs_ref[$idx]}" ]]; then
+            local expected_path="$RUN_DIR/${outputs_ref[$idx]%%#*}"
+            if [[ ! -f "$expected_path" ]]; then
+              printf '[missing-output] %s: expected %s\n' "$job_name" "$expected_path" >&2
+              failed=1
+              job_passed=0
+            fi
+          fi
+          if ((job_passed)); then
+            printf '[ok] %s\n' "$job_name"
+            if [[ "$DRY_RUN" != "1" ]]; then
+              printf '%s\n' "$job_name" >> "$CHECKPOINT_FILE"
+            fi
+          fi
+        else
+          printf '[fail] %s (see %s/logs/%s.log)\n' "$job_name" "$RUN_DIR" "$job_name" >&2
+          failed=1
+        fi
+
+        if [[ "${VERBOSE:-0}" == "1" && -f "$job_log_file" ]]; then
+          local final_size
+          final_size="$(wc -c <"$job_log_file" | tr -d ' ')"
+          printf '    log_bytes=%s log=%s\n' "$final_size" "$job_log_file"
+        fi
+      else
+        still_running+=("$idx")
+        local size=0
+        if [[ -f "${job_log[$idx]}" ]]; then
+          size="$(wc -c <"${job_log[$idx]}" | tr -d ' ')"
+        fi
+        if [[ "$size" -ne "${job_prev_size[$idx]}" ]]; then
+          job_last_change[$idx]="$now2"
+          job_prev_size[$idx]="$size"
+        elif [[ "$stall_threshold" -gt 0 && "${job_prev_size[$idx]}" -ge 0 ]]; then
+          local stall_secs=$(( now2 - job_last_change[$idx] ))
+          if [[ "$stall_secs" -ge "$stall_threshold" ]]; then
+            local elapsed=$(( now2 - job_start[$idx] ))
+            local term_width
+            term_width=$(tput cols 2>/dev/null || echo 120)
+            printf '\r%-*s\r' $(( term_width - 1 )) ''
+            printf '[!] %s: stalled after %ds — terminating\n' "${names_ref[$idx]}" "$elapsed" >&2
+            printf '[stall-kill] stalled after %ds — terminating\n' "$elapsed" >> "${job_log[$idx]}"
+            kill "${pids_ref[$idx]}" 2>/dev/null || true
+          fi
+        fi
+      fi
+    done
+    remaining=("${still_running[@]}")
+
+    if [[ ${#remaining[@]} -gt 0 ]]; then
+      local parts=()
+      local part_idx
+      for part_idx in "${remaining[@]}"; do
+        local elapsed=$(( now2 - job_start[$part_idx] ))
+        parts+=("${names_ref[$part_idx]} (${elapsed}s)")
+      done
+      local line="${parts[0]}"
+      local part
+      for part in "${parts[@]:1}"; do
+        line+=" | $part"
+      done
+      local term_width
+      term_width=$(tput cols 2>/dev/null || echo 120)
+      local content="[$spin_char] $line"
+      local padded
+      printf -v padded '%-*s' $(( term_width - 1 )) "$content"
+      padded="${padded:0:$(( term_width - 1 ))}"
+      printf '\r%s' "$padded"
+    fi
+  done
+
+  local term_width
+  term_width=$(tput cols 2>/dev/null || echo 120)
+  printf '\r%-*s\r' $(( term_width - 1 )) ''
+  return "$failed"
+}
+
 flush_group() {
   if ((${#group_pids[@]} == 0)); then
     return 0
@@ -716,36 +1728,9 @@ flush_group() {
   printf 'Waiting for group %s (%d job(s))...\n' "$current_group" "${#group_pids[@]}"
   local flush_failed=0
 
-  for idx in "${!group_pids[@]}"; do
-    local pid="${group_pids[$idx]}"
-    local name="${group_names[$idx]}"
-    local job_passed=1
-
-    if wait "$pid"; then
-      printf '[ok] %s\n' "$name"
-    else
-      printf '[fail] %s (see %s/logs/%s.log)\n' "$name" "$RUN_DIR" "$name" >&2
-      flush_failed=1
-      job_passed=0
-    fi
-
-    # Verify each job actually wrote its required output file. An exit-0 job
-    # that never wrote the report is a silent failure — catch it here.
-    if [[ "$DRY_RUN" != "1" && -n "${group_outputs[$idx]}" ]]; then
-      local expected_path="$RUN_DIR/${group_outputs[$idx]%%#*}"
-      if [[ ! -f "$expected_path" ]]; then
-        printf '[missing-output] %s: expected %s\n' "$name" "$expected_path" >&2
-        flush_failed=1
-        job_passed=0
-      fi
-    fi
-
-    # Write to checkpoint only when both exit code and output check passed.
-    # Future runs skip this job during --resume or accidental re-runs.
-    if ((job_passed)) && [[ "$DRY_RUN" != "1" ]]; then
-      printf '%s\n' "$name" >> "$CHECKPOINT_FILE"
-    fi
-  done
+  if ! wait_for_group group_pids group_names group_outputs; then
+    flush_failed=1
+  fi
 
   if ((flush_failed)) && [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
     exit 1
@@ -892,7 +1877,7 @@ drain_pending_jobs() {
     printf '%s\n' "$dj_id" >> "$queued_file"
     _DRAIN_STARTED=$(( _DRAIN_STARTED + 1 ))
 
-    run_prompt "$prompt_file" "$dj_id" "deep-dive" &
+    _WAVE_DISPLAY=1 run_prompt "$prompt_file" "$dj_id" "deep-dive" &
     group_pids+=("$!")
     group_names+=("$dj_id")
     group_outputs+=("01-domain/$dj_id.md")
@@ -951,25 +1936,17 @@ Ground your test scenarios in findings from prior jobs:
 
 ## Load Test Scope
 
-**Tool preference**: ${tool}. Use whichever of k6, wrk, artillery, or locust is already installed, or install the preferred tool if it is not present.
+**Tool preference**: ${tool}. The harness has already attempted the native load-test runner before this analysis job.
 
 **Target base URL**: ${target:-"(auto-detect from docs/ux/.creds or deployment docs — read APP_URL, BASE_URL, or equivalent)"}
 
-### Test Scenarios
+### Native Evidence Inputs
 
-Run three scenarios against the target:
+The harness has already attempted the native load-test runner and written:
 
-1. **Baseline** — 10 virtual users, 60 seconds steady state. Establishes per-request latency baseline.
-2. **Ramp** — ramp from 1 to 50 VUs over 2 minutes, hold 1 minute, ramp down. Identifies the throughput ceiling and where latency degrades.
-3. **Spike** — jump to 100 VUs for 30 seconds. Tests resilience under sudden traffic bursts.
-
-For each scenario, target the following critical endpoints identified from prior discovery:
-- Auth/login endpoint
-- Primary read API endpoint (tenant dashboard, list endpoint, or equivalent)
-- Primary write/mutation endpoint
-- Any endpoint flagged as a latency risk in prior discovery findings
-
-Read docs/ux/.creds for auth credentials. Redact all credential values from outputs.
+- Summary markdown: \`$RUN_DIR/artifacts/load-test/native-load-test-summary.md\`
+- Summary JSON: \`$RUN_DIR/artifacts/load-test/native-load-test-summary.json\`
+- Target URL list: \`$RUN_DIR/artifacts/load-test/urls.txt\`
 
 ### Thresholds
 
@@ -983,8 +1960,6 @@ If the product profile specifies SLO targets, use those instead.
 
 ### Outputs
 
-Save raw tool output and any generated script to \`$RUN_DIR/artifacts/load-test/\`.
-
 Write \`$RUN_DIR/$output\` with:
 - Summary table: scenario, VUs, duration, p50, p95, p99 latency, throughput (req/s), error rate, result
 - Bottleneck analysis: which endpoint degraded first and at what VU count
@@ -993,7 +1968,7 @@ Write \`$RUN_DIR/$output\` with:
 
 ## Job Instructions
 
-Do not modify source files. Run only read or simulated-traffic operations.
+Do not modify source files. Analyze the native load-test artifacts first. If the native summary is \`STATUS: UNVERIFIED\`, record that exact limitation and only propose a rerun gate instead of fabricating load evidence.
 
 End with a concise final response:
 
@@ -1021,8 +1996,12 @@ run_load_test_job() {
   prompt_file="$(build_load_test_prompt)"
   printf '[start] group=load job=load-test kind=load tool=%s\n' "${LOAD_TEST_TOOL:-k6}"
 
+  if [[ "$DRY_RUN" != "1" ]]; then
+    run_native_load_test
+  fi
+
   current_group="load"
-  run_prompt "$prompt_file" "load-test" "load" &
+  _WAVE_DISPLAY=1 run_prompt "$prompt_file" "load-test" "load" &
   group_pids+=("$!")
   group_names+=("load-test")
   group_outputs+=("artifacts/load-test/load-test-report.md")
@@ -1148,7 +2127,7 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
     prompt_file="$(build_prompt "$group" "$job_id" "$kind" "$title" "$output" "$ref")"
     printf '[start] group=%s job=%s kind=%s title=%s\n' "$group" "$job_id" "$kind" "$title"
 
-    run_prompt "$prompt_file" "$job_id" "$kind" &
+    _WAVE_DISPLAY=1 run_native_checks_and_prompt "$prompt_file" "$job_id" "$kind" &
     group_pids+=("$!")
     group_names+=("$job_id")
     group_outputs+=("$output")
