@@ -3208,17 +3208,32 @@ implementation_summary_is_terminal() {
   grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]]|$)' "$summary" 2>/dev/null
 }
 
+log_final_response() {
+  local log_file="$1"
+  awk '
+    /^assistant$/ || /^codex$/ || /^claude$/ || /^gemini$/ { marker = NR }
+    { lines[NR] = $0 }
+    END {
+      start = marker ? marker + 1 : NR + 1
+      for (i = start; i <= NR; i += 1) print lines[i]
+    }
+  ' "$log_file" 2>/dev/null
+}
+
 recover_implementation_summary_from_log() {
   local unit_id="$1" log_file="$2"
   local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-  local recovered_result=""
+  local recovered_result="" final_response=""
   [[ ! -s "$summary" ]] || return 0
   [[ -s "$log_file" ]] || return 1
-  if grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]]|$)' "$log_file"; then
+  final_response="$(log_final_response "$log_file")"
+  if printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:],.;]|$)'; then
     recovered_result="fixed"
-  elif grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?blocked`?([[:space:]]|$)' "$log_file"; then
+  elif printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?blocked`?([[:space:],.;]|$)'; then
     recovered_result="blocked"
-  elif grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?partial`?([[:space:]]|$)' "$log_file"; then
+  elif printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?partial`?([[:space:],.;]|$)'; then
+    recovered_result="partial"
+  elif printf '%s\n' "$final_response" | grep -aqiE '(honest status is|unit is still|remains)[^[:cntrl:]]*`?partial`?'; then
     recovered_result="partial"
   else
     case "$(final_result_value "$log_file")" in
@@ -3232,17 +3247,10 @@ recover_implementation_summary_from_log() {
   mkdir -p "$REMEDIATION_DIR/artifacts"
   {
     printf '# %s Implementation Summary\n\n' "$unit_id"
-    if ! grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:' "$log_file"; then
+    if ! printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:'; then
       printf 'IMPLEMENTATION_RESULT: %s\n\n' "$recovered_result"
     fi
-    awk '
-      /^assistant$/ || /^codex$/ || /^claude$/ || /^gemini$/ { marker = NR }
-      { lines[NR] = $0 }
-      END {
-        start = marker ? marker + 1 : 1
-        for (i = start; i <= NR; i += 1) print lines[i]
-      }
-    ' "$log_file"
+    printf '%s\n' "$final_response"
     printf '\n\nRecovered from `%s` because the implementer wrote terminal summary content to the log but did not create the required artifact.\n' "$log_file"
   } > "$summary"
   printf '[auto-recover] implement-%s: recovered missing implementation summary from log\n' "$unit_id" >>"$log_file"
