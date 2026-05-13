@@ -847,6 +847,7 @@ command_is_global_native_check() {
     "cd frontend && npm run lint"|\
     "cd frontend && npm run format:check"|\
     "cd frontend && npm run test"|\
+    "cd frontend && npm run test:e2e"|\
     "cd frontend && npm run typecheck")
       return 0
       ;;
@@ -3196,13 +3197,30 @@ implementation_summary_is_fixed() {
 recover_implementation_summary_from_log() {
   local unit_id="$1" log_file="$2"
   local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  local recovered_result=""
   [[ ! -s "$summary" ]] || return 0
   [[ -s "$log_file" ]] || return 1
-  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]]|$)' "$log_file" || return 1
+  if grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]]|$)' "$log_file"; then
+    recovered_result="fixed"
+  elif grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?blocked`?([[:space:]]|$)' "$log_file"; then
+    recovered_result="blocked"
+  elif grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?partial`?([[:space:]]|$)' "$log_file"; then
+    recovered_result="partial"
+  else
+    case "$(final_result_value "$log_file")" in
+      PASS) recovered_result="fixed" ;;
+      INCOMPLETE|FAIL) recovered_result="partial" ;;
+      BLOCKED) recovered_result="blocked" ;;
+      *) return 1 ;;
+    esac
+  fi
 
   mkdir -p "$REMEDIATION_DIR/artifacts"
   {
     printf '# %s Implementation Summary\n\n' "$unit_id"
+    if ! grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:' "$log_file"; then
+      printf 'IMPLEMENTATION_RESULT: %s\n\n' "$recovered_result"
+    fi
     awk '
       /^assistant$/ || /^codex$/ || /^claude$/ || /^gemini$/ { marker = NR }
       { lines[NR] = $0 }
