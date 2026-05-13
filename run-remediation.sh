@@ -772,7 +772,7 @@ command_is_forbidden() {
   local candidate="$1"
   local forbidden
   case "$candidate" in
-    *"<"*">"*|*"\`"*|*"focused test file"*|*"focused test"*|*"placeholder"*)
+    *"<"*">"*|*"\`"*|*"focused test file"*|*"focused test"*|*"placeholder"*|*" when "*|*" if "*)
       return 0
       ;;
   esac
@@ -3202,6 +3202,12 @@ implementation_summary_is_fixed() {
   grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]]|$)' "$summary" 2>/dev/null
 }
 
+implementation_summary_is_terminal() {
+  local summary="$1"
+  [[ -s "$summary" ]] || return 1
+  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]]|$)' "$summary" 2>/dev/null
+}
+
 recover_implementation_summary_from_log() {
   local unit_id="$1" log_file="$2"
   local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
@@ -3695,14 +3701,14 @@ run_prompt() {
   fi
 
   # Auto-recover: if the agent exited non-zero but the summary artifact records
-  # IMPLEMENTATION_RESULT: fixed, the work completed — checkpoint it anyway.
+  # a terminal implementation result, the work completed — checkpoint it anyway.
   # This handles rate-limit disconnects and stall-kills where the agent finished
   # writing output before the connection was lost.
   if [[ "$status" != "0" ]] && [[ "$class" =~ ^(high-risk|standard)$ ]]; then
     local unit_id="${workstream#implement-}"
     local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-    if implementation_summary_is_fixed "$summary"; then
-      printf '\n[auto-recover] %s: non-zero exit but IMPLEMENTATION_RESULT: fixed summary exists — treating as success\n' \
+    if implementation_summary_is_terminal "$summary"; then
+      printf '\n[auto-recover] %s: non-zero exit but terminal IMPLEMENTATION_RESULT summary exists — treating as success\n' \
         "$workstream" >>"$log_file"
       status=0
     fi
@@ -3744,7 +3750,7 @@ wave_job_completed_successfully() {
     implement-*)
       local unit_id="${name#implement-}"
       local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
-      implementation_summary_is_fixed "$summary"
+      implementation_summary_is_terminal "$summary"
       ;;
     verify-*)
       local unit_id="${name#verify-}"
