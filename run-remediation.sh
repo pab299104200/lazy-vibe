@@ -758,6 +758,11 @@ normalize_profile_commands() {
 command_is_forbidden() {
   local candidate="$1"
   local forbidden
+  case "$candidate" in
+    *"<"*">"*|*"focused test file"*|*"focused test"*|*"placeholder"*)
+      return 0
+      ;;
+  esac
   while IFS= read -r forbidden; do
     forbidden="$(trim_inline_value "$forbidden")"
     [[ -n "$forbidden" ]] || continue
@@ -2534,7 +2539,8 @@ DESIGN
   if [[ "$REVISE_EXISTING" == "1" ]]; then
     local findings_tsv
     findings_tsv="$(verifier_findings_tsv_for_unit "$unit_id")"
-    revision_context=$(cat <<REVISION
+    if [[ -s "$findings_tsv" || -s "$REMEDIATION_DIR/artifacts/verify-$unit_id.md" ]]; then
+      revision_context=$(cat <<REVISION
 
 ## Revision Context
 
@@ -2554,6 +2560,20 @@ If the verifier finding type is \`contract_conflict\`, \`test_harness\`, or \`bl
 In implementation scope, do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Record those as launch evidence pending or sandbox-blocked, but do not leave fixable code/docs/tests unresolved.
 REVISION
 )
+    else
+      revision_context=$(cat <<REVISION
+
+## Resume Context
+
+This is a resume of an existing remediation run, but no verifier artifact or verifier findings TSV exists for this unit yet:
+
+- Previous verifier artifact: \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\`
+- Previous verifier findings TSV: \`$findings_tsv\`
+
+Treat this as the first implementation attempt for the assigned packets. Use the implementation design above as the primary brief when present. Do not block solely because verifier artifacts are absent; those artifacts are produced after implementation.
+REVISION
+)
+    fi
   fi
 
   cat > "$prompt" <<PROMPT
