@@ -858,6 +858,15 @@ native_global_checks_enabled() {
   [[ "${REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS:-0}" == "1" ]]
 }
 
+command_is_path_reference() {
+  local command="$1" worktree="$2"
+  [[ "$command" == */* ]] || return 1
+  [[ "$command" != *[[:space:]]* ]] || return 1
+  [[ "$command" != ./* ]] || return 1
+  [[ "$command" != /* ]] || return 1
+  [[ -e "$worktree/$command" ]]
+}
+
 collect_verification_cmds() {
   local unit_id="$1" group="$2" worktree="$3"
   local -a commands=()
@@ -880,6 +889,7 @@ collect_verification_cmds() {
       raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
+      command_is_path_reference "$raw" "$worktree" && continue
       if command_is_global_native_check "$raw" && ! native_global_checks_enabled; then
         continue
       fi
@@ -892,6 +902,7 @@ collect_verification_cmds() {
       raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
+      command_is_path_reference "$raw" "$worktree" && continue
       append_unique_line "$raw" commands
     done < <(fallback_verification_cmds "$worktree")
   fi
