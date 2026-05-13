@@ -38,6 +38,7 @@ PLAN_MODEL_CLASSES="${PLAN_MODEL_CLASSES:-high-risk complex}"
 VERIFY_SCOPE="${REMEDIATION_VERIFY_SCOPE:-implementation}"
 AUTO_SPLIT_CHILD_UNITS=""
 SPLIT_CANDIDATE_UNITS=""
+SPLIT_CANDIDATE_COUNT=0
 SPLIT_SKIP_EXECUTION=0
 RECOORDINATE=0
 NO_NORMALIZE=0
@@ -2418,6 +2419,7 @@ split_incomplete_units() {
   detect_split_candidates
   local candidate_count
   candidate_count="$(tail -n +2 "$SPLIT_CANDIDATES_TSV" | wc -l | tr -d ' ')"
+  SPLIT_CANDIDATE_COUNT="$candidate_count"
   SPLIT_CANDIDATE_UNITS="$(tail -n +2 "$SPLIT_CANDIDATES_TSV" | cut -f1 | paste -sd, -)"
   printf '[split-detect] candidates=%s file=%s\n' "$candidate_count" "$SPLIT_CANDIDATES_TSV"
   if [[ "$candidate_count" == "0" ]]; then
@@ -4094,39 +4096,43 @@ fi
 
 if [[ "$SHOULD_RUN_SPLIT_PREFLIGHT" == "1" ]]; then
   split_incomplete_units
-  PENDING_SPLIT_CHILD_UNITS="$(pending_split_child_units)"
-  PENDING_IMPLEMENTATION_UNITS="$(pending_implementation_units)"
-  DIRECT_SPLIT_CANDIDATE_UNITS="$(direct_split_candidate_units)"
-  SPLIT_RUN_UNITS="$(combine_unit_lists "$PENDING_IMPLEMENTATION_UNITS" "$AUTO_SPLIT_CHILD_UNITS" "$PENDING_SPLIT_CHILD_UNITS" "$DIRECT_SPLIT_CANDIDATE_UNITS")"
-  if [[ -n "$SPLIT_RUN_UNITS" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
-    if [[ -n "$PENDING_IMPLEMENTATION_UNITS" ]]; then
-      printf '[split-auto-run] scheduling pending implementation units: %s\n' "$PENDING_IMPLEMENTATION_UNITS"
-    fi
-    if [[ -n "$PENDING_SPLIT_CHILD_UNITS" || -n "$AUTO_SPLIT_CHILD_UNITS" ]]; then
-      printf '[split-auto-run] scheduling split child units: %s\n' "$(combine_unit_lists "$AUTO_SPLIT_CHILD_UNITS" "$PENDING_SPLIT_CHILD_UNITS")"
-    fi
-    if [[ -n "$DIRECT_SPLIT_CANDIDATE_UNITS" ]]; then
-      printf '[split-auto-run] scheduling direct candidate units: %s\n' "$DIRECT_SPLIT_CANDIDATE_UNITS"
-    fi
-    ONLY_UNIT="$SPLIT_RUN_UNITS"
-    printf '[split-auto-run] selected units: %s\n' "$ONLY_UNIT"
-    if [[ -n "$PENDING_SPLIT_CHILD_UNITS" || -n "$AUTO_SPLIT_CHILD_UNITS" ]]; then
+  if [[ "$SPLIT_CANDIDATE_COUNT" == "0" && "$SPLIT_INCOMPLETE" != "1" ]]; then
+    printf '[split-auto-run] no split candidates; continuing with normal execution schedule\n'
+  else
+    PENDING_SPLIT_CHILD_UNITS="$(pending_split_child_units)"
+    PENDING_IMPLEMENTATION_UNITS="$(pending_implementation_units)"
+    DIRECT_SPLIT_CANDIDATE_UNITS="$(direct_split_candidate_units)"
+    SPLIT_RUN_UNITS="$(combine_unit_lists "$PENDING_IMPLEMENTATION_UNITS" "$AUTO_SPLIT_CHILD_UNITS" "$PENDING_SPLIT_CHILD_UNITS" "$DIRECT_SPLIT_CANDIDATE_UNITS")"
+    if [[ -n "$SPLIT_RUN_UNITS" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+      if [[ -n "$PENDING_IMPLEMENTATION_UNITS" ]]; then
+        printf '[split-auto-run] scheduling pending implementation units: %s\n' "$PENDING_IMPLEMENTATION_UNITS"
+      fi
+      if [[ -n "$PENDING_SPLIT_CHILD_UNITS" || -n "$AUTO_SPLIT_CHILD_UNITS" ]]; then
+        printf '[split-auto-run] scheduling split child units: %s\n' "$(combine_unit_lists "$AUTO_SPLIT_CHILD_UNITS" "$PENDING_SPLIT_CHILD_UNITS")"
+      fi
+      if [[ -n "$DIRECT_SPLIT_CANDIDATE_UNITS" ]]; then
+        printf '[split-auto-run] scheduling direct candidate units: %s\n' "$DIRECT_SPLIT_CANDIDATE_UNITS"
+      fi
+      ONLY_UNIT="$SPLIT_RUN_UNITS"
+      printf '[split-auto-run] selected units: %s\n' "$ONLY_UNIT"
+      if [[ -n "$PENDING_SPLIT_CHILD_UNITS" || -n "$AUTO_SPLIT_CHILD_UNITS" ]]; then
+        MAX_PARALLEL="${SPLIT_CHILD_MAX_PARALLEL:-1}"
+      fi
+      printf '[split-auto-run] max parallel=%s\n' "$MAX_PARALLEL"
+    elif [[ -n "$AUTO_SPLIT_CHILD_UNITS" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+      printf '[split-auto-run] replacing selected parent units with child units: %s\n' "$AUTO_SPLIT_CHILD_UNITS"
+      ONLY_UNIT="$AUTO_SPLIT_CHILD_UNITS"
       MAX_PARALLEL="${SPLIT_CHILD_MAX_PARALLEL:-1}"
+      printf '[split-auto-run] child max parallel=%s\n' "$MAX_PARALLEL"
+    elif [[ -n "$SPLIT_CANDIDATE_UNITS" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+      printf '[split-auto-run] split candidates detected, but no pending direct or child units remain; skipping fixed candidates\n'
+      SPLIT_SKIP_EXECUTION=1
+    elif [[ "$SPLIT_INCOMPLETE" == "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+      printf '[split-auto-run] no split candidates or child units; skipping execution\n'
+      SPLIT_SKIP_EXECUTION=1
+    elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ]]; then
+      printf '[split-auto-run] no split candidates or child units; continuing with normal execution schedule\n'
     fi
-    printf '[split-auto-run] max parallel=%s\n' "$MAX_PARALLEL"
-  elif [[ -n "$AUTO_SPLIT_CHILD_UNITS" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
-    printf '[split-auto-run] replacing selected parent units with child units: %s\n' "$AUTO_SPLIT_CHILD_UNITS"
-    ONLY_UNIT="$AUTO_SPLIT_CHILD_UNITS"
-    MAX_PARALLEL="${SPLIT_CHILD_MAX_PARALLEL:-1}"
-    printf '[split-auto-run] child max parallel=%s\n' "$MAX_PARALLEL"
-  elif [[ -n "$SPLIT_CANDIDATE_UNITS" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
-    printf '[split-auto-run] split candidates detected, but no pending direct or child units remain; skipping fixed candidates\n'
-    SPLIT_SKIP_EXECUTION=1
-  elif [[ "$SPLIT_INCOMPLETE" == "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
-    printf '[split-auto-run] no split candidates or child units; skipping execution\n'
-    SPLIT_SKIP_EXECUTION=1
-  elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ]]; then
-    printf '[split-auto-run] no split candidates or child units; continuing with normal execution schedule\n'
   fi
   rebuild_workstream_coordinator_prompts
   rebuild_unit_prompts
