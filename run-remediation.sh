@@ -867,6 +867,10 @@ command_is_path_reference() {
   [[ "$command" != *[[:space:]]* ]] || return 1
   [[ "$command" != ./* ]] || return 1
   [[ "$command" != /* ]] || return 1
+  if [[ "$command" == *"*"* || "$command" == *"?"* || "$command" == *"["* ]]; then
+    compgen -G "$worktree/$command" >/dev/null
+    return $?
+  fi
   [[ -e "$worktree/$command" ]]
 }
 
