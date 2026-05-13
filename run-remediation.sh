@@ -459,6 +459,11 @@ pending_split_child_units() {
   while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
     [[ -z "${unit_id:-}" ]] && continue
     [[ "$unit_id" == *-S[0-9][0-9] ]] || continue
+    local parent_unit="$unit_id"
+    parent_unit="${parent_unit%-S[0-9][0-9]}"
+    if ! unit_selected "$unit_id" && ! unit_selected "$parent_unit"; then
+      continue
+    fi
 
     local packet_id packet pending=0
     local IFS=,
@@ -489,6 +494,9 @@ pending_implementation_units() {
       continue
     fi
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
+      continue
+    fi
+    if verifier_accepts_unit "$unit_id"; then
       continue
     fi
 
@@ -575,6 +583,70 @@ direct_split_candidate_units() {
     local IFS=,
     printf '%s' "${units[*]}"
   fi
+}
+
+unit_has_split_children() {
+  local unit_id="$1"
+  [[ -s "$UNITS_TSV" ]] || return 1
+  awk -F '\t' -v prefix="$unit_id-S" '
+    FNR > 1 && index($1, prefix) == 1 {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$UNITS_TSV"
+}
+
+split_plan_marks_no_split() {
+  local unit_id="$1"
+  [[ -s "$SPLIT_PLAN_MD" ]] || return 1
+  local unit_ref
+  unit_ref="$(printf '`%s`' "$unit_id")"
+  awk -v unit="$unit_ref" '
+    index($0, unit) && tolower($0) ~ /(do not split|left unchanged|launch evidence|launch-evidence)/ {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$SPLIT_PLAN_MD"
+}
+
+verifier_has_only_launch_evidence_findings() {
+  local unit_id="$1"
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  verifier_accepts_unit "$unit_id" || return 1
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' '
+    NR > 1 && $1 != "" {
+      count += 1
+      if ($3 != "launch_evidence" && $3 != "sandbox_blocked") {
+        blocked = 1
+      }
+    }
+    END { exit count > 0 && blocked != 1 ? 0 : 1 }
+  ' "$findings"
+}
+
+unit_packets_have_terminal_status() {
+  local packets_csv="$1"
+  local packet_id packet
+  local IFS=,
+  local checked=0
+  for packet_id in $packets_csv; do
+    [[ -n "${packet_id:-}" ]] || continue
+    checked=1
+    packet="$REMEDIATION_DIR/packets/$packet_id.md"
+    packet_has_terminal_status "$packet" || return 1
+  done
+  [[ "$checked" == "1" ]]
+}
+
+split_candidate_has_durable_decision() {
+  local unit_id="$1" packets_csv="$2"
+  unit_has_split_children "$unit_id" && return 0
+  unit_packets_have_terminal_status "$packets_csv" && return 0
+  verifier_has_only_launch_evidence_findings "$unit_id" && return 0
+  split_plan_marks_no_split "$unit_id" && return 0
+  return 1
 }
 
 normalize_source_path() {
@@ -2224,6 +2296,9 @@ detect_split_candidates() {
       if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
         continue
       fi
+      if split_candidate_has_durable_decision "$unit_id" "$packets_csv"; then
+        continue
+      fi
 
       local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
       local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
@@ -2369,6 +2444,27 @@ split_incomplete_units() {
       }
     ' "$SPLIT_CANDIDATES_TSV" "$UNITS_TSV" | sort -u | paste -sd, -
   )"
+
+  if [[ -n "$AUTO_SPLIT_CHILD_UNITS" ]]; then
+    local parent unit_id packets_csv _group _model _severity _rationale
+    local IFS=,
+    for parent in $SPLIT_CANDIDATE_UNITS; do
+      [[ -n "${parent:-}" ]] || continue
+      unit_has_split_children "$parent" || continue
+      while IFS=$'\t' read -r unit_id packets_csv _group _model _severity _rationale; do
+        [[ "$unit_id" == "$parent" ]] || continue
+        local packet_id packet_file
+        local IFS=,
+        for packet_id in $packets_csv; do
+          packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+          [[ -f "$packet_file" ]] || continue
+          file_matches 'Status:[[:space:]]*`?split-into-child-units|split-into-child-units' "$packet_file" && continue
+          printf '\n- Status: `split-into-child-units`\n' >> "$packet_file"
+          printf -- '- Split child units: `%s`\n' "$(awk -F '\t' -v prefix="$parent-S" 'FNR > 1 && index($1, prefix) == 1 { print $1 }' "$UNITS_TSV" | paste -sd, -)" >> "$packet_file"
+        done
+      done < <(tail -n +2 "$UNITS_TSV")
+    done
+  fi
 
   if [[ -n "$AUTO_SPLIT_CHILD_UNITS" ]]; then
     printf '[split-children] units=%s\n' "$AUTO_SPLIT_CHILD_UNITS"
