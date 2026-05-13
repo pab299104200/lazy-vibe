@@ -3456,6 +3456,13 @@ verifier_has_terminal_decision() {
   grep -qiE '^[[:space:]-]*Implementation decision:[[:space:]]*`?(fixed|revise|blocked)`?' "$verifier" || return 1
 }
 
+verifier_is_complete_for_packets() {
+  local unit_id="$1" packets_csv="$2"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  verifier_has_terminal_decision "$unit_id" || return 1
+  artifact_mentions_all_packets "$verifier" "$packets_csv" || return 1
+}
+
 commit_verified_unit_changes() {
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
   local unit_id="$1"
@@ -4076,14 +4083,16 @@ execute_verifier_units() {
       fi
       continue
     fi
-    # Skip already-verified units unless this is a revision pass.
-    if [[ "$REVISE_EXISTING" != "1" ]] && grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      if artifact_mentions_all_packets "$verifier" "$packets_csv"; then
+    if grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || [[ "$REVISE_EXISTING" == "1" ]]; then
+      if verifier_is_complete_for_packets "$unit_id" "$packets_csv"; then
         printf '[resume] skipping completed verify-%s\n' "$unit_id"
+        grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
         continue
       fi
-      printf '[resume] re-running verify-%s; checkpoint exists but verifier does not cover merged packets=%s\n' \
-        "$unit_id" "$packets_csv"
+      if grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
+        printf '[resume] re-running verify-%s; checkpoint exists but verifier does not cover merged packets=%s\n' \
+          "$unit_id" "$packets_csv"
+      fi
     fi
     local prompt="$REMEDIATION_DIR/prompts/verify-$unit_id.md"
     printf '[verify] unit=%s group=%s implementation_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
