@@ -2633,6 +2633,17 @@ $(cat "$SHARED_PROMPT")
 
 $(product_profile_block)
 
+## Shared Standards Gate
+
+Before editing, read the shared standards that apply to this unit:
+
+- \`/home/pete/cadres/shared/templates/coding.md\` for all code, tests, scripts, migrations, and helper design.
+- \`/home/pete/cadres/shared/templates/ui-specification.md\` for any frontend, route, workflow, component, visual, copy, accessibility, or operator-facing change. If the unit has no UI surface, state that it was not applicable.
+- \`/home/pete/cadres/shared/templates/definition-of-done-checklist.md\` before declaring the unit fixed, partial, or blocked.
+- \`/home/pete/cadres/shared/AGENTS.md\` for the execution philosophy and enterprise-grade completion bar.
+
+Treat standards violations as implementation defects, not cosmetic concerns. Fix coding-standard, UI-standard, and definition-of-done gaps that are in scope for the assigned packets. If a required standard file is unavailable, record that as a blocker or residual risk in the summary.
+
 ## Assigned Packets
 
 \`\`\`text
@@ -2656,8 +2667,10 @@ Own this implementation unit end to end:
    - \`- Status: \`blocked\`\` — cannot proceed; describe the blocker.
    This status is used by the coordinator on re-runs to skip already-completed packets. Do not leave it as \`not-started\`.
 3. Update the product documentation locations named by the product profile as required.
-4. Run the strongest relevant verification available in the repo for the changed surface.
-5. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, remaining risks, and any packets left incomplete.
+4. Apply the shared coding standard to changed backend, frontend, test, migration, script, and helper code.
+5. Apply the shared UI specification to changed UI surfaces and operator/customer workflows.
+6. Run the strongest relevant verification available in the repo for the changed surface.
+7. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, standards reviewed, remaining risks, and any packets left incomplete.
 
 Keep the context window under 200k tokens. If these packets are too broad, complete the highest-severity coherent subset, mark completed packets \`Status: \`complete\`\`, and mark the rest \`Status: \`partial\`\` in the packet logs.
 
@@ -2667,6 +2680,7 @@ For revision passes, do not stop at restating verifier findings. Resolve them. T
 - A verifier-finding disposition table: fixed / still failing / launch-evidence-pending / sandbox-blocked.
 - Exact commands run and outcomes.
 - Exact docs updated, or a statement that no docs change was needed after checking the product-profile documentation locations.
+- Exact shared standards reviewed, including whether the coding standard, UI standard, and definition-of-done checklist were applicable and satisfied.
 PROMPT
 }
 
@@ -2704,6 +2718,17 @@ $(cat "$SHARED_PROMPT")
 
 $(product_profile_block)
 
+## Shared Standards Gate
+
+Before accepting implementation signoff, read and apply the shared standards:
+
+- \`/home/pete/cadres/shared/templates/coding.md\` for code, tests, scripts, migrations, and helper design.
+- \`/home/pete/cadres/shared/templates/ui-specification.md\` for any frontend, route, workflow, component, visual, copy, accessibility, or operator-facing change.
+- \`/home/pete/cadres/shared/templates/definition-of-done-checklist.md\` for completion gates.
+- \`/home/pete/cadres/shared/AGENTS.md\` for execution philosophy and enterprise-grade completion expectations.
+
+If the implementation changed UI or operator-facing behavior, UI-standard review is mandatory. If the unit has no UI surface, state that the UI standard was not applicable. Missing or unverifiable standards review is a verifier finding.
+
 ## Assigned Packets
 
 \`\`\`text
@@ -2727,14 +2752,17 @@ This verifier is intentionally independent from the implementation workstream an
 3. Check that each packet's work log truthfully states files changed, docs updated, verification run, and remaining risk.
 4. Open cited audit sources, changed code, changed tests, and changed docs. Confirm the fix addresses the actual finding, not just the symptom.
 5. Confirm docs were updated in the product-profile documentation locations where behavior, contracts, workflows, controls, or customer guidance changed.
-6. Confirm success-path and failure-path tests exist and were run or honestly blocked.
-7. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
-8. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
-9. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
-10. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
-11. If the blocker is a flaky, timing-sensitive, performance, environment-ordering, or broad harness issue, classify it as \`test_harness\` and specify the exact targeted command or human decision required. Do not demand repeated full-suite execution from the auto-revise loop.
-12. Do not reopen an already closed packet solely because the original audit text still exists or because launch evidence is pending under implementation scope. Reopen it only when current code/docs/tests/work-log evidence contradicts the claimed closure, a focused runnable implementation gate fails, or a required implementation artifact is missing.
-13. If the unit requires more than \`$MAX_AUTO_REVISE_FINDINGS\` independent code/docs/test fixes, or the findings span unrelated product areas that should not be revised as one change, classify the excess as \`split_required\` and use \`Decision: stop\` / \`Implementation decision: blocked\`.
+6. Confirm the implementer reviewed and satisfied the shared coding standard for changed code/tests/scripts/migrations/helpers.
+7. Confirm the implementer reviewed and satisfied the shared UI specification for changed frontend, route, workflow, copy, accessibility, and operator-facing surfaces.
+8. Confirm the implementer reviewed and satisfied the shared definition-of-done checklist, including success paths, failure paths, controls, docs, and focused verification.
+9. Confirm success-path and failure-path tests exist and were run or honestly blocked.
+10. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
+11. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, missing standards review, material coding/UI/definition-of-done violations, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
+12. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
+13. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
+14. If the blocker is a flaky, timing-sensitive, performance, environment-ordering, or broad harness issue, classify it as \`test_harness\` and specify the exact targeted command or human decision required. Do not demand repeated full-suite execution from the auto-revise loop.
+15. Do not reopen an already closed packet solely because the original audit text still exists or because launch evidence is pending under implementation scope. Reopen it only when current code/docs/tests/work-log evidence contradicts the claimed closure, a focused runnable implementation gate fails, a standards violation exists on the changed surface, or a required implementation artifact is missing.
+16. If the unit requires more than \`$MAX_AUTO_REVISE_FINDINGS\` independent code/docs/test fixes, or the findings span unrelated product areas that should not be revised as one change, classify the excess as \`split_required\` and use \`Decision: stop\` / \`Implementation decision: blocked\`.
 
 Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 
@@ -2743,6 +2771,7 @@ Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 - Launch evidence decision: \`complete\`, \`pending\`, or \`blocked\`.
 - Packet-by-packet assertion checks.
 - References opened and wider searches performed.
+- Standards reviewed and any coding/UI/definition-of-done violations found.
 - Missing evidence and required revisions.
 - Whether this workstream can be included in final remediation signoff.
 
@@ -2757,6 +2786,7 @@ Use one row per unresolved verifier finding. Valid \`type\` values:
 - \`code\` — product/source implementation defect.
 - \`docs\` — stale or contradictory docs with clear intended behavior.
 - \`tests\` — missing or failing normal focused tests.
+- \`standards\` — coding-standard, UI-standard, or definition-of-done violation on the changed surface.
 - \`test_harness\` — flaky/timing/performance/environment-ordering/broad-suite harness issue that needs a targeted command or explicit human decision before auto-revision.
 - \`contract_conflict\` — code/tests/docs/packet disagree on the intended behavior and a human product/security decision is required.
 - \`launch_evidence\` — launch proof pending but implementation is otherwise fixed.

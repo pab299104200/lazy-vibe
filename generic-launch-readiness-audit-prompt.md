@@ -17,6 +17,17 @@ Run a launch-readiness audit for any software repo using the repo's own product 
 7. Use current web research only for the market comparison job, and only when competitors/alternatives are listed in the product profile.
 8. Log unexplored boundaries. When you hit the job budget or context limit and have identified P0/P1 areas you could not finish, write them to `pending-jobs.tsv` per the Exploration Boundary Protocol below. The launcher queues them as follow-up deep-dive jobs automatically.
 
+## Shared Standards Gate
+
+Read and apply the shared Cadres standards before closing any audit job that evaluates code, UI, tests, docs, or launch readiness:
+
+- `/home/pete/cadres/shared/templates/coding.md`: coding standard, file/function size limits, helper expectations, and single-source-of-truth rules.
+- `/home/pete/cadres/shared/templates/ui-specification.md`: UI/UX conventions for frontend, route, workflow, and operator-facing surfaces.
+- `/home/pete/cadres/shared/templates/definition-of-done-checklist.md`: completion gate for implementation quality, tests, docs, operations, and failure handling.
+- `/home/pete/cadres/shared/AGENTS.md`: execution philosophy and enterprise-grade completion bar.
+
+For each relevant finding, classify standards violations as first-class launch-readiness issues, not cosmetic concerns. Examples include oversized or duplicated code that violates the coding standard, UI flows that violate the UI specification, missing failure-path handling, missing docs/tests required by definition of done, or incomplete platform integration. If a job does not touch frontend/UI, state that the UI standard was not applicable. If any shared standard file is unavailable, record that as residual audit risk.
+
 ## Exploration Boundary Protocol
 
 This applies to all discovery and synthesis jobs. When you reach the job budget, context limit, or a major unexplored module that is materially relevant to P0/P1 launch readiness, log it as a pending deep-dive by **appending** a tab-separated row to:
@@ -74,15 +85,15 @@ Audit architecture, data model, and trust boundaries. Find core entities, owners
 
 ## GENERIC 1C
 
-Audit user/operator journeys. Identify critical workflows from the profile and docs, then map them to UI/API/CLI surfaces and tests.
+Audit user/operator journeys. Identify critical workflows from the profile and docs, then map them to UI/API/CLI surfaces and tests. For UI surfaces, explicitly check the relevant routes/components against `/home/pete/cadres/shared/templates/ui-specification.md`.
 
 ## GENERIC 2A
 
-Audit backend/API/domain logic. Focus on core launch claims, validation, permissions, error handling, idempotency, state transitions, and data integrity.
+Audit backend/API/domain logic. Focus on core launch claims, validation, permissions, error handling, idempotency, state transitions, and data integrity. Check changed or high-risk backend code against `/home/pete/cadres/shared/templates/coding.md` and the definition-of-done checklist.
 
 ## GENERIC 2B
 
-Audit frontend/client/mobile/CLI surfaces. Focus on critical user journeys, forms, errors, loading/empty states, accessibility, client/server contract drift, and unsupported routes.
+Audit frontend/client/mobile/CLI surfaces. Focus on critical user journeys, forms, errors, loading/empty states, accessibility, client/server contract drift, and unsupported routes. Check frontend surfaces against `/home/pete/cadres/shared/templates/ui-specification.md`, `/home/pete/cadres/shared/templates/coding.md`, and the definition-of-done checklist.
 
 ## GENERIC 2C
 
@@ -98,7 +109,7 @@ Cross-cutting operability and recovery synthesis. Review logs, audit trails, met
 
 ## GENERIC 3C
 
-Cross-cutting test, docs, and maintainability synthesis. Compare launch claims to tests and docs. Identify missing integration/E2E coverage, stale tests, unsupported smoke paths, and large/refactor-risk files.
+Cross-cutting test, docs, and maintainability synthesis. Compare launch claims to tests and docs. Identify missing integration/E2E coverage, stale tests, unsupported smoke paths, large/refactor-risk files, and violations of the shared coding, UI, and definition-of-done standards.
 
 ## GENERIC 4
 
@@ -106,7 +117,7 @@ Market or alternative comparison. Use only product-profile competitors or repo-d
 
 ## GENERIC 5
 
-Synthesize launch readiness. Produce severity-ranked blockers, security register, docs/test gaps, launchable subset, non-launchable claims, and required remediation before re-decision.
+Synthesize launch readiness. Produce severity-ranked blockers, security register, docs/test gaps, shared-standards gaps, launchable subset, non-launchable claims, and required remediation before re-decision.
 
 ## GENERIC 6
 
@@ -157,4 +168,4 @@ Adversarial launch challenge. Challenge the candidate readiness decision from se
 
 ## GENERIC 9
 
-Final release decision. Decide: broad launch, restricted launch, internal/design-partner only, or no launch. Final signoff is invalid if runtime verification, critical journey simulation, or adversarial review is missing or failing.
+Final release decision. Decide: broad launch, restricted launch, internal/design-partner only, or no launch. Final signoff is invalid if runtime verification, critical journey simulation, adversarial review, or shared standards review is missing or failing for launch-critical code or UI surfaces.
