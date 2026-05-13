@@ -3874,6 +3874,12 @@ execute_workstreams() {
       local _remaining_packets
       _remaining_packets="$(incomplete_packets_csv "$packets_csv")"
       if [[ "$REVISE_EXISTING" == "1" ]]; then
+        local _findings
+        _findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+        if [[ -z "$_remaining_packets" ]] && implementation_summary_is_fixed "$_summary" && [[ ! -s "$_findings" ]]; then
+          printf '[revise] skipping fixed completed unit %s\n' "implement-$unit_id"
+          continue
+        fi
         printf '[revise] re-running %s from verifier decision\n' "implement-$unit_id"
       elif [[ -z "$_remaining_packets" ]]; then
         printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
