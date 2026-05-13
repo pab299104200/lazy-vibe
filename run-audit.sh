@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -220,7 +221,7 @@ audit_restore_readonly_changes() {
 
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
-    rm -rf "$REPO_ROOT/$path"
+    rm -rf "${REPO_ROOT:?}/$path"
   done < <(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- "${pathspec[@]}")
 }
 
@@ -508,7 +509,7 @@ audit_ensure_playwright_chromium() {
   local log_file="$1"
   audit_ensure_node_bin "playwright" "$log_file" "playwright" || return 1
   local browser_dir="$AUDIT_NODE_TOOLING_DIR/playwright-browsers"
-  if [[ -d "$browser_dir" ]] && find "$browser_dir" -mindepth 1 -maxdepth 1 -type d | read; then
+  if [[ -d "$browser_dir" ]] && find "$browser_dir" -mindepth 1 -maxdepth 1 -type d | read -r; then
     return 0
   fi
   [[ "${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}" == "1" ]] || {
@@ -1009,7 +1010,7 @@ run_native_sast() {
   fi
 
   # Python SAST
-  if [[ -n "$bandit_cmd" ]] && find . -name "*.py" | read; then
+  if [[ -n "$bandit_cmd" ]] && find . -name "*.py" | read -r; then
     "$bandit_cmd" -r . -f json -o "$sast_dir/bandit.json" -ll 2>/dev/null || true
   fi
 
@@ -1204,11 +1205,13 @@ run_native_lighthouse() {
   fi
 
   local chrome_path
-  chrome_path="$(
-    cd "$AUDIT_NODE_TOOLING_DIR" && \
-    PLAYWRIGHT_BROWSERS_PATH="$AUDIT_NODE_TOOLING_DIR/playwright-browsers" \
-    node -e 'console.log(require("playwright").chromium.executablePath())' 2>>"$log_file" || true
-  )"
+  if ! chrome_path="$(
+    cd "$AUDIT_NODE_TOOLING_DIR" &&
+      PLAYWRIGHT_BROWSERS_PATH="$AUDIT_NODE_TOOLING_DIR/playwright-browsers" \
+        node -e 'console.log(require("playwright").chromium.executablePath())' 2>>"$log_file"
+  )"; then
+    chrome_path=""
+  fi
   if [[ -z "$chrome_path" ]]; then
     write_unverified_summary "$summary_md" "Lighthouse Summary" "Could not resolve Chromium executable path for Lighthouse."
     return 0
@@ -1227,7 +1230,7 @@ run_native_lighthouse() {
       --quiet >> "$log_file" 2>&1 || true
   done < "$urls_file"
 
-  if ! find "$out_dir" -maxdepth 1 -type f -name '*.json' ! -name 'summary.json' | read; then
+  if ! find "$out_dir" -maxdepth 1 -type f -name '*.json' ! -name 'summary.json' | read -r; then
     write_unverified_summary "$summary_md" "Lighthouse Summary" "Native Lighthouse did not produce any JSON reports. See $log_file."
     return 0
   fi
@@ -1675,12 +1678,12 @@ wait_for_group() {
           size="$(wc -c <"${job_log[$idx]}" | tr -d ' ')"
         fi
         if [[ "$size" -ne "${job_prev_size[$idx]}" ]]; then
-          job_last_change[$idx]="$now2"
-          job_prev_size[$idx]="$size"
+          job_last_change[idx]="$now2"
+          job_prev_size[idx]="$size"
         elif [[ "$stall_threshold" -gt 0 && "${job_prev_size[$idx]}" -ge 0 ]]; then
-          local stall_secs=$(( now2 - job_last_change[$idx] ))
+          local stall_secs=$(( now2 - job_last_change[idx] ))
           if [[ "$stall_secs" -ge "$stall_threshold" ]]; then
-            local elapsed=$(( now2 - job_start[$idx] ))
+            local elapsed=$(( now2 - job_start[idx] ))
             local term_width
             term_width=$(tput cols 2>/dev/null || echo 120)
             printf '\r%-*s\r' $(( term_width - 1 )) ''
@@ -1697,7 +1700,7 @@ wait_for_group() {
       local parts=()
       local part_idx
       for part_idx in "${remaining[@]}"; do
-        local elapsed=$(( now2 - job_start[$part_idx] ))
+        local elapsed=$(( now2 - job_start[part_idx] ))
         parts+=("${names_ref[$part_idx]} (${elapsed}s)")
       done
       local line="${parts[0]}"

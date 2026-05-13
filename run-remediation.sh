@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -454,8 +455,8 @@ combine_unit_lists() {
 
 pending_split_child_units() {
   local -a units=()
-  local unit_id group model_class packet_count packets_csv unit_rationale
-  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity unit_rationale; do
+  local unit_id group model_class packets_csv
+  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
     [[ -z "${unit_id:-}" ]] && continue
     [[ "$unit_id" == *-S[0-9][0-9] ]] || continue
 
@@ -481,8 +482,8 @@ pending_split_child_units() {
 
 pending_implementation_units() {
   local -a units=()
-  local unit_id group model_class packet_count packets_csv unit_rationale
-  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity unit_rationale; do
+  local unit_id group model_class packets_csv
+  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
     [[ -z "${unit_id:-}" ]] && continue
     if ! unit_selected "$unit_id"; then
       continue
@@ -515,8 +516,8 @@ pending_implementation_units() {
 
 revised_units_from_verifiers() {
   local -a units=()
-  local unit_id group model_class packet_count packets_csv unit_rationale
-  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity unit_rationale; do
+  local unit_id group model_class packets_csv
+  while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
     [[ -z "${unit_id:-}" ]] && continue
     if ! unit_selected "$unit_id"; then
       continue
@@ -835,17 +836,17 @@ classify_group() {
     *wcag*|*axe-core*|*axe\ violation*|*accessibility\ violation*|*aria-*|*color\ contrast*|*screen\ reader*) printf 'frontend-ux-tests\n' ;;
     # Lighthouse / Core Web Vitals performance findings → runtime-quality-gates
     *lighthouse*|*core\ web\ vitals*|*lcp\ *|*cls\ *|*inp\ *|*ttfb\ *|*performance\ score*|*cumulative\ layout\ shift*|*largest\ contentful\ paint*) printf 'runtime-quality-gates\n' ;;
-    # External services connectivity failures → product-integrations
+    # External services connectivity failures -> product-integrations
     *external\ service*|*external-service*|*oauth\ provider*|*smtp*|*saas\ api*|*webhook\ probe*|*cloud\ sdk*) printf 'product-integrations\n' ;;
-    # Load test failures → runtime-quality-gates
+    # Load test failures -> runtime-quality-gates
     *load\ test*|*load-test*|*p95\ *|*p99\ *|*error\ rate*|*baseline\ scenario*|*ramp\ scenario*|*spike\ scenario*|*k6*|*locust*|*artillery*) printf 'runtime-quality-gates\n' ;;
     *csrf*|*tenant-isolation*|*support-access*|*mfa-pending*|*rbac*|*auth-boundar*|*data-protection*|*guest-invite*|*guest-access*|*public*invite*|*tenants*|*roles-permissions*) printf 'security-auth\n' ;;
     *scim*|*lifecycle*|*provisioning*|*joiner*|*mover*|*leaver*) printf 'scim-lifecycle\n' ;;
     *saml*|*oidc*|*oauth*|*federation*|*jwks*|*authnrequest*|*replay*|*signing-key*) printf 'protocol-federation\n' ;;
-    *iga*|*governance*|*jml*|*access-review*|*reviewer*|*request*approval*|*approver*) printf 'iga-governance\n' ;;
+    *frontend*|*ux*|*navigation*|*i18n*|*manual*|*playwright*|*test-coverage*|*selector*) printf 'frontend-ux-tests\n' ;;
+    iga|iga-*|*-iga|*-iga-*|*\ iga\ *|*\ iga-*|*-iga\ *|*governance*|*access-review*|*reviewer*|*request*approval*|*approver*) printf 'iga-governance\n' ;;
     *migration*|*webhook*|*product*|*entitlement*|*billing*|*market*|*replacement*) printf 'product-integrations\n' ;;
     *audit*|*soc*|*iso*|*gdpr*|*retention*|*evidence*|*compliance*) printf 'audit-compliance\n' ;;
-    *frontend*|*ux*|*navigation*|*i18n*|*manual*|*playwright*|*test-coverage*|*selector*) printf 'frontend-ux-tests\n' ;;
     *) printf 'core-platform\n' ;;
   esac
 }
@@ -1566,7 +1567,7 @@ normalize_workstream_sizes() {
   head -1 "$WORKSTREAMS_TSV" > "$tmp"
   local any_split=0
 
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8; do
+  while IFS=$'\t' read -r f1 f2 f3 f4 _f5 _f6 _f7 f8; do
     local group model_class packets_csv
     # packets are always the last populated column (4-col Meridian or 8-col Portal)
     local _last_col="${f8:-${f4}}"
@@ -1698,7 +1699,8 @@ packet_has_terminal_status() {
 }
 
 stamp_packet_complete() {
-  local px="$1" source_label="$2" pfile="$REMEDIATION_DIR/packets/$px.md"
+  local px="$1"
+  local pfile="$REMEDIATION_DIR/packets/$px.md"
   [[ -f "$pfile" ]] || return 1
   packet_has_terminal_status "$pfile" && return 1
   printf '\n- Status: `complete`\n' >> "$pfile"
@@ -1997,7 +1999,8 @@ artifact_mentions_all_packets() {
 packet_paths_for_ids() {
   local ids_csv="$1"
   local IFS=,
-  local ids=($ids_csv)
+  local -a ids=()
+  read -r -a ids <<< "$ids_csv"
   local id
   for id in "${ids[@]}"; do
     printf '%s/packets/%s.md\n' "$REMEDIATION_DIR" "$id"
@@ -2227,6 +2230,7 @@ detect_split_candidates() {
       local log="$REMEDIATION_DIR/logs/implement-$unit_id.log"
       local reasons=()
       local packet_bytes=0
+      local packet_count=0
 
       if [[ "$unit_id" == *-S[0-9][0-9] ]]; then
         continue
@@ -2238,6 +2242,7 @@ detect_split_candidates() {
       local IFS=,
       local packet_id
       for packet_id in $packets_csv; do
+        packet_count=$((packet_count + 1))
         local packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
         if file_matches 'Status:[[:space:]]*`?split-into-child-units|split-into-child-units' "$packet_file"; then
           parent_split=1
@@ -2266,6 +2271,9 @@ detect_split_candidates() {
       fi
       if ((packet_bytes > MAX_UNIT_PACKET_BYTES)); then
         reasons+=("oversized-unit-packet-text")
+      fi
+      if ((packet_count > MAX_UNIT_PACKET_COUNT)); then
+        reasons+=("too-many-packets")
       fi
 
       if ((${#reasons[@]} > 0)); then
@@ -2801,7 +2809,7 @@ execute_planners() {
 }
 
 rebuild_workstream_coordinator_prompts() {
-  tail -n +2 "$WORKSTREAMS_TSV" | while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8; do
+  tail -n +2 "$WORKSTREAMS_TSV" | while IFS=$'\t' read -r f1 f2 f3 f4 _f5 _f6 _f7 f8; do
     local group model_class packets_csv
     local _last_col="${f8:-${f4}}"
     if [[ "$f1" == WS-* ]]; then
@@ -3075,7 +3083,7 @@ readonly_restore_workspace_changes() {
 
     while IFS= read -r path; do
       [[ -n "$path" ]] || continue
-      rm -rf "$root/$path"
+      rm -rf "${root:?}/$path"
     done < <(git -C "$root" ls-files --others --exclude-standard -- "${pathspec[@]}")
   done < <(workspace_git_roots)
 }
@@ -3561,13 +3569,13 @@ wait_for_wave() {
           size="$(wc -c <"${job_log[$idx]}" | tr -d ' ')"
         fi
         if [[ "$size" -ne "${job_prev_size[$idx]}" ]]; then
-          job_last_change[$idx]="$now2"
-          job_prev_size[$idx]="$size"
+          job_last_change[idx]="$now2"
+          job_prev_size[idx]="$size"
         elif [[ "$stall_threshold" -gt 0 ]]; then
-          local stall_secs=$(( now2 - job_last_change[$idx] ))
+          local stall_secs=$(( now2 - job_last_change[idx] ))
           if [[ "$stall_secs" -ge "$stall_threshold" ]] && final_result_is_terminal "${job_log[$idx]}"; then
-            local elapsed=$(( now2 - job_start[$idx] ))
-            printf '\r\033[K[!] %s: stalled after %ds — terminating\n' \
+            local elapsed=$(( now2 - job_start[idx] ))
+            printf '\r\033[K[!] %s: stalled after %ds - terminating\n' \
               "${names_ref[$idx]}" "$elapsed" >&2
             printf '[stall-kill] stalled after %ds\n' "$elapsed" >> "${job_log[$idx]}"
             kill "${pids_ref[$idx]}" 2>/dev/null || true
@@ -3581,7 +3589,7 @@ wait_for_wave() {
     if [[ ${#remaining[@]} -gt 0 ]]; then
       local parts=() part_idx
       for part_idx in "${remaining[@]}"; do
-        local elapsed=$(( now2 - job_start[$part_idx] ))
+        local elapsed=$(( now2 - job_start[part_idx] ))
         local dname
         dname="$(_display_name_for "${names_ref[$part_idx]}")"
         parts+=("$dname (${elapsed}s)")
@@ -3626,7 +3634,7 @@ execute_workstreams() {
   rebuild_workstream_coordinator_prompts
 
   if [[ "$REVISE_EXISTING" != "1" ]]; then
-    while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8; do
+    while IFS=$'\t' read -r f1 f2 f3 f4 _f5 _f6 _f7 f8; do
       local group model_class packets_csv
       local _last_col="${f8:-${f4}}"
       if [[ "$f1" == WS-* ]]; then
