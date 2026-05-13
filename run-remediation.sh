@@ -4498,5 +4498,9 @@ else
   printf 'Plan generated only. Re-run with --execute to launch remediation agents.\n'
 fi
 
-write_run_summary
-write_remediation_queue_summary
+if ! write_run_summary; then
+  printf '[warn] run summary generation failed; remediation execution already completed\n' >&2
+fi
+if ! write_remediation_queue_summary; then
+  printf '[warn] remediation queue summary generation failed; remediation execution already completed\n' >&2
+fi
