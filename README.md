@@ -306,6 +306,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` | `8` | Maximum verifier finding rows allowed for automatic revision; larger units are left for manual triage or splitting. |
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
+| `REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS` | `0` | Set to `1` to run profile-wide native checks such as full lint/build/test after each implementation unit. By default the remediation runner skips those broad commands so unrelated repo drift does not fail focused unit remediation. |
 | `REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL` | `0` | Set to `1` to preserve `MAX_PARALLEL` when `REPO_ROOT` is not a git root. This deliberately allows parallel units to edit the same live workspace without git worktree isolation. Use only when the remediation runner is the only writer. |
 | `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing or auto-revising a large raw one-packet-per-PX manifest. |
 | `REMEDIATION_RAW_UNIT_ABORT_THRESHOLD` | `20` | Raw `PX-*` unit count that triggers the execution guard. |

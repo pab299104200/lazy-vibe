@@ -78,6 +78,10 @@ Environment:
   REMEDIATION_REVISION_MAX_PARALLEL
                               Parallelism during revision rounds. Defaults to 2.
   REMEDIATION_VERIFY_SCOPE    implementation or launch. Defaults to implementation.
+  REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS
+                              1 to run profile-wide native commands such as full lint/build/test
+                              after every unit. Defaults to 0 so unrelated repo drift does not
+                              fail a focused implementation unit.
   REMEDIATION_MAX_RETRIES     Extra retry attempts per workstream on non-zero runner exit. Defaults to 2 (3 total attempts, backoff 15s/30s).
   REMEDIATION_RAW_UNIT_ABORT_THRESHOLD
                               Abort before execution when this many raw one-packet PX-* implementation
@@ -542,6 +546,12 @@ revised_units_from_verifiers() {
       units+=("$unit_id")
       continue
     fi
+    if verifier_accepts_unit "$unit_id"; then
+      continue
+    fi
+    if verifier_has_only_launch_evidence_findings "$unit_id"; then
+      continue
+    fi
     if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(blocked)' "$verifier"; then
       printf '[auto-revise] %s blocked by verifier decision; leaving for manual triage\n' "$unit_id" >&2
       continue
@@ -806,6 +816,30 @@ fallback_verification_cmds() {
   fi
 }
 
+command_is_global_native_check() {
+  local command="$1"
+  case "$command" in
+    "cd backend && ruff check ."|\
+    "cd backend && ruff format --check ."|\
+    "cd backend && bash scripts/check-standards.sh"|\
+    "cd backend && pytest"|\
+    "cd backend && pytest -m postgres"*|\
+    "cd backend && alembic upgrade head"*|\
+    "cd frontend && npm run build"|\
+    "cd frontend && npm run test"|\
+    "cd frontend && npm run typecheck")
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+native_global_checks_enabled() {
+  [[ "${REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS:-0}" == "1" ]]
+}
+
 collect_verification_cmds() {
   local unit_id="$1" group="$2" worktree="$3"
   local -a commands=()
@@ -828,6 +862,9 @@ collect_verification_cmds() {
       raw="$(trim_inline_value "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
+      if command_is_global_native_check "$raw" && ! native_global_checks_enabled; then
+        continue
+      fi
       append_unique_line "$raw" commands
     done < <(normalize_profile_commands "$key")
   done < <(preferred_verification_scopes_for_unit "$unit_id" "$group")
@@ -3789,6 +3826,16 @@ execute_workstreams() {
     fi
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
       continue
+    fi
+    if [[ "$REVISE_EXISTING" == "1" ]]; then
+      if verifier_accepts_unit "$unit_id"; then
+        printf '[revise] skipping verifier-accepted unit %s\n' "implement-$unit_id"
+        continue
+      fi
+      if verifier_has_only_launch_evidence_findings "$unit_id"; then
+        printf '[revise] skipping launch-evidence-only unit %s\n' "implement-$unit_id"
+        continue
+      fi
     fi
     if [[ "$REVISE_EXISTING" != "1" ]]; then
       local _already_complete_packets
