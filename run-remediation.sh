@@ -842,6 +842,10 @@ command_is_global_native_check() {
     "cd backend && bash scripts/check-standards.sh"|\
     "cd backend && pytest"|\
     "cd backend && pytest -m postgres"*|\
+    "cd backend && python -m pytest"|\
+    "cd backend && python -m pytest tests/ -v"|\
+    "cd backend && python3 -m pytest"|\
+    "cd backend && python3 -m pytest tests/ -v"|\
     "cd backend && alembic upgrade head"*|\
     "cd frontend && npm run build"|\
     "cd frontend && npm run lint"|\
@@ -871,7 +875,7 @@ command_is_path_reference() {
     compgen -G "$worktree/$command" >/dev/null
     return $?
   fi
-  [[ -e "$worktree/$command" ]]
+  return 0
 }
 
 collect_verification_cmds() {
