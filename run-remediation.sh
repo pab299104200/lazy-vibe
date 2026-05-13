@@ -687,6 +687,19 @@ trim_inline_value() {
   printf '%s\n' "$value"
 }
 
+extract_profile_command() {
+  local value="$1"
+  local extracted
+  if [[ "$value" == *'`'*'`'* ]]; then
+    extracted="$(printf '%s\n' "$value" | sed -n 's/^[^`]*`\([^`]*\)`.*/\1/p')"
+    if [[ -n "$extracted" ]]; then
+      trim_inline_value "$extracted"
+      return 0
+    fi
+  fi
+  trim_inline_value "$value"
+}
+
 profile_runtime_values() {
   local key="$1"
   [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]] || return 0
@@ -745,7 +758,7 @@ normalize_profile_commands() {
   local key="$1"
   local raw cleaned lower
   while IFS= read -r raw; do
-    cleaned="$(trim_inline_value "$raw")"
+    cleaned="$(extract_profile_command "$raw")"
     [[ -n "$cleaned" ]] || continue
     lower="$(printf '%s' "$cleaned" | tr '[:upper:]' '[:lower:]')"
     case "$lower" in
@@ -759,12 +772,12 @@ command_is_forbidden() {
   local candidate="$1"
   local forbidden
   case "$candidate" in
-    *"<"*">"*|*"focused test file"*|*"focused test"*|*"placeholder"*)
+    *"<"*">"*|*"\`"*|*"focused test file"*|*"focused test"*|*"placeholder"*)
       return 0
       ;;
   esac
   while IFS= read -r forbidden; do
-    forbidden="$(trim_inline_value "$forbidden")"
+    forbidden="$(extract_profile_command "$forbidden")"
     [[ -n "$forbidden" ]] || continue
     if [[ "$candidate" == "$forbidden" || "$candidate" == *"$forbidden"* || "$forbidden" == *"$candidate"* ]]; then
       return 0
@@ -864,7 +877,7 @@ collect_verification_cmds() {
       *) continue ;;
     esac
     while IFS= read -r raw; do
-      raw="$(trim_inline_value "$raw")"
+      raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
       if command_is_global_native_check "$raw" && ! native_global_checks_enabled; then
@@ -876,7 +889,7 @@ collect_verification_cmds() {
 
   if ((${#commands[@]} == 0)); then
     while IFS= read -r raw; do
-      raw="$(trim_inline_value "$raw")"
+      raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
       append_unique_line "$raw" commands
