@@ -844,6 +844,8 @@ command_is_global_native_check() {
     "cd backend && pytest -m postgres"*|\
     "cd backend && alembic upgrade head"*|\
     "cd frontend && npm run build"|\
+    "cd frontend && npm run lint"|\
+    "cd frontend && npm run format:check"|\
     "cd frontend && npm run test"|\
     "cd frontend && npm run typecheck")
       return 0
@@ -3095,6 +3097,7 @@ validate_prompt_outputs() {
   if [[ "$workstream" == implement-* ]]; then
     local unit_id="${workstream#implement-}"
     copy_unit_artifacts_from_worktree "$unit_id" "$worktree_dir" 2>/dev/null || true
+    recover_implementation_summary_from_log "$unit_id" "$REMEDIATION_DIR/logs/$workstream.log" 2>/dev/null || true
     local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
     if [[ ! -s "$summary" ]]; then
       printf '[postcheck] missing implementation summary: %s\n' "$summary" >&2
@@ -3188,6 +3191,29 @@ implementation_summary_is_fixed() {
   local summary="$1"
   [[ -s "$summary" ]] || return 1
   grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]]|$)' "$summary" 2>/dev/null
+}
+
+recover_implementation_summary_from_log() {
+  local unit_id="$1" log_file="$2"
+  local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  [[ ! -s "$summary" ]] || return 0
+  [[ -s "$log_file" ]] || return 1
+  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]]|$)' "$log_file" || return 1
+
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  {
+    printf '# %s Implementation Summary\n\n' "$unit_id"
+    awk '
+      /^assistant$/ || /^codex$/ || /^claude$/ || /^gemini$/ { marker = NR }
+      { lines[NR] = $0 }
+      END {
+        start = marker ? marker + 1 : 1
+        for (i = start; i <= NR; i += 1) print lines[i]
+      }
+    ' "$log_file"
+    printf '\n\nRecovered from `%s` because the implementer wrote terminal summary content to the log but did not create the required artifact.\n' "$log_file"
+  } > "$summary"
+  printf '[auto-recover] implement-%s: recovered missing implementation summary from log\n' "$unit_id" >>"$log_file"
 }
 
 recover_verifier_artifact_from_log() {
