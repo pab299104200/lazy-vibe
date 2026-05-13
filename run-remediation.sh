@@ -3067,8 +3067,10 @@ run_command_with_heartbeat() {
 
 validate_prompt_outputs() {
   local workstream="$1" class="$2"
+  local worktree_dir="${3:-$REPO_ROOT}"
   if [[ "$workstream" == implement-* ]]; then
     local unit_id="${workstream#implement-}"
+    copy_unit_artifacts_from_worktree "$unit_id" "$worktree_dir" 2>/dev/null || true
     local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
     if [[ ! -s "$summary" ]]; then
       printf '[postcheck] missing implementation summary: %s\n' "$summary" >&2
@@ -3090,6 +3092,45 @@ validate_prompt_outputs() {
       return 1
     fi
   fi
+}
+
+copy_unit_artifacts_from_worktree() {
+  local unit_id="$1" worktree_dir="$2"
+  [[ -n "$unit_id" ]] || return 0
+  [[ "$worktree_dir" != "$REPO_ROOT" ]] || return 0
+  [[ -d "$worktree_dir" ]] || return 0
+
+  local rel_rdir="${REMEDIATION_DIR#"$REPO_ROOT"/}"
+  [[ "$rel_rdir" != "$REMEDIATION_DIR" ]] || return 0
+
+  local worktree_rdir="$worktree_dir/$rel_rdir"
+  [[ -d "$worktree_rdir" ]] || return 0
+
+  mkdir -p "$REMEDIATION_DIR/artifacts" "$REMEDIATION_DIR/packets"
+
+  local src
+  src="$worktree_rdir/artifacts/$unit_id-summary.md"
+  if [[ -s "$src" ]]; then
+    cp "$src" "$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  fi
+
+  shopt -s nullglob
+  local artifact
+  for artifact in "$worktree_rdir/artifacts/$unit_id" "$worktree_rdir/artifacts/$unit_id-"* "$worktree_rdir/artifacts/verify-$unit_id"*; do
+    [[ -e "$artifact" ]] || continue
+    cp -R "$artifact" "$REMEDIATION_DIR/artifacts/"
+  done
+
+  local packet_id packet_src packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" || true)"
+  local IFS=,
+  for packet_id in $packets_csv; do
+    [[ -n "${packet_id:-}" ]] || continue
+    packet_src="$worktree_rdir/packets/$packet_id.md"
+    [[ -s "$packet_src" ]] || continue
+    cp "$packet_src" "$REMEDIATION_DIR/packets/$packet_id.md"
+  done
+  shopt -u nullglob
 }
 
 final_result_value() {
@@ -3548,7 +3589,7 @@ run_prompt() {
   # validate_prompt_outputs and the integrity check run once after the final
   # attempt — retries only fire on runner exit-code failures, not content failures.
   if [[ "$status" == "0" ]]; then
-    validate_prompt_outputs "$workstream" "$class" || status="$?"
+    validate_prompt_outputs "$workstream" "$class" "$worktree_dir" || status="$?"
   fi
 
   # Coordinator, cataloger, verifier, and reviewer roles must not modify product
