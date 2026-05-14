@@ -33,6 +33,10 @@ ACCESSIBILITY_PATHS="${ACCESSIBILITY_PATHS:-/,/login}"
 LIGHTHOUSE_PATHS="${LIGHTHOUSE_PATHS:-/,/login}"
 LOAD_TEST_PATHS="${LOAD_TEST_PATHS:-/}"
 EXTERNAL_SERVICE_TIMEOUT="${EXTERNAL_SERVICE_TIMEOUT:-10}"
+SAST_BANDIT_TIMEOUT="${SAST_BANDIT_TIMEOUT:-300}"
+SAST_SEMGREP_TIMEOUT="${SAST_SEMGREP_TIMEOUT:-600}"
+SAST_PIP_AUDIT_TIMEOUT="${SAST_PIP_AUDIT_TIMEOUT:-300}"
+SAST_NPM_AUDIT_TIMEOUT="${SAST_NPM_AUDIT_TIMEOUT:-300}"
 
 usage() {
   cat <<'USAGE'
@@ -1009,25 +1013,72 @@ run_native_sast() {
     printf '[native-sast] pip-audit unavailable after install check; skipping\n' >> "$log_file"
   fi
 
+  run_native_sast_tool() {
+    local label="$1" timeout_seconds="$2" log_path="$3"
+    shift 3
+
+    printf '[native-sast] starting %s timeout=%ss\n' "$label" "$timeout_seconds" >> "$log_path"
+    set +e
+    timeout "$timeout_seconds" "$@" >> "$log_path" 2>&1 &
+    local tool_pid="$!"
+    (
+      while kill -0 "$tool_pid" 2>/dev/null; do
+        sleep "${AUDIT_NATIVE_HEARTBEAT_SECONDS:-30}"
+        if kill -0 "$tool_pid" 2>/dev/null; then
+          printf '[native-sast] %s still running\n' "$label" >> "$log_path"
+        fi
+      done
+    ) &
+    local heartbeat_pid="$!"
+    wait "$tool_pid"
+    local status="$?"
+    kill "$heartbeat_pid" >/dev/null 2>&1 || true
+    wait "$heartbeat_pid" >/dev/null 2>&1 || true
+    set -e
+
+    if [[ "$status" == "0" ]]; then
+      printf '[native-sast] %s completed\n' "$label" >> "$log_path"
+    else
+      printf '[native-sast] %s timed out or failed status=%s; continuing\n' "$label" "$status" >> "$log_path"
+    fi
+    return 0
+  }
+
   # Python SAST
   if [[ -n "$bandit_cmd" ]] && find . -name "*.py" | read -r; then
-    "$bandit_cmd" -r . -f json -o "$sast_dir/bandit.json" -ll 2>/dev/null || true
+    run_native_sast_tool "bandit" "${SAST_BANDIT_TIMEOUT:-300}" "$log_file" \
+      "$bandit_cmd" -r . -f json -o "$sast_dir/bandit.json" -ll
   fi
 
   # Multi-language SAST
   if [[ -n "$semgrep_cmd" ]]; then
-    "$semgrep_cmd" --config=auto --json --output="$sast_dir/semgrep.json" . 2>/dev/null || true
+    run_native_sast_tool "semgrep" "${SAST_SEMGREP_TIMEOUT:-600}" "$log_file" \
+      "$semgrep_cmd" \
+      --config=auto \
+      --json \
+      --output="$sast_dir/semgrep.json" \
+      --exclude docs/audit \
+      --exclude .audit-tooling \
+      --exclude node_modules \
+      --exclude .venv \
+      --exclude venv \
+      --exclude site-packages \
+      .
   fi
 
   # Python dependency CVEs
   if [[ -n "$pip_audit_cmd" ]] && [[ -f "requirements.txt" || -f "pyproject.toml" ]]; then
-    "$pip_audit_cmd" --format=json --output="$sast_dir/pip-audit.json" 2>/dev/null || true
+    run_native_sast_tool "pip-audit" "${SAST_PIP_AUDIT_TIMEOUT:-300}" "$log_file" \
+      "$pip_audit_cmd" --format=json --output="$sast_dir/pip-audit.json"
   fi
 
   # Node.js dependency CVEs
   if [[ -f "package.json" ]]; then
     if command_exists npm; then
-      npm audit --json > "$sast_dir/npm-audit.json" 2>/dev/null || true
+      timeout "${SAST_NPM_AUDIT_TIMEOUT:-300}" \
+        npm audit --json > "$sast_dir/npm-audit.json" 2>/dev/null || {
+          printf '[native-sast] npm audit timed out or failed; continuing\n' >> "$log_file"
+        }
     else
       printf '[native-sast] npm unavailable; skipping npm audit\n' >> "$log_file"
     fi
@@ -1846,7 +1897,9 @@ drain_pending_jobs() {
   [[ -f "$pending_file" ]] || return 0
 
   local queued_file="$RUN_DIR/artifacts/queued-deep-dives.txt"
+  local drained_file="$RUN_DIR/artifacts/drained-deep-dives.txt"
   touch "$queued_file"
+  touch "$drained_file"
 
   # Reuse the global group arrays (guaranteed empty after flush_group).
   # Set current_group to "dynamic" so flush_group prints a clear label.
@@ -1859,17 +1912,24 @@ drain_pending_jobs() {
     local depth_int="${depth:-1}"
     [[ "$depth_int" =~ ^[0-9]+$ ]] || continue
 
+    if grep -qxF "$dj_id" "$drained_file" 2>/dev/null; then
+      continue
+    fi
+
     if (( depth_int > DYNAMIC_DEPTH_CAP )); then
       printf '[deep-dive] depth-capped: %s (depth=%s cap=%s)\n' "$dj_id" "$depth_int" "$DYNAMIC_DEPTH_CAP"
+      printf '%s\n' "$dj_id" >> "$drained_file"
       continue
     fi
 
     if grep -qxF "$dj_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      printf '[resume] skipping completed deep-dive %s\n' "$dj_id"
+      printf '[dynamic] already completed deep-dive %s\n' "$dj_id"
+      printf '%s\n' "$dj_id" >> "$drained_file"
       continue
     fi
 
     if grep -qxF "$dj_id" "$queued_file" 2>/dev/null; then
+      printf '%s\n' "$dj_id" >> "$drained_file"
       continue
     fi
 

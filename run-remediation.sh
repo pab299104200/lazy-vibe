@@ -3179,6 +3179,10 @@ copy_unit_artifacts_from_worktree() {
   if [[ -s "$src" ]]; then
     cp "$src" "$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
   fi
+  src="$worktree_dir/$unit_id-summary.md"
+  if [[ -s "$src" && ! -s "$REMEDIATION_DIR/artifacts/$unit_id-summary.md" ]]; then
+    cp "$src" "$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  fi
 
   shopt -s nullglob
   local artifact
@@ -3497,8 +3501,27 @@ verifier_has_terminal_decision() {
 verifier_is_complete_for_packets() {
   local unit_id="$1" packets_csv="$2"
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  local implement_log="$REMEDIATION_DIR/logs/implement-$unit_id.log"
   verifier_has_terminal_decision "$unit_id" || return 1
   artifact_mentions_all_packets "$verifier" "$packets_csv" || return 1
+  if [[ -s "$summary" && "$summary" -nt "$verifier" ]]; then
+    return 1
+  fi
+  if [[ -s "$implement_log" && "$implement_log" -nt "$verifier" ]]; then
+    return 1
+  fi
+  local packet_id packet_file
+  IFS=',' read -ra _verify_packets <<< "$packets_csv"
+  for packet_id in "${_verify_packets[@]}"; do
+    packet_id="${packet_id#"${packet_id%%[![:space:]]*}"}"
+    packet_id="${packet_id%"${packet_id##*[![:space:]]}"}"
+    [[ -z "$packet_id" ]] && continue
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    if [[ -s "$packet_file" && "$packet_file" -nt "$verifier" ]]; then
+      return 1
+    fi
+  done
 }
 
 commit_verified_unit_changes() {
@@ -4409,7 +4432,11 @@ write_run_summary() {
 
     local verify_decision
     if [[ -s "$verify_artifact" ]]; then
-      verify_decision="$(grep -oi 'Decision:[[:space:]]*[a-z]*' "$verify_artifact" 2>/dev/null | head -1 | sed 's/.*Decision:[[:space:]]*//')"
+      verify_decision="$(
+        grep -oiE 'Decision:[[:space:]]*`?(accept|revise|stop)`?' "$verify_artifact" 2>/dev/null \
+          | head -1 \
+          | sed -E 's/.*Decision:[[:space:]]*`?([^`[:space:]]+)`?.*/\1/'
+      )"
       [[ -z "$verify_decision" ]] && verify_decision="unreadable"
     else
       verify_decision="not-verified"
