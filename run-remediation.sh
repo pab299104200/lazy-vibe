@@ -53,10 +53,13 @@ REMEDIATION_IMPORT_PRIOR_RUNS="${REMEDIATION_IMPORT_PRIOR_RUNS:-1}"
 REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-0}"
 REMEDIATION_COMMIT_ROOTS="${REMEDIATION_COMMIT_ROOTS:-backend,frontend}"
 NO_CATALOG=0
+FEATURE=""
+SCORECARD=""
+SCORECARD_ONLY_SOURCE=0
 
 usage() {
   cat <<'USAGE'
-Usage: run-remediation.sh --audit-run RUN_DIR [--execute] [--verify] [--verify-only] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--force-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
+Usage: run-remediation.sh --audit-run RUN_DIR [--feature SLUG] [--scorecard FILE] [--execute] [--verify] [--verify-only] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--force-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
 
 Environment:
   REMEDIATION_DIR             Output directory for remediation plan and logs.
@@ -189,6 +192,7 @@ Use --catalog-with-codex to run the cataloger explicitly without --execute (plan
 Use --verify to run read-only verifier agents after workstream implementation.
 Use --verify-only to run only verifier and final-review agents against an existing remediation directory.
 Use --revise-existing with REMEDIATION_DIR to rerun implementation against existing packet/verifier artifacts instead of regenerating packets.
+Use --feature or --scorecard to seed remediation from a feature scorecard. When no --audit-run is supplied, the scorecard becomes the source of truth for packet extraction.
 Use --split-incomplete to detect oversized/incomplete/revise units, create child implementation units, and run those children when --execute is set.
 Oversized unit detection runs automatically before execution by default; use --no-auto-split to disable it.
 Use --only-unit to limit execution or verification to specific implementation units.
@@ -200,6 +204,14 @@ while (($#)); do
   case "$1" in
     --audit-run)
       AUDIT_RUN="${2:?missing audit run directory}"
+      shift 2
+      ;;
+    --feature)
+      FEATURE="${2:?missing feature slug}"
+      shift 2
+      ;;
+    --scorecard)
+      SCORECARD="${2:?missing scorecard file}"
       shift 2
       ;;
     --execute)
@@ -281,23 +293,49 @@ while (($#)); do
   esac
 done
 
+if [[ -z "$SCORECARD" && -n "$FEATURE" ]]; then
+  if [[ -f "$REPO_ROOT/docs/scorecard/$FEATURE.md" ]]; then
+    SCORECARD="$REPO_ROOT/docs/scorecard/$FEATURE.md"
+  elif [[ -f "$REPO_ROOT/docs/scorecards/$FEATURE.md" ]]; then
+    SCORECARD="$REPO_ROOT/docs/scorecards/$FEATURE.md"
+  fi
+fi
+if [[ -n "$SCORECARD" ]]; then
+  [[ "$SCORECARD" != /* ]] && SCORECARD="$REPO_ROOT/$SCORECARD"
+  if [[ ! -f "$SCORECARD" ]]; then
+    printf 'Scorecard file not found: %s\n' "$SCORECARD" >&2
+    exit 2
+  fi
+fi
+
 if [[ -z "$AUDIT_RUN" ]]; then
-  # Auto-detect latest audit run
-  AUDIT_RUN=$(find "$REPO_ROOT/docs/audit" "$REPO_ROOT/project-audit" "$REPO_ROOT" -maxdepth 2 -type d \( -name "*-launch-readiness-run" -o -name "*-audit-run" \) 2>/dev/null | sort | tail -n 1 || true)
+  if [[ -n "$SCORECARD" ]]; then
+    AUDIT_RUN="scorecard:$SCORECARD"
+    SCORECARD_ONLY_SOURCE=1
+    printf '[scorecard] using scorecard remediation source: %s\n' "$SCORECARD"
+  else
+    # Auto-detect latest audit run
+    AUDIT_RUN=$(find "$REPO_ROOT/docs/audit" "$REPO_ROOT/project-audit" "$REPO_ROOT" -maxdepth 2 -type d \( -name "*-launch-readiness-run" -o -name "*-audit-run" \) 2>/dev/null | sort | tail -n 1 || true)
+  fi
   if [[ -z "$AUDIT_RUN" ]]; then
     echo "--audit-run is required and could not be auto-detected" >&2
     usage >&2
     exit 2
   fi
-  printf '[auto-detect] using audit run: %s\n' "$AUDIT_RUN"
+  [[ "$AUDIT_RUN" == scorecard:* ]] || printf '[auto-detect] using audit run: %s\n' "$AUDIT_RUN"
 elif [[ ! -d "$AUDIT_RUN" ]]; then
   echo "Audit run directory not found: $AUDIT_RUN" >&2
   exit 2
 fi
 
 if [[ -z "$REMEDIATION_DIR" ]]; then
-  _audit_date=$(basename "$AUDIT_RUN" | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || date +%Y-%m-%d)
-  REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/${_audit_date}-remediation-run"
+  if [[ "$AUDIT_RUN" == scorecard:* ]]; then
+    _feature_slug="${FEATURE:-$(basename "$SCORECARD" .md)}"
+    REMEDIATION_DIR="$REPO_ROOT/docs/audit/$(date +%Y-%m-%d)-${_feature_slug}-remediation-run"
+  else
+    _audit_date=$(basename "$AUDIT_RUN" | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || date +%Y-%m-%d)
+    REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/${_audit_date}-remediation-run"
+  fi
   printf '[auto-detect] using remediation dir: %s\n' "$REMEDIATION_DIR"
 fi
 
@@ -934,6 +972,7 @@ native_test_results_block() {
 source_kind() {
   local source="$1"
   case "$source" in
+    */docs/scorecard/*.md|*/docs/scorecards/*.md|docs/scorecard/*.md|docs/scorecards/*.md) printf 'scorecard\n' ;;
     */01-domain/*) printf 'domain\n' ;;
     */02-cross-cutting/*) printf 'cross-cutting\n' ;;
     */03-spec-additions/*) printf 'spec-addition\n' ;;
@@ -950,6 +989,12 @@ source_kind() {
 
 audit_source_files() {
   {
+    if [[ -n "$SCORECARD" ]]; then
+      printf '%s\n' "$SCORECARD"
+      if [[ "$SCORECARD_ONLY_SOURCE" == "1" ]]; then
+        return 0
+      fi
+    fi
     find "$AUDIT_RUN" -maxdepth 1 -type f -name '*.md'
     find "$AUDIT_RUN/01-domain" "$AUDIT_RUN/02-cross-cutting" "$AUDIT_RUN/03-spec-additions" -type f -name '*.md' 2>/dev/null || true
     find "$AUDIT_RUN/artifacts/00-bootstrap" -maxdepth 1 -type f \( -name 'spec-inventory.txt' -o -name 'master-prompt-excerpts.txt' \) 2>/dev/null || true
@@ -978,6 +1023,9 @@ classify_group() {
   haystack="$(printf '%s %s' "$source" "$title" | tr '[:upper:]' '[:lower:]')"
 
   case "$haystack" in
+    *scorecard*security*|*scorecard*s-*|*critical*tenant*|*critical*auth*) printf 'security-auth\n' ;;
+    *scorecard*ux*|*scorecard*frontend*|*scorecard*browser*|*acceptance*|*forced\ intervention*) printf 'frontend-ux-tests\n' ;;
+    *scorecard*performance*|*scorecard*runtime*|*scorecard*quality*) printf 'runtime-quality-gates\n' ;;
     *spec-inventory*|*master-prompt-excerpts*|*spec*addition*|*must\ implement*|*contract\ gap*) printf 'spec-contract-gaps\n' ;;
     *runtime-backend*|*runtime-frontend*|*runtime-protocol*|*quality*|*ruff*|*postgres*|*migration-table*|*smoke*) printf 'runtime-quality-gates\n' ;;
     # SAST/CVE findings → security-auth (highest-risk workstream for vulnerability findings)
@@ -1281,12 +1329,16 @@ write_packet() {
     printf '\n```\n\n'
     printf '## Required Remediation Work\n\n'
     printf '1. Verify the finding against current code and docs before editing.\n'
-    printf '2. Fix the defect at the correct backend, frontend, protocol, data, or workflow layer.\n'
-    printf '3. Add or update tests that prove success and failure behavior, including authorization, isolation, trust-boundary, integration, and protocol negatives where relevant.\n'
-    printf '4. Update the product documentation locations named by the product profile wherever behavior, contracts, workflows, controls, or operator/customer guidance changes. If the repo uses `docs/architecture`, `docs/functional`, or `docs/manual`, keep those layers truthful.\n'
-    printf '5. Record the outcome in this packet under `## Work Log`.\n\n'
+    printf '2. Record the root cause before editing: symptom, real cause, correct fix layer, affected contracts, required tests, and required docs.\n'
+    printf '3. Fix the defect at the correct backend, frontend, protocol, data, or workflow layer.\n'
+    printf '4. Add or update tests that prove success and failure behavior, including authorization, isolation, trust-boundary, integration, and protocol negatives where relevant.\n'
+    printf '5. Update the product documentation locations named by the product profile wherever behavior, contracts, workflows, controls, or operator/customer guidance changes. If the repo uses `docs/architecture`, `docs/functional`, or `docs/manual`, keep those layers truthful.\n'
+    printf '6. Record the outcome in this packet under `## Work Log`.\n\n'
     if [[ "$kind" == "spec-addition" ]]; then
       printf 'Spec-origin rule: this packet is not documentation polish. Implement the missing product/protocol/workflow contract in code, tests, and docs, or explicitly prove the contract is already implemented and update the packet with that evidence.\n\n'
+    fi
+    if [[ "$kind" == "scorecard" ]]; then
+      printf 'Scorecard-origin rule: scorecard findings must be re-verified against current code before implementation. If the finding is already fixed, update this packet with evidence and mark it complete without code churn. If real, fix the root cause and update the scorecard evidence trail after verification.\n\n'
     fi
     printf '## Suggested Verification\n\n'
     printf -- '- Run the narrowest relevant unit/integration tests first.\n'

@@ -252,6 +252,17 @@ Splits the launch-readiness audit into parallel job batches, builds one bounded 
 | `LOAD_TEST_TOOL` | `k6` | Advisory preferred load-test tool label passed through the audit metadata. The current native runner uses the built-in HTTP driver and writes `artifacts/load-test/native-load-test-summary.*` for the agent to interpret. |
 | `LOAD_TEST_PATHS` | `/` | Comma-separated paths or absolute URLs used by the native load-test runner. |
 | `EXTERNAL_SERVICE_TIMEOUT` | `10` | Timeout in seconds for each native external-service probe. |
+| `SAST_BANDIT_TIMEOUT` | `300` | Timeout for native Bandit SAST. |
+| `SAST_SEMGREP_TIMEOUT` | `600` | Timeout for native Semgrep SAST. |
+| `SAST_PIP_AUDIT_TIMEOUT` | `300` | Timeout for native pip-audit. |
+| `SAST_NPM_AUDIT_TIMEOUT` | `300` | Timeout for native npm audit. |
+
+Native accessibility and Lighthouse outputs are aggregated into:
+
+- `artifacts/ux-browser-gate-summary.md`
+- `artifacts/ux-browser-gate-summary.tsv`
+
+Adversarial and final-decision jobs are instructed to read those files before issuing launch posture. Unverified or failing browser/accessibility/performance evidence is a release input, not optional polish.
 
 ### Model overrides (Codex)
 
@@ -348,6 +359,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | Flag | Description |
 |---|---|
 | `--audit-run DIR` | Completed audit run directory. If omitted, the script auto-detects the latest `*-launch-readiness-run` or `*-audit-run` under `$REPO_ROOT/docs/audit`, `$REPO_ROOT/project-audit`, or `$REPO_ROOT`. |
+| `--feature SLUG` | Seed remediation from `docs/scorecard/<slug>.md` or `docs/scorecards/<slug>.md` when no audit run is supplied. |
+| `--scorecard FILE` | Seed remediation from an explicit scorecard file. When no audit run is supplied, the scorecard becomes the only packet source. |
 | `--execute` | Run coordinator and implementation agents. |
 | `--verify` | Run verifier agents after implementation. |
 | `--verify-only` | Run only verifiers against an existing remediation directory. |
