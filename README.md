@@ -1,6 +1,6 @@
 # lazy-vibe
 
-Agent-driven launch-readiness audit and remediation toolkit. Two scripts — `run-audit.sh` and `run-remediation.sh` — orchestrate multi-agent sessions that audit a codebase for launch readiness, then catalogue and fix every finding.
+Agent-driven launch-readiness audit, remediation, and feature-build toolkit. `run-audit.sh`, `run-remediation.sh`, and `run-feature-build.sh` orchestrate multi-agent sessions that audit a codebase for launch readiness, catalogue and fix findings, and build approved feature specs through a task-isolated harness.
 
 Supports Codex CLI, Claude CLI, and Gemini CLI as agent backends. Profiles let you drop in product-specific job lists and prompts without modifying the scripts.
 
@@ -12,6 +12,10 @@ Supports Codex CLI, Claude CLI, and Gemini CLI as agent backends. Profiles let y
 lazy-vibe/
 ├── run-audit.sh                        # audit orchestrator
 ├── run-remediation.sh                  # remediation orchestrator
+├── run-feature-build.sh                # one-shot feature build orchestrator
+├── run-keystone-accounting-audit.sh     # fixed-domain GAAP/IFRS audit harness
+├── run-rmm-ops-automation-audit.sh      # fixed-domain RMM automation-chain audit harness
+├── lazy_vibe/                          # Python workflow engines used by new harnesses
 ├── generic-shared.md                   # shared rules injected into every audit job
 ├── generic-jobs.tsv                    # default job manifest (used when no profile sets one)
 ├── generic-launch-readiness-audit-prompt.md
@@ -45,6 +49,10 @@ The audit runs 10 sequential groups. Within each group, jobs execute in parallel
 | *(optional)* | `load-test` | When `LOAD_TEST_ENABLED=1`, the launcher runs a native three-scenario load test (baseline 10 VU / ramp 1→50 VU / spike 100 VU) after all runtime jobs complete and then asks the agent to interpret the captured evidence. |
 
 The remediation phase reads the audit output, extracts findings into packets, and runs an implementer–verifier loop that fixes code, tests, and docs.
+
+The feature-build phase reads an approved `docs/new-feature/<slug>.md` spec, asks a planner agent to decompose it into machine-readable tasks, executes those tasks with isolated prompts, verifies declared exit commands, and can commit, push, and deploy when all gates pass.
+
+Feature-specific UX audit and feature remediation are not separate control planes. UX, accessibility, and browser proof belong in `run-audit.sh`; scorecard and finding remediation belongs in `run-remediation.sh`. Thin feature-scoped wrappers are acceptable, but the audit and remediation scripts own state, retries, model routing, evidence, and final verdicts.
 
 Read-only audit jobs (`discovery`, `synthesis`, `web`, and dynamic `deep-*` jobs) diff against a pre-run repository snapshot. If one of those jobs edits product files, the launcher fails the job. On a clean repo it restores only the unexpected product-file changes; on a dirty repo it preserves the existing user diff and reports the integrity violation without reverting unrelated work.
 
@@ -163,6 +171,23 @@ REVIEWER_AGENT=codex \
   --execute \
   --verify
 ```
+
+### Build a feature from a spec
+
+```bash
+REPO_ROOT=/path/to/repo \
+FEATURE_BUILD_PLANNER_AGENT=claude \
+FEATURE_BUILD_IMPLEMENTER_AGENT=codex \
+FEATURE_BUILD_REVIEWER_AGENT=claude \
+./run-feature-build.sh \
+  --feature customer-risk-notifications \
+  --execute \
+  --verify \
+  --commit \
+  --push dev
+```
+
+By default the spec is read from `docs/new-feature/<feature>.md` and state is written to `docs/plans/<feature>/`.
 
 ---
 
@@ -410,9 +435,147 @@ Each runner receives `<prompt_file> <remediation_dir> <workstream_id>`.
 
 ---
 
+## run-feature-build.sh
+
+Builds a complete feature from an approved spec under `docs/new-feature/`. The shell script is intentionally thin; the workflow engine lives in `lazy_vibe/feature_build/`.
+
+The harness is state-driven:
+
+1. Planner agent reads the spec and writes `docs/plans/<feature>/tasks.json`.
+2. The harness mirrors that machine contract into `docs/plans/<feature>/plan.md`.
+3. Implementer agents execute pending tasks whose dependencies are complete, with parallel DAG execution across ready tasks.
+4. Before dispatching an agent, the harness runs the task verification contract. If the current tree already satisfies it, the task is marked complete without burning implementation tokens.
+5. Reviewer tasks run like normal tasks and can block downstream work.
+6. The harness, not the agent, marks a task complete only after expected files exist and declared verification commands pass.
+7. The harness injects coding, UI, definition-of-done, route, and multi-layer contract standards into task prompts.
+8. The harness rejects deferral/workaround language by default.
+9. Optional post-build review and remediation commands can call the existing audit/remediation control planes before commit, push, and deploy.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `REPO_ROOT` | `$PWD` | Product repo root. |
+| `FEATURE_BUILD_PLANNER_AGENT` | `PLANNER_AGENT`, then `claude` | Agent used to decompose the spec into task files. |
+| `FEATURE_BUILD_IMPLEMENTER_AGENT` | `IMPLEMENTER_AGENT`, then `codex` | Agent used for implementation tasks. |
+| `FEATURE_BUILD_REVIEWER_AGENT` | `REVIEWER_AGENT`, then `claude` | Agent used for review tasks. |
+| `FEATURE_BUILD_MAX_RETRIES` | `1` | Retry attempts per failed task before the harness stops. |
+| `FEATURE_BUILD_MAX_PARALLEL` | `3` | Maximum ready DAG tasks running in parallel. |
+| `FEATURE_BUILD_STANDARD_GATES` | `1` | Inject coding/UI/definition-of-done verification and run final standard gates. |
+| `FEATURE_BUILD_REQUIRE_REVIEW_TASKS` | `1` | Reject plans that contain no review tasks. |
+| `FEATURE_BUILD_ALLOW_DEFERRALS` | `0` | Reject task plans containing deferral/workaround language unless explicitly enabled. |
+| `FEATURE_BUILD_POST_BUILD_REVIEW_COMMAND` | — | Optional independent review command after build verification. Receives `FEATURE_BUILD_FEATURE`, `FEATURE_BUILD_RUN_DIR`, `FEATURE_BUILD_SPEC`, and `FEATURE_BUILD_SCORECARD`. |
+| `FEATURE_BUILD_AUTO_REMEDIATE_COMMAND` | — | Optional remediation command run when the post-build review writes a revise/fail decision. Receives the same variables plus `FEATURE_BUILD_REVIEW_ROUND`. |
+| `FEATURE_BUILD_POST_BUILD_ROUNDS` | `1` | Maximum post-build review/remediation rounds. |
+| `CODEX_MODEL` | — | Override Codex model for every feature-build task. |
+| `FEATURE_BUILD_CODEX_MODEL_FAST` | `gpt-5.3-codex-spark` | Codex model for fast tasks. |
+| `FEATURE_BUILD_CODEX_MODEL_BALANCED` | `gpt-5.4-codex` | Codex model for balanced tasks. |
+| `FEATURE_BUILD_CODEX_MODEL_ADVANCED` | `gpt-5.5-codex` | Codex model for advanced tasks. |
+| `CODEX_EXTRA_ARGS` | — | Extra arguments appended to `codex exec`. |
+| `CLAUDE_MODEL` | — | Override Claude model for all feature-build phases. |
+| `FEATURE_BUILD_CLAUDE_MODEL_FAST` | `claude-haiku-4-5` | Claude model for fast tasks. |
+| `FEATURE_BUILD_CLAUDE_MODEL_BALANCED` | `claude-sonnet-4-6` | Claude model for balanced tasks. |
+| `FEATURE_BUILD_CLAUDE_MODEL_ADVANCED` | `claude-opus-4-7` | Claude model for advanced tasks. |
+| `CLAUDE_EXTRA_ARGS` | — | Extra arguments appended to `claude`. |
+| `GEMINI_MODEL` | — | Override Gemini model. |
+| `FEATURE_BUILD_GEMINI_MODEL_FAST` | `gemini-2.5-flash` | Gemini model for fast tasks. |
+| `FEATURE_BUILD_GEMINI_MODEL_BALANCED` | `gemini-3.1-pro` | Gemini model for balanced tasks. |
+| `FEATURE_BUILD_GEMINI_MODEL_ADVANCED` | `gemini-3.1-pro` | Gemini model for advanced tasks; Gemini currently has no separate Opus/GPT-5.5-equivalent tier. |
+| `GEMINI_EXTRA_ARGS` | — | Extra arguments appended to `gemini`. |
+
+`model_class` is a three-tier contract: `fast`, `balanced`, or `advanced`. The harness also accepts old aliases: `standard` maps to `balanced`, while `complex`, `high-risk`, `planner`, `review`, and `reviewer` map to `advanced`.
+
+### CLI flags
+
+| Flag | Description |
+|---|---|
+| `--feature SLUG` | Required feature slug. |
+| `--spec FILE` | Spec file. Defaults to `$REPO_ROOT/docs/new-feature/<slug>.md`. |
+| `--run-dir DIR` | State directory. Defaults to `$REPO_ROOT/docs/plans/<slug>`. |
+| `--execute` | Run pending tasks after decomposition. |
+| `--verify` | Re-run all task verification commands after task execution. |
+| `--verify-only` | Run verification commands against an existing plan without invoking agents. |
+| `--force-decompose` | Regenerate `tasks.json` and task files. |
+| `--only-task T01,T02` | Execute or verify only specific task IDs. |
+| `--max-retries N` | Retry failed tasks N times. |
+| `--max-parallel N` | Run up to N ready DAG tasks in parallel. |
+| `--dry-run` | Print the task schedule without invoking agents. |
+| `--commit` | Commit changes after all gates pass. |
+| `--commit-message MSG` | Commit message. Defaults to `feat: build <feature>`. |
+| `--push [REMOTE]` | Push the current branch after commit. Defaults to `origin`; use `--push dev` for the dev VPS remote. |
+| `--push-branch BRANCH` | Branch to push. Defaults to the current branch. |
+| `--deploy-command CMD` | Command to run after push succeeds. |
+| `--post-build-review-command CMD` | Run an independent review command after build verification. A zero exit with no structured decision is treated as accepted. |
+| `--auto-remediate-command CMD` | Run a remediation command if the post-build review emits a revise/fail decision. |
+| `--post-build-rounds N` | Maximum review/remediation rounds. |
+| `--skip-standard-gates` | Emergency bypass for harness-injected standards and final standard gates. Prefer fixing the plan instead. |
+
+### Outputs
+
+| Path | Description |
+|---|---|
+| `docs/plans/<feature>/state.json` | Machine-readable run state and event log. |
+| `docs/plans/<feature>/tasks.json` | Machine-readable task graph consumed by the harness. |
+| `docs/plans/<feature>/plan.md` | Human-readable task graph and verification contract generated from `tasks.json`. |
+| `docs/plans/<feature>/tasks/*.md` | Human-readable task files for agents. |
+| `docs/plans/<feature>/prompts/*.md` | Exact prompts sent to agents. |
+| `docs/plans/<feature>/logs/*.log` | Agent logs and deploy logs. |
+| `docs/plans/<feature>/results/*.md` | Agent result summaries. |
+| `docs/plans/<feature>/verify/<task>/*.log` | Verification command output. |
+| `docs/plans/<feature>/artifacts/post-build-review.json` | Optional structured post-build review decision: `{"accepted": true}` or `{"verdict": "revise"}`. |
+
+`tasks.json` is the contract. Each task must include `task_id`, `title`, `task_type`, `depends_on`, `status`, `files_expected`, and `verification_commands`. The harness refuses duplicate IDs and unknown dependencies.
+
+When standard gates are enabled, the harness appends verification commands from repo shape:
+
+- Backend Python files trigger `ruff check`, `ruff format --check`, and `pytest` when those tools/tests are present.
+- Frontend TypeScript/JavaScript/CSS files trigger available `npm run lint`, `npm run typecheck`, `npm run build`, and `npm run test` scripts.
+- Review tasks require the shared definition-of-done checklist.
+- Route/page work requires the shared route-acceptance checklist.
+- Multi-layer contract work adds deterministic checks for backend, frontend, docs, and agent surfaces when task titles, types, or expected files mention agent, BES, job payload, telemetry, permissions, webhooks, integrations, or contracts.
+
+With `--verify`, those backend/frontend standard gates also run once at the end before post-build review, commit, or push.
+
+### Harness consolidation roadmap
+
+These are deliberate control-plane boundaries:
+
+- `run-audit.sh` owns launch-readiness audit, including UX/browser proof, accessibility, Lighthouse, route/nav/API wiring, dynamic deep-dive queue freshness, and final release decisions.
+- `run-remediation.sh` owns remediation, including scorecard/finding ingestion, verification-before-implementation, root-cause metadata, no-change fast paths, worktree promotion, scorecard rewrites, and final remediation queues.
+- `run-feature-build.sh` owns building from an approved spec, then calls audit/remediation control planes through post-build commands rather than duplicating their state machines.
+- Specialized harnesses are only justified where the domain has hard external rules and fixed evidence contracts. Current examples are Keystone GAAP/IFRS accounting audit and RMM ops automation chain audit.
+
+## Specialized domain harnesses
+
+These are intentionally narrow wrappers around rich domain skills. They do not replace `run-audit.sh`; they exist where the audit domain has fixed external rules or fixed chain-tracing evidence that should not be diluted into a generic launch audit.
+
+### Keystone accounting audit
+
+```bash
+cd /home/pete/cadres/keystone
+REPO_ROOT=/home/pete/cadres/keystone \
+RUNNER=claude \
+/home/pete/cadres/shared/lazy-vibe/run-keystone-accounting-audit.sh
+```
+
+The wrapper loads `.claude/skills/keystone-accounting-audit/SKILL.md`, writes a fixed audit prompt under `RUN_DIR/prompts/`, and logs the agent run under `RUN_DIR/logs/`.
+
+### RMM ops automation audit
+
+```bash
+cd /home/pete/cadres/rmm
+REPO_ROOT=/home/pete/cadres/rmm \
+RUNNER=claude \
+/home/pete/cadres/shared/lazy-vibe/run-rmm-ops-automation-audit.sh
+```
+
+The wrapper loads `.claude/skills/spog-ops-auditor/SKILL.md`, preserving the automation-chain tracing model, gap taxonomy, and file:line evidence requirement.
+
+---
+
 ## Progress display
 
-Both scripts show an in-place spinner while an agent is running:
+Audit and remediation show an in-place spinner while an agent is running:
 
 ```
 [-] PX-0042 (87s)

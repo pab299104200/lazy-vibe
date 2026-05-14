@@ -1,0 +1,1259 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, wait
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_ROOT = Path(__file__).resolve().parents[2]
+SHARED_ROOT = SCRIPT_ROOT.parent
+TERMINAL_STATUSES = {"complete", "skipped"}
+TASK_STATUSES = {"pending", "running", "complete", "failed", "skipped"}
+TRUE_VALUES = {"1", "true", "yes", "on"}
+MODEL_TIERS = {"fast", "balanced", "advanced"}
+MODEL_TIER_ALIASES = {
+    "cheap": "fast",
+    "simple": "fast",
+    "bulk": "fast",
+    "extract": "fast",
+    "extraction": "fast",
+    "haiku": "fast",
+    "low": "fast",
+    "standard": "balanced",
+    "normal": "balanced",
+    "medium": "balanced",
+    "daily": "balanced",
+    "sonnet": "balanced",
+    "complex": "advanced",
+    "high": "advanced",
+    "high-risk": "advanced",
+    "advanced": "advanced",
+    "planner": "advanced",
+    "review": "advanced",
+    "reviewer": "advanced",
+    "opus": "advanced",
+}
+EXECUTION_PHILOSOPHY = """## Execution Philosophy
+
+The marginal cost of completeness is near zero with AI. Act on that.
+
+- Do the whole thing. Do it right. Write real tests. Write the documentation. Mature enterprise-grade is the bar every time.
+- Never defer work you can do now. Deferral is a failure mode unless the user explicitly accepts it.
+- Never implement a workaround when the real solution exists. Build the real thing.
+- Stop reasoning about time like a human. Complexity and file count are not excuses to cut scope.
+"""
+DEFERRAL_MARKERS = {
+    "defer",
+    "deferred",
+    "follow-up",
+    "future work",
+    "later",
+    "out of scope",
+    "phase 2",
+    "todo",
+    "tbd",
+    "nice-to-have",
+    "stretch",
+}
+
+
+@dataclass
+class CommandResult:
+    command: str
+    returncode: int
+    output: str
+
+
+@dataclass
+class Task:
+    task_id: str
+    title: str
+    task_type: str
+    depends_on: list[str] = field(default_factory=list)
+    model_class: str = "standard"
+    status: str = "pending"
+    files_expected: list[str] = field(default_factory=list)
+    verification_commands: list[str] = field(default_factory=list)
+    attempts: int = 0
+    last_error: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Task":
+        task_id = str(raw.get("task_id") or raw.get("id") or "").strip()
+        if not task_id:
+            raise ValueError(f"task missing task_id: {raw!r}")
+        status = str(raw.get("status") or "pending").strip()
+        if status not in TASK_STATUSES:
+            status = "pending"
+        return cls(
+            task_id=task_id,
+            title=str(raw.get("title") or task_id).strip(),
+            task_type=str(raw.get("task_type") or raw.get("type") or "implementation").strip(),
+            depends_on=[str(item).strip() for item in raw.get("depends_on", []) if str(item).strip()],
+            model_class=str(raw.get("model_class") or raw.get("model") or "standard").strip(),
+            status=status,
+            files_expected=[
+                str(item).strip() for item in raw.get("files_expected", []) if str(item).strip()
+            ],
+            verification_commands=[
+                str(item).strip()
+                for item in raw.get("verification_commands", [])
+                if str(item).strip()
+            ],
+            attempts=int(raw.get("attempts") or 0),
+            last_error=str(raw.get("last_error") or ""),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "title": self.title,
+            "task_type": self.task_type,
+            "depends_on": self.depends_on,
+            "model_class": self.model_class,
+            "status": self.status,
+            "files_expected": self.files_expected,
+            "verification_commands": self.verification_commands,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+        }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build a feature from docs/new-feature using task-isolated agents."
+    )
+    parser.add_argument("--feature", required=True, help="Feature slug.")
+    parser.add_argument("--spec", help="Spec file. Defaults to docs/new-feature/<feature>.md.")
+    parser.add_argument("--run-dir", help="Plan/state directory. Defaults to docs/plans/<feature>.")
+    parser.add_argument("--execute", action="store_true", help="Run implementation/review tasks.")
+    parser.add_argument("--verify", action="store_true", help="Run task verification commands.")
+    parser.add_argument("--verify-only", action="store_true", help="Only verify existing task outputs.")
+    parser.add_argument("--force-decompose", action="store_true", help="Regenerate task plan.")
+    parser.add_argument("--dry-run", action="store_true", help="Print planned work without running agents.")
+    parser.add_argument("--only-task", help="Comma-separated task IDs to execute or verify.")
+    parser.add_argument("--max-retries", type=int, default=int(os.getenv("FEATURE_BUILD_MAX_RETRIES", "1")))
+    parser.add_argument(
+        "--max-parallel",
+        type=int,
+        default=int(os.getenv("FEATURE_BUILD_MAX_PARALLEL", "3")),
+        help="Maximum ready tasks to run in parallel.",
+    )
+    parser.add_argument("--commit", action="store_true", help="Commit repo changes after all gates pass.")
+    parser.add_argument("--commit-message", help="Commit message.")
+    parser.add_argument("--push", nargs="?", const="origin", help="Push after commit. Optional remote name.")
+    parser.add_argument("--push-branch", help="Branch to push. Defaults to current branch.")
+    parser.add_argument("--deploy-command", help="Command to run after push succeeds.")
+    parser.add_argument(
+        "--post-build-review-command",
+        default=os.getenv("FEATURE_BUILD_POST_BUILD_REVIEW_COMMAND", ""),
+        help=(
+            "Optional independent review command run after build verification. "
+            "Receives FEATURE_BUILD_FEATURE, FEATURE_BUILD_RUN_DIR, and FEATURE_BUILD_SPEC."
+        ),
+    )
+    parser.add_argument(
+        "--auto-remediate-command",
+        default=os.getenv("FEATURE_BUILD_AUTO_REMEDIATE_COMMAND", ""),
+        help=(
+            "Optional remediation command run after post-build review. "
+            "Receives FEATURE_BUILD_FEATURE, FEATURE_BUILD_RUN_DIR, FEATURE_BUILD_SPEC, "
+            "and FEATURE_BUILD_REVIEW_ROUND."
+        ),
+    )
+    parser.add_argument(
+        "--post-build-rounds",
+        type=int,
+        default=int(os.getenv("FEATURE_BUILD_POST_BUILD_ROUNDS", "1")),
+        help="Maximum review/remediation rounds after the build gates pass.",
+    )
+    parser.add_argument(
+        "--skip-standard-gates",
+        action="store_true",
+        help="Skip harness-injected coding, UX, and definition-of-done gates.",
+    )
+    parser.add_argument("--verbose", action="store_true")
+    return parser.parse_args(argv)
+
+
+def repo_root() -> Path:
+    return Path(os.getenv("REPO_ROOT") or os.getcwd()).resolve()
+
+
+def resolve_paths(args: argparse.Namespace, root: Path) -> tuple[Path, Path]:
+    spec = Path(args.spec) if args.spec else root / "docs" / "new-feature" / f"{args.feature}.md"
+    if not spec.is_absolute():
+        spec = root / spec
+    run_dir = Path(args.run_dir) if args.run_dir else root / "docs" / "plans" / args.feature
+    if not run_dir.is_absolute():
+        run_dir = root / run_dir
+    return spec, run_dir
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_tasks(tasks_file: Path) -> list[Task]:
+    data = json.loads(read_text(tasks_file))
+    raw_tasks = data.get("tasks", data) if isinstance(data, dict) else data
+    if not isinstance(raw_tasks, list):
+        raise ValueError(f"{tasks_file} must contain a list or {{\"tasks\": [...]}}")
+    tasks = [Task.from_dict(item) for item in raw_tasks]
+    seen: set[str] = set()
+    for task in tasks:
+        if task.task_id in seen:
+            raise ValueError(f"duplicate task_id {task.task_id}")
+        seen.add(task.task_id)
+    missing = sorted({dep for task in tasks for dep in task.depends_on if dep not in seen})
+    if missing:
+        raise ValueError(f"unknown task dependencies: {', '.join(missing)}")
+    return tasks
+
+
+def save_tasks(tasks_file: Path, tasks: list[Task]) -> None:
+    write_json(tasks_file, {"tasks": [task.to_dict() for task in tasks]})
+
+
+def save_plan(run_dir: Path, tasks: list[Task]) -> None:
+    """Write the human-readable plan that mirrors tasks.json."""
+    lines = [
+        f"# Feature Build Plan: {run_dir.name}",
+        "",
+        "This file is generated from `tasks.json`. Edit `tasks.json` when changing the",
+        "machine contract, then rerun the harness to refresh this plan.",
+        "",
+        "## Task Graph",
+        "",
+        "| Task | Status | Type | Model | Depends On | Title |",
+        "|---|---|---|---|---|---|",
+    ]
+    for task in tasks:
+        deps = ", ".join(task.depends_on) if task.depends_on else "-"
+        lines.append(
+            f"| `{task.task_id}` | `{task.status}` | `{task.task_type}` | "
+            f"`{normalize_model_tier(task.model_class)}` | {deps} | {task.title} |"
+        )
+
+    lines.extend(["", "## Verification Contract", ""])
+    for task in tasks:
+        lines.append(f"### {task.task_id}: {task.title}")
+        lines.append("")
+        if task.files_expected:
+            lines.append("Expected files:")
+            lines.extend(f"- `{path}`" for path in task.files_expected)
+        else:
+            lines.append("Expected files: none declared")
+        lines.append("")
+        if task.verification_commands:
+            lines.append("Verification commands:")
+            lines.extend(f"- `{command}`" for command in task.verification_commands)
+        else:
+            lines.append("Verification commands: none declared")
+        lines.append("")
+
+    write_text(run_dir / "plan.md", "\n".join(lines).rstrip() + "\n")
+
+
+def save_task_state(run_dir: Path, tasks: list[Task]) -> None:
+    tasks_file = run_dir / "tasks.json"
+    save_tasks(tasks_file, tasks)
+    save_plan(run_dir, tasks)
+
+
+def standard_gates_enabled(args: argparse.Namespace) -> bool:
+    if args.skip_standard_gates:
+        return False
+    return os.getenv("FEATURE_BUILD_STANDARD_GATES", "1").strip().lower() in TRUE_VALUES
+
+
+def review_tasks_required() -> bool:
+    return os.getenv("FEATURE_BUILD_REQUIRE_REVIEW_TASKS", "1").strip().lower() in TRUE_VALUES
+
+
+def deferrals_allowed() -> bool:
+    return os.getenv("FEATURE_BUILD_ALLOW_DEFERRALS", "0").strip().lower() in TRUE_VALUES
+
+
+def no_user_deferral_allowed() -> str:
+    return (
+        "The harness rejects deferral language by default. Set "
+        "FEATURE_BUILD_ALLOW_DEFERRALS=1 only when the user explicitly accepts a scoped deferral."
+    )
+
+
+def load_state(state_file: Path, feature: str, spec: Path, tasks_file: Path) -> dict[str, Any]:
+    if state_file.exists():
+        return json.loads(read_text(state_file))
+    return {
+        "feature": feature,
+        "spec": str(spec),
+        "tasks_file": str(tasks_file),
+        "created_at": utc_stamp(),
+        "updated_at": utc_stamp(),
+        "phase": "initialized",
+        "events": [],
+    }
+
+
+def save_state(state_file: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = utc_stamp()
+    write_json(state_file, state)
+
+
+def record_event(state_file: Path, state: dict[str, Any], event: str, **details: Any) -> None:
+    state.setdefault("events", []).append({"at": utc_stamp(), "event": event, **details})
+    save_state(state_file, state)
+
+
+def utc_stamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def run_shell(
+    command: str,
+    cwd: Path,
+    log_path: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> CommandResult:
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    completed = subprocess.run(
+        ["bash", "-lc", command],
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    output = completed.stdout or ""
+    if log_path is not None:
+        write_text(log_path, output)
+    return CommandResult(command=command, returncode=completed.returncode, output=output)
+
+
+def command_exists(name: str) -> bool:
+    return subprocess.run(
+        ["bash", "-lc", f"command -v {shlex.quote(name)} >/dev/null 2>&1"],
+        check=False,
+    ).returncode == 0
+
+
+def normalize_model_tier(model_class: str) -> str:
+    normalized = model_class.strip().lower()
+    if normalized in MODEL_TIERS:
+        return normalized
+    return MODEL_TIER_ALIASES.get(normalized, "balanced")
+
+
+def run_agent(agent: str, prompt_file: Path, cwd: Path, log_file: Path, model_class: str) -> int:
+    agent = agent.strip().lower()
+    prompt_text = read_text(prompt_file)
+    input_text: str | None = None
+    model = select_agent_model(agent, model_class)
+    if agent == "codex":
+        cmd = [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--full-auto",
+            "--skip-git-repo-check",
+            "-C",
+            str(cwd),
+        ]
+        if model:
+            cmd.extend(["-m", model])
+        extra = os.getenv("CODEX_EXTRA_ARGS", "")
+        if extra:
+            cmd.extend(shlex.split(extra))
+        cmd.append("-")
+        input_text = prompt_text
+    elif agent == "claude":
+        cmd = [
+            "claude",
+            "-p",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            "bypassPermissions",
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        extra = os.getenv("CLAUDE_EXTRA_ARGS", "")
+        if extra:
+            cmd.extend(shlex.split(extra))
+        cmd.append(prompt_text)
+    elif agent == "gemini":
+        cmd = ["gemini", "--yolo"]
+        if model:
+            cmd.extend(["--model", model])
+        extra = os.getenv("GEMINI_EXTRA_ARGS", "")
+        if extra:
+            cmd.extend(shlex.split(extra))
+        cmd.append(prompt_text)
+    else:
+        raise ValueError(f"unsupported agent {agent!r}; use codex, claude, or gemini")
+
+    with log_file.open("w", encoding="utf-8") as log:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            input=input_text,
+            text=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    return proc.returncode
+
+
+def select_agent_model(agent: str, model_class: str) -> str:
+    tier = normalize_model_tier(model_class)
+    if agent == "codex":
+        return select_tiered_model(
+            global_var="CODEX_MODEL",
+            fast_var="FEATURE_BUILD_CODEX_MODEL_FAST",
+            balanced_var="FEATURE_BUILD_CODEX_MODEL_BALANCED",
+            advanced_var="FEATURE_BUILD_CODEX_MODEL_ADVANCED",
+            tier=tier,
+            defaults={
+                "fast": "gpt-5.3-codex-spark",
+                "balanced": "gpt-5.4-codex",
+                "advanced": "gpt-5.5-codex",
+            },
+        )
+    if agent == "claude":
+        return select_tiered_model(
+            global_var="CLAUDE_MODEL",
+            fast_var="FEATURE_BUILD_CLAUDE_MODEL_FAST",
+            balanced_var="FEATURE_BUILD_CLAUDE_MODEL_BALANCED",
+            advanced_var="FEATURE_BUILD_CLAUDE_MODEL_ADVANCED",
+            tier=tier,
+            defaults={
+                "fast": "claude-haiku-4-5",
+                "balanced": os.getenv("CLAUDE_MODEL_STANDARD", "claude-sonnet-4-6"),
+                "advanced": os.getenv("CLAUDE_MODEL_HIGH", "claude-opus-4-7"),
+            },
+        )
+    if agent == "gemini":
+        return select_tiered_model(
+            global_var="GEMINI_MODEL",
+            fast_var="FEATURE_BUILD_GEMINI_MODEL_FAST",
+            balanced_var="FEATURE_BUILD_GEMINI_MODEL_BALANCED",
+            advanced_var="FEATURE_BUILD_GEMINI_MODEL_ADVANCED",
+            tier=tier,
+            defaults={
+                "fast": "gemini-2.5-flash",
+                "balanced": "gemini-3.1-pro",
+                "advanced": "gemini-3.1-pro",
+            },
+        )
+    return ""
+
+
+def select_tiered_model(
+    *,
+    global_var: str,
+    fast_var: str,
+    balanced_var: str,
+    advanced_var: str,
+    tier: str,
+    defaults: dict[str, str],
+) -> str:
+    global_override = os.getenv(global_var)
+    if global_override:
+        return global_override
+    tier_vars = {
+        "fast": fast_var,
+        "balanced": balanced_var,
+        "advanced": advanced_var,
+    }
+    return os.getenv(tier_vars[tier], defaults[tier])
+
+
+def skill_policy(root: Path) -> str:
+    project_skill = root / ".claude" / "skills" / "feature-build" / "SKILL.md"
+    if project_skill.exists():
+        return read_text(project_skill)
+    return (
+        "Build the feature from the approved spec using isolated, self-contained tasks. "
+        "Every task must have explicit dependencies, expected files, and runnable verification commands."
+    )
+
+
+def read_optional(path: Path) -> str:
+    if not path.exists():
+        return f"_Missing standards file: {path}_\n"
+    return read_text(path)
+
+
+def standards_bundle() -> str:
+    coding = SHARED_ROOT / "templates" / "coding.md"
+    ui = SHARED_ROOT / "templates" / "ui-specification.md"
+    checklist = SHARED_ROOT / "templates" / "definition-of-done-checklist.md"
+    route = SHARED_ROOT / "templates" / "route-acceptance-checklist.md"
+    return "\n\n".join(
+        [
+            EXECUTION_PHILOSOPHY,
+            f"## Coding Standard\n\n{read_optional(coding)}",
+            f"## UI/UX Standard\n\n{read_optional(ui)}",
+            f"## Definition of Done\n\n{read_optional(checklist)}",
+            f"## Route Acceptance Checklist\n\n{read_optional(route)}",
+        ]
+    )
+
+
+def decompose(args: argparse.Namespace, root: Path, spec: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
+    tasks_file = run_dir / "tasks.json"
+    tasks_dir = run_dir / "tasks"
+    prompts_dir = run_dir / "prompts"
+    logs_dir = run_dir / "logs"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    if tasks_file.exists() and not args.force_decompose:
+        tasks = load_tasks(tasks_file)
+        changed = enforce_task_contract(args, root, tasks)
+        if changed:
+            save_task_state(run_dir, tasks)
+        elif not (run_dir / "plan.md").exists():
+            save_plan(run_dir, tasks)
+        return
+
+    if not spec.exists():
+        raise FileNotFoundError(f"spec not found: {spec}")
+
+    prompt = render_decompose_prompt(args.feature, root, spec, run_dir)
+    prompt_file = prompts_dir / "00-decompose.md"
+    write_text(prompt_file, prompt)
+
+    if args.dry_run:
+        print(f"[dry-run] would decompose {spec} into {tasks_file}")
+        return
+
+    planner = os.getenv("FEATURE_BUILD_PLANNER_AGENT") or os.getenv("PLANNER_AGENT") or "claude"
+    print(f"[decompose] feature={args.feature} planner={planner}")
+    status = run_agent(planner, prompt_file, root, logs_dir / "00-decompose.log", "planner")
+    if status != 0:
+        state["phase"] = "decompose_failed"
+        record_event(state_file, state, "decompose_failed", status=status)
+        raise RuntimeError(f"decomposition failed; see {logs_dir / '00-decompose.log'}")
+
+    tasks = load_tasks(tasks_file)
+    enforce_task_contract(args, root, tasks)
+    for task in tasks:
+        task_md = tasks_dir / f"{task.task_id}.md"
+        if not task_md.exists():
+            write_text(task_md, render_minimal_task_file(task, spec))
+    save_task_state(run_dir, tasks)
+    state["phase"] = "decomposed"
+    record_event(state_file, state, "decomposed", tasks=len(tasks))
+
+
+def render_decompose_prompt(feature: str, root: Path, spec: Path, run_dir: Path) -> str:
+    checklist = SHARED_ROOT / "templates" / "definition-of-done-checklist.md"
+    coding = SHARED_ROOT / "templates" / "coding.md"
+    ui = SHARED_ROOT / "templates" / "ui-specification.md"
+    policy = skill_policy(root)
+    return f"""You are the planner for a one-hit feature build harness.
+
+Repository root:
+{root}
+
+Feature slug:
+{feature}
+
+Approved spec:
+{spec}
+
+Output directory:
+{run_dir}
+
+Read the spec completely. Read the project docs and code needed to discover reusable platform capabilities.
+
+Policy source:
+{policy}
+
+Mandatory execution philosophy:
+{EXECUTION_PHILOSOPHY}
+
+Shared standards to honor:
+- {coding}
+- {ui}
+- {checklist}
+
+Write these files:
+1. {run_dir}/context.md
+2. {run_dir}/tasks.json
+3. {run_dir}/plan.md
+4. One markdown file per task under {run_dir}/tasks/TNN.md or {run_dir}/tasks/RNN.md
+
+The JSON file is the harness contract. It must be valid JSON with this shape:
+{{
+  "tasks": [
+    {{
+      "task_id": "T01",
+      "title": "short title",
+      "task_type": "foundation|backend|frontend|tests|docs|review|deploy",
+      "depends_on": [],
+      "model_class": "fast|balanced|advanced",
+      "status": "pending",
+      "files_expected": ["relative/path.ext"],
+      "verification_commands": ["command run from repo root"]
+    }}
+  ]
+}}
+
+Requirements:
+- Tasks must be small and self-contained.
+- Include review tasks after foundation, backend, frontend, tests/docs, and final readiness.
+- Include contract-gate tasks for every multi-layer feature that crosses backend, frontend, agent, BES, job payload, telemetry, permission, webhook, or external integration boundaries.
+- Verification commands must be real shell commands run from the repo root.
+- Include coding-standard, UI-standard, and definition-of-done verification where relevant.
+- Do not defer, phase, postpone, or mark feature requirements as future work unless the user explicitly accepted that deferral.
+- Do not create workaround tasks when a full implementation task is possible.
+- Use model_class correctly: fast for simple high-volume mechanical work, balanced for normal coding/docs/tests, advanced for planning, review, security, debugging, migrations, and cross-system correctness.
+- If a task cannot be verified by a command, split or rewrite it until it can.
+- Do not mark anything complete.
+- Do not implement the feature during decomposition.
+"""
+
+
+def render_minimal_task_file(task: Task, spec: Path) -> str:
+    return f"""---
+task_id: {task.task_id}
+task_type: {task.task_type}
+status: {task.status}
+depends_on: {task.depends_on}
+---
+
+# {task.task_id}: {task.title}
+
+Spec: `{spec}`
+
+## Expected Files
+{chr(10).join(f"- `{item}`" for item in task.files_expected) or "- _none declared_"}
+
+## Verification Commands
+{chr(10).join(f"- `{item}`" for item in task.verification_commands) or "- _none declared_"}
+"""
+
+
+def enforce_task_contract(args: argparse.Namespace, root: Path, tasks: list[Task]) -> bool:
+    if review_tasks_required() and not any(is_review_task(task) for task in tasks):
+        raise ValueError(
+            "feature build plan must contain at least one review task. "
+            "Set FEATURE_BUILD_REQUIRE_REVIEW_TASKS=0 only for a deliberate emergency bypass."
+        )
+    if not deferrals_allowed():
+        reject_deferral_tasks(tasks)
+
+    changed = False
+    if standard_gates_enabled(args):
+        for task in tasks:
+            before = list(task.verification_commands)
+            task.verification_commands = merge_unique(
+                task.verification_commands + default_verification_commands(root, task)
+            )
+            if task.verification_commands != before:
+                changed = True
+    return changed
+
+
+def is_review_task(task: Task) -> bool:
+    return task.task_type.lower() == "review" or task.task_id.startswith("R")
+
+
+def reject_deferral_tasks(tasks: list[Task]) -> None:
+    offenders: list[str] = []
+    for task in tasks:
+        text = " ".join(
+            [task.title, task.task_type, task.last_error, *task.files_expected, *task.verification_commands]
+        ).lower()
+        if any(marker in text for marker in DEFERRAL_MARKERS):
+            offenders.append(task.task_id)
+    if offenders:
+        raise ValueError(
+            f"feature build plan contains deferral/workaround language in tasks: {', '.join(offenders)}. "
+            f"{no_user_deferral_allowed()}"
+        )
+
+
+def merge_unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            merged.append(value)
+    return merged
+
+
+def default_verification_commands(root: Path, task: Task) -> list[str]:
+    paths = task.files_expected
+    commands: list[str] = []
+    touches_backend = any(path.startswith("backend/") and path.endswith(".py") for path in paths)
+    touches_frontend = any(
+        path.startswith("frontend/") and path.endswith((".ts", ".tsx", ".js", ".jsx", ".css"))
+        for path in paths
+    )
+    touches_docs = any(path.startswith("docs/") and path.endswith(".md") for path in paths)
+    touches_routes = any("router" in path.lower() or "/pages/" in path for path in paths)
+    touches_contract = contract_gate_needed(task)
+
+    if touches_backend:
+        commands.extend(backend_standard_commands(root))
+    if touches_frontend:
+        commands.extend(frontend_standard_commands(root))
+    if touches_docs:
+        commands.append("test -d docs")
+    if touches_routes:
+        commands.append("test -f /home/pete/cadres/shared/templates/route-acceptance-checklist.md")
+    if is_review_task(task):
+        commands.append("test -f /home/pete/cadres/shared/templates/definition-of-done-checklist.md")
+    if touches_contract:
+        commands.extend(contract_gate_commands(root, task))
+    return commands
+
+
+def contract_gate_needed(task: Task) -> bool:
+    text = " ".join([task.title, task.task_type, *task.files_expected]).lower()
+    markers = (
+        "agent/",
+        "bes",
+        "job",
+        "payload",
+        "telemetry",
+        "permission",
+        "webhook",
+        "integration",
+        "contract",
+    )
+    return any(marker in text for marker in markers)
+
+
+def contract_gate_commands(root: Path, task: Task) -> list[str]:
+    commands: list[str] = []
+    if (root / "backend").is_dir():
+        commands.append("test -d backend")
+    if (root / "frontend").is_dir():
+        commands.append("test -d frontend")
+    if any(path.startswith("agent/") for path in task.files_expected):
+        commands.append("test -d agent")
+    if any(path.startswith("docs/") for path in task.files_expected):
+        commands.append("test -d docs")
+    return commands
+
+
+def backend_standard_commands(root: Path) -> list[str]:
+    backend = root / "backend"
+    if not backend.is_dir():
+        return []
+    commands: list[str] = []
+    if (backend / "ruff.toml").exists() or (backend / "pyproject.toml").exists():
+        commands.extend(
+            [
+                "cd backend && python3 -m ruff check .",
+                "cd backend && python3 -m ruff format --check .",
+            ]
+        )
+    if (backend / "tests").is_dir():
+        commands.append("cd backend && python3 -m pytest")
+    return commands
+
+
+def frontend_standard_commands(root: Path) -> list[str]:
+    frontend = root / "frontend"
+    package_json = frontend / "package.json"
+    if not package_json.exists():
+        return []
+    scripts = package_scripts(package_json)
+    commands: list[str] = []
+    for script in ("lint", "typecheck", "build", "test"):
+        if script in scripts:
+            commands.append(f"cd frontend && npm run {script}")
+    return commands
+
+
+def package_scripts(package_json: Path) -> set[str]:
+    try:
+        data = json.loads(read_text(package_json))
+    except json.JSONDecodeError:
+        return set()
+    scripts = data.get("scripts", {})
+    if not isinstance(scripts, dict):
+        return set()
+    return {str(key) for key in scripts}
+
+
+def selected_ids(args: argparse.Namespace) -> set[str] | None:
+    if not args.only_task:
+        return None
+    return {item.strip() for item in args.only_task.split(",") if item.strip()}
+
+
+def ready_tasks(tasks: list[Task], only: set[str] | None) -> list[Task]:
+    by_id = {task.task_id: task for task in tasks}
+    ready: list[Task] = []
+    for task in tasks:
+        if only is not None and task.task_id not in only:
+            continue
+        if task.status != "pending":
+            continue
+        if all(by_id[dep].status in TERMINAL_STATUSES for dep in task.depends_on):
+            ready.append(task)
+    return ready
+
+
+def execute_tasks(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
+    tasks_file = run_dir / "tasks.json"
+    tasks = load_tasks(tasks_file)
+    if enforce_task_contract(args, root, tasks):
+        save_task_state(run_dir, tasks)
+    only = selected_ids(args)
+    prompts_dir = run_dir / "prompts"
+    logs_dir = run_dir / "logs"
+    results_dir = run_dir / "results"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.verify_only:
+        verify_all(args, root, run_dir, state_file, state)
+        return
+
+    if args.dry_run:
+        print_schedule(tasks, only)
+        return
+
+    while True:
+        batch = ready_tasks(tasks, only)
+        if not batch:
+            break
+        run_ready_batch(args, root, run_dir, state_file, state, tasks, batch)
+        save_task_state(run_dir, tasks)
+
+    incomplete = [
+        task.task_id
+        for task in tasks
+        if (only is None or task.task_id in only) and task.status not in TERMINAL_STATUSES
+    ]
+    if incomplete:
+        state["phase"] = "failed"
+        record_event(state_file, state, "incomplete_tasks", tasks=incomplete)
+        raise RuntimeError(f"incomplete tasks remain: {', '.join(incomplete)}")
+    state["phase"] = "implemented"
+    record_event(state_file, state, "tasks_complete")
+
+
+def run_ready_batch(
+    args: argparse.Namespace,
+    root: Path,
+    run_dir: Path,
+    state_file: Path,
+    state: dict[str, Any],
+    tasks: list[Task],
+    batch: list[Task],
+) -> None:
+    max_workers = max(1, min(args.max_parallel, len(batch)))
+    if max_workers == 1:
+        for task in batch:
+            run_task(args, root, run_dir, state_file, state, task, threading.Lock())
+        return
+
+    state_lock = threading.Lock()
+    active: dict[Future[None], Task] = {}
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for task in batch[:max_workers]:
+            active[executor.submit(run_task, args, root, run_dir, state_file, state, task, state_lock)] = task
+
+        next_index = max_workers
+        while active:
+            done, _pending = wait(active, return_when=FIRST_COMPLETED)
+            for future in done:
+                task = active.pop(future)
+                future.result()
+                save_task_state(run_dir, tasks)
+                if next_index < len(batch):
+                    next_task = batch[next_index]
+                    next_index += 1
+                    active[
+                        executor.submit(
+                            run_task,
+                            args,
+                            root,
+                            run_dir,
+                            state_file,
+                            state,
+                            next_task,
+                            state_lock,
+                        )
+                    ] = next_task
+
+
+def locked_record_event(
+    lock: threading.Lock,
+    state_file: Path,
+    state: dict[str, Any],
+    event: str,
+    **details: Any,
+) -> None:
+    with lock:
+        record_event(state_file, state, event, **details)
+
+
+def run_task(
+    args: argparse.Namespace,
+    root: Path,
+    run_dir: Path,
+    state_file: Path,
+    state: dict[str, Any],
+    task: Task,
+    state_lock: threading.Lock,
+) -> None:
+    ok, error = verify_task(task, root, run_dir)
+    if ok:
+        task.status = "complete"
+        task.last_error = ""
+        print(f"[already-ok] task={task.task_id}")
+        locked_record_event(state_lock, state_file, state, "task_already_complete", task_id=task.task_id)
+        return
+    if args.verify_only:
+        task.status = "failed"
+        task.last_error = error
+        locked_record_event(
+            state_lock,
+            state_file,
+            state,
+            "task_verify_only_failed",
+            task_id=task.task_id,
+            error=error,
+        )
+        raise RuntimeError(f"{task.task_id} verification failed: {error}")
+
+    task.attempts += 1
+    task.status = "running"
+    locked_record_event(
+        state_lock,
+        state_file,
+        state,
+        "task_started",
+        task_id=task.task_id,
+        attempt=task.attempts,
+    )
+
+    agent = agent_for_task(task)
+    task_file = run_dir / "tasks" / f"{task.task_id}.md"
+    prompt_file = run_dir / "prompts" / f"{task.task_id}.md"
+    log_file = run_dir / "logs" / f"{task.task_id}.log"
+    result_file = run_dir / "results" / f"{task.task_id}.md"
+    write_text(prompt_file, render_task_prompt(task, task_file, result_file))
+
+    print(f"[start] task={task.task_id} type={task.task_type} agent={agent}")
+    status = run_agent(agent, prompt_file, root, log_file, task.model_class)
+    if status != 0:
+        task.status = "failed"
+        task.last_error = f"agent exited {status}; see {log_file}"
+        locked_record_event(
+            state_lock,
+            state_file,
+            state,
+            "task_agent_failed",
+            task_id=task.task_id,
+            status=status,
+        )
+        if task.attempts <= args.max_retries:
+            task.status = "pending"
+            print(f"[retry] task={task.task_id} attempt={task.attempts}/{args.max_retries}")
+            return
+        raise RuntimeError(task.last_error)
+
+    ok, error = verify_task(task, root, run_dir)
+    if ok:
+        task.status = "complete"
+        task.last_error = ""
+        print(f"[ok] task={task.task_id}")
+        locked_record_event(state_lock, state_file, state, "task_complete", task_id=task.task_id)
+        return
+
+    task.status = "failed"
+    task.last_error = error
+    locked_record_event(
+        state_lock,
+        state_file,
+        state,
+        "task_verify_failed",
+        task_id=task.task_id,
+        error=error,
+    )
+    if task.attempts <= args.max_retries:
+        task.status = "pending"
+        print(f"[retry] task={task.task_id} verify failed: {error}")
+        return
+    raise RuntimeError(f"{task.task_id} verification failed: {error}")
+
+
+def agent_for_task(task: Task) -> str:
+    if task.task_type == "review" or task.task_id.startswith("R"):
+        return os.getenv("FEATURE_BUILD_REVIEWER_AGENT") or os.getenv("REVIEWER_AGENT") or "claude"
+    return os.getenv("FEATURE_BUILD_IMPLEMENTER_AGENT") or os.getenv("IMPLEMENTER_AGENT") or "codex"
+
+
+def render_task_prompt(task: Task, task_file: Path, result_file: Path) -> str:
+    return f"""Your complete assignment is in this task file:
+{task_file}
+
+Mandatory execution philosophy and standards:
+{standards_bundle()}
+
+Read the task file. Execute every item in scope. Do not work outside the declared task scope unless a small integration fix is required for the task verification to pass.
+
+Do the whole task. Do not defer, phase, postpone, stub, mock away, or create a workaround when the full implementation can be completed now.
+
+Before reporting done:
+1. Run every verification command declared in the task file and tasks.json.
+2. Confirm expected files exist.
+3. Write your result to:
+{result_file}
+
+Result format:
+- Files created/modified
+- Verification commands and outputs
+- Issues encountered
+- Final status: complete, partial, or blocked
+"""
+
+
+def verify_task(task: Task, root: Path, run_dir: Path) -> tuple[bool, str]:
+    missing = [path for path in task.files_expected if not (root / path).exists()]
+    if missing:
+        return False, f"missing expected files: {', '.join(missing)}"
+
+    verify_dir = run_dir / "verify" / task.task_id
+    verify_dir.mkdir(parents=True, exist_ok=True)
+    for index, command in enumerate(task.verification_commands, start=1):
+        result = run_shell(command, root, verify_dir / f"{index:02d}.log")
+        if result.returncode != 0:
+            return False, f"command failed ({result.returncode}): {command}"
+    return True, ""
+
+
+def verify_all(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
+    tasks_file = run_dir / "tasks.json"
+    tasks = load_tasks(tasks_file)
+    only = selected_ids(args)
+    failed: list[str] = []
+    for task in tasks:
+        if only is not None and task.task_id not in only:
+            continue
+        ok, error = verify_task(task, root, run_dir)
+        if ok:
+            print(f"[verify-ok] {task.task_id}")
+        else:
+            print(f"[verify-fail] {task.task_id}: {error}")
+            failed.append(task.task_id)
+    if failed:
+        state["phase"] = "verify_failed"
+        record_event(state_file, state, "verify_failed", tasks=failed)
+        raise RuntimeError(f"verification failed: {', '.join(failed)}")
+    record_event(state_file, state, "verify_complete")
+
+
+def print_schedule(tasks: list[Task], only: set[str] | None) -> None:
+    for task in tasks:
+        if only is None or task.task_id in only:
+            deps = ",".join(task.depends_on) if task.depends_on else "-"
+            print(f"{task.task_id}\t{task.status}\t{task.task_type}\tdeps={deps}\t{task.title}")
+
+
+def final_gates(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
+    if args.verify:
+        verify_all(args, root, run_dir, state_file, state)
+        if standard_gates_enabled(args):
+            run_final_standard_gates(root, run_dir)
+            record_event(state_file, state, "standard_gates_complete")
+        run_post_build_closeout(args, root, run_dir, state_file, state)
+    if args.commit:
+        commit_changes(args, root)
+        record_event(state_file, state, "committed")
+    if args.push:
+        push_changes(args, root)
+        record_event(state_file, state, "pushed", remote=args.push)
+    if args.deploy_command:
+        result = run_shell(args.deploy_command, root, run_dir / "logs" / "deploy.log")
+        if result.returncode != 0:
+            raise RuntimeError(f"deploy command failed: {args.deploy_command}")
+        record_event(state_file, state, "deployed")
+
+
+def run_final_standard_gates(root: Path, run_dir: Path) -> None:
+    commands = merge_unique(backend_standard_commands(root) + frontend_standard_commands(root))
+    if not commands:
+        print("[standard-gates] no backend/frontend gates detected")
+        return
+    gate_dir = run_dir / "verify" / "standard-gates"
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    for index, command in enumerate(commands, start=1):
+        print(f"[standard-gate] {command}")
+        result = run_shell(command, root, gate_dir / f"{index:02d}.log")
+        if result.returncode != 0:
+            raise RuntimeError(f"standard gate failed ({result.returncode}): {command}")
+
+
+def run_post_build_closeout(
+    args: argparse.Namespace,
+    root: Path,
+    run_dir: Path,
+    state_file: Path,
+    state: dict[str, Any],
+) -> None:
+    if not args.post_build_review_command:
+        return
+
+    artifact_dir = run_dir / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        "FEATURE_BUILD_FEATURE": args.feature,
+        "FEATURE_BUILD_RUN_DIR": str(run_dir),
+        "FEATURE_BUILD_SPEC": str(resolve_paths(args, root)[0]),
+        "FEATURE_BUILD_SCORECARD": str(root / "docs" / "scorecard" / f"{args.feature}.md"),
+    }
+
+    rounds = max(1, args.post_build_rounds)
+    for round_index in range(1, rounds + 1):
+        env["FEATURE_BUILD_REVIEW_ROUND"] = str(round_index)
+        review_log = run_dir / "logs" / f"post-build-review-{round_index:02d}.log"
+        print(f"[post-build-review] round={round_index}")
+        review = run_shell(args.post_build_review_command, root, review_log, env)
+        if review.returncode != 0:
+            raise RuntimeError(
+                f"post-build review failed ({review.returncode}); see {review_log}"
+            )
+        record_event(state_file, state, "post_build_review_complete", round=round_index)
+
+        decision = read_post_build_decision(artifact_dir)
+        if decision in {"accept", "accepted", "ready", "pass"}:
+            print(f"[post-build-review] accepted round={round_index}")
+            record_event(state_file, state, "post_build_accepted", round=round_index)
+            return
+
+        if not args.auto_remediate_command:
+            if decision in {"revise", "remediate", "fail", "blocked", "stop"}:
+                raise RuntimeError(f"post-build review returned {decision}; no remediation command set")
+            print("[post-build-review] no structured decision; treating zero exit as accepted")
+            record_event(state_file, state, "post_build_accepted_unstructured", round=round_index)
+            return
+
+        remediation_log = run_dir / "logs" / f"post-build-remediation-{round_index:02d}.log"
+        print(f"[post-build-remediation] round={round_index}")
+        remediation = run_shell(args.auto_remediate_command, root, remediation_log, env)
+        if remediation.returncode != 0:
+            raise RuntimeError(
+                f"post-build remediation failed ({remediation.returncode}); see {remediation_log}"
+            )
+        record_event(state_file, state, "post_build_remediation_complete", round=round_index)
+        verify_all(args, root, run_dir, state_file, state)
+        if standard_gates_enabled(args):
+            run_final_standard_gates(root, run_dir)
+
+    raise RuntimeError("post-build review/remediation rounds exhausted without accepted verdict")
+
+
+def read_post_build_decision(artifact_dir: Path) -> str:
+    decision_file = artifact_dir / "post-build-review.json"
+    if not decision_file.exists():
+        return ""
+    try:
+        data = json.loads(read_text(decision_file))
+    except json.JSONDecodeError:
+        return ""
+    if data.get("accepted") is True:
+        return "accepted"
+    if data.get("accepted") is False:
+        return "revise"
+    return str(data.get("verdict") or data.get("decision") or "").strip().lower()
+
+
+def commit_changes(args: argparse.Namespace, root: Path) -> None:
+    status = run_shell("git status --porcelain", root).output.strip()
+    if not status:
+        print("[commit] no changes")
+        return
+    message = args.commit_message or f"feat: build {args.feature}"
+    run_shell("git add -A", root)
+    result = run_shell(f"git commit -m {shlex.quote(message)}", root)
+    if result.returncode != 0:
+        raise RuntimeError(f"git commit failed:\n{result.output}")
+    print("[commit] complete")
+
+
+def current_branch(root: Path) -> str:
+    result = run_shell("git rev-parse --abbrev-ref HEAD", root)
+    if result.returncode != 0:
+        raise RuntimeError("could not determine current git branch")
+    return result.output.strip()
+
+
+def push_changes(args: argparse.Namespace, root: Path) -> None:
+    remote = args.push or "origin"
+    branch = args.push_branch or current_branch(root)
+    result = run_shell(f"git push {shlex.quote(remote)} {shlex.quote(branch)}", root)
+    if result.returncode != 0:
+        raise RuntimeError(f"git push failed:\n{result.output}")
+    print(f"[push] {remote} {branch}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    root = repo_root()
+    spec, run_dir = resolve_paths(args, root)
+    state_file = run_dir / "state.json"
+    tasks_file = run_dir / "tasks.json"
+    state = load_state(state_file, args.feature, spec, tasks_file)
+    save_state(state_file, state)
+
+    try:
+        decompose(args, root, spec, run_dir, state_file, state)
+        if args.execute or args.verify_only:
+            execute_tasks(args, root, run_dir, state_file, state)
+        elif args.dry_run and tasks_file.exists():
+            print_schedule(load_tasks(tasks_file), selected_ids(args))
+        if (args.execute or args.verify_only) and not args.dry_run:
+            final_gates(args, root, run_dir, state_file, state)
+        state["phase"] = "complete"
+        save_state(state_file, state)
+        print(f"Feature build state: {state_file}")
+        return 0
+    except Exception as exc:
+        state["phase"] = "failed"
+        record_event(state_file, state, "failed", error=str(exc))
+        print(f"feature-build failed: {exc}", file=sys.stderr)
+        print(f"Feature build state: {state_file}", file=sys.stderr)
+        return 1
