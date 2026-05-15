@@ -2132,90 +2132,23 @@ run_load_test_job() {
 
 write_run_summary() {
   [[ "$DRY_RUN" == "1" ]] && return 0
-  local summary="$RUN_DIR/00-run-summary.tsv"
-  local total=0 pass=0 incomplete=0 fail=0
-
-  printf 'job_id\tkind\tresult\n' > "$summary"
-
-  while IFS=$'\t' read -r group job_id kind _title _output _ref; do
-    [[ -z "${job_id:-}" ]] && continue
-    if [[ -n "$ONLY_JOB" && "$job_id" != "$ONLY_JOB" ]]; then continue; fi
-    if ! group_selected "$group"; then continue; fi
-
-    local log="$RUN_DIR/logs/$job_id.log"
-    local result
-    if grep -qxF "$job_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//')"
-      [[ -z "$result" ]] && result="completed"
-    elif [[ -f "$log" ]]; then
-      result="FAIL"
-    else
-      result="not-run"
-    fi
-
-    printf '%s\t%s\t%s\n' "$job_id" "$kind" "$result" >> "$summary"
-    total=$((total + 1))
-    case "$result" in
-      PASS|completed) pass=$((pass + 1)) ;;
-      INCOMPLETE) incomplete=$((incomplete + 1)) ;;
-      *) fail=$((fail + 1)) ;;
-    esac
-  done < <(tail -n +2 "$JOBS_FILE")
-
-  # Include dynamically-spawned deep-dive jobs in the summary.
-  local queued_file="$RUN_DIR/artifacts/queued-deep-dives.txt"
-  if [[ -f "$queued_file" ]]; then
-    while IFS= read -r dj_id; do
-      [[ -z "${dj_id:-}" ]] && continue
-      local dj_log="$RUN_DIR/logs/$dj_id.log"
-      local dj_result
-      if grep -qxF "$dj_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-        dj_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$dj_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//')"
-        [[ -z "$dj_result" ]] && dj_result="completed"
-      elif [[ -f "$dj_log" ]]; then
-        dj_result="FAIL"
-      else
-        dj_result="not-run"
-      fi
-      printf '%s\t%s\t%s\n' "$dj_id" "deep-dive" "$dj_result" >> "$summary"
-      total=$(( total + 1 ))
-      case "$dj_result" in
-        PASS|completed) pass=$(( pass + 1 )) ;;
-        INCOMPLETE) incomplete=$(( incomplete + 1 )) ;;
-        *) fail=$(( fail + 1 )) ;;
-      esac
-    done < "$queued_file"
-  fi
-
-  # Include auto-injected load test job if it ran.
-  if [[ "${LOAD_TEST_ENABLED:-0}" == "1" ]]; then
-    local lt_log="$RUN_DIR/logs/load-test.log"
-    local lt_result
-    if grep -qxF "load-test" "$CHECKPOINT_FILE" 2>/dev/null; then
-      lt_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$lt_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//')"
-      [[ -z "$lt_result" ]] && lt_result="completed"
-    elif [[ -f "$lt_log" ]]; then
-      lt_result="FAIL"
-    else
-      lt_result="not-run"
-    fi
-    printf '%s\t%s\t%s\n' "load-test" "load" "$lt_result" >> "$summary"
-    total=$(( total + 1 ))
-    case "$lt_result" in
-      PASS|completed) pass=$(( pass + 1 )) ;;
-      INCOMPLETE) incomplete=$(( incomplete + 1 )) ;;
-      *) fail=$(( fail + 1 )) ;;
-    esac
-  fi
-
-  printf '\n=== Audit Run Summary (%d jobs) ===\n' "$total"
-  printf 'PASS/completed: %d  INCOMPLETE: %d  FAIL/not-run: %d\n' "$pass" "$incomplete" "$fail"
-  if ((incomplete > 0 || fail > 0)); then
-    printf 'Non-pass:\n'
-    awk -F'\t' 'NR>1 && $3 !~ /^(PASS|completed)$/ { printf "  %s (%s): %s\n", $1, $2, $3 }' "$summary"
-  fi
-  printf 'Summary: %s\n' "$summary"
-  printf '===================================\n'
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.audit.summary \
+    --run-dir "$RUN_DIR" \
+    --jobs-file "$JOBS_FILE" \
+    --checkpoint-file "$CHECKPOINT_FILE" \
+    --repo-root "$REPO_ROOT" \
+    --script-path "$SCRIPT_DIR/run-audit.sh" \
+    --summary-file "$RUN_DIR/00-run-summary.tsv" \
+    --next-actions-file "$RUN_DIR/failed-jobs-next-actions.md" \
+    --from-group "$FROM_GROUP" \
+    --to-group "$TO_GROUP" \
+    --only-job "$ONLY_JOB" \
+    --load-test-enabled "${LOAD_TEST_ENABLED:-0}" \
+    --jobs-file-env "${JOBS_FILE:-}" \
+    --product-profile "${PRODUCT_PROFILE:-}" \
+    --profile "${PROFILE:-}" \
+    --runner "${RUNNER:-}" \
+    --audit-runner "${AUDIT_RUNNER:-}"
 }
 
 printf 'Audit run directory: %s\n' "$RUN_DIR"
