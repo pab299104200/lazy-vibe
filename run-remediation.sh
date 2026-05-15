@@ -4503,8 +4503,8 @@ run_evidence_command() {
   if [[ "$command" == *" -m postgres"* && -z "${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-}" && -x "$REPO_ROOT/scripts/dev-postgres" ]]; then
     wrapped_command="./scripts/dev-postgres bootstrap && export MERIDIAN_TEST_ALEMBIC_POSTGRES_URL=\"\${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-postgresql://meridian:meridian@127.0.0.1:5432/meridian_test}\" && $command"
   fi
-  if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* ]]; then
-    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\"; $wrapped_command"
+  if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* || "$command" == *"browser-evidence"* || "$command" == *"lighthouse"* ]]; then
+    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\"; if [[ -n \"\${E2E_BASE_URL:-}\" && \"\$E2E_BASE_URL\" != http://* && \"\$E2E_BASE_URL\" != https://* ]]; then export E2E_BASE_URL=\"https://\$E2E_BASE_URL\"; fi; $wrapped_command"
   fi
 
   {
