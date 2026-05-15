@@ -1631,6 +1631,9 @@ write_ux_browser_gate_summary() {
 
 run_native_checks_and_prompt() {
   local prompt_file="$1" job_id="$2" kind="$3"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    : > "$RUN_DIR/logs/$job_id.log"
+  fi
   run_native_runtime_checks "$job_id" "$kind"
   run_prompt "$prompt_file" "$job_id" "$kind"
 }
