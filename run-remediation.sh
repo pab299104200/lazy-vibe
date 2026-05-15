@@ -692,11 +692,12 @@ verifier_has_only_coordinator_or_evidence_findings() {
     NR > 1 && $1 != "" {
       details = tolower($4 " " $6 " " $7)
       count += 1
-      coordinator_blocked = (
-        $3 == "blocked" &&
-        details ~ /\/packets\/px-[0-9]+\.md/ &&
-        details ~ /(packet.*work.?log|orchestrator|canonical packet|status: not-started)/
-      )
+      coordinator_blocked = 0
+      if ($3 == "blocked" &&
+          details ~ /\/packets\/px-[0-9]+\.md/ &&
+          details ~ /(packet.*work.?log|orchestrator|canonical packet|status: not-started)/) {
+        coordinator_blocked = 1
+      }
       if (!coordinator_blocked &&
           $3 != "launch_evidence" &&
           $3 != "sandbox_blocked" &&
