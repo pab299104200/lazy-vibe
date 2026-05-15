@@ -690,8 +690,15 @@ verifier_has_only_coordinator_or_evidence_findings() {
   [[ -s "$findings" ]] || return 1
   awk -F '\t' '
     NR > 1 && $1 != "" {
+      details = tolower($4 " " $6 " " $7)
       count += 1
-      if ($3 != "launch_evidence" &&
+      coordinator_blocked = (
+        $3 == "blocked" &&
+        details ~ /\/packets\/px-[0-9]+\.md/ &&
+        details ~ /(packet.*work.?log|orchestrator|canonical packet|status: not-started)/
+      )
+      if (!coordinator_blocked &&
+          $3 != "launch_evidence" &&
           $3 != "sandbox_blocked" &&
           $3 != "docs/process" &&
           $3 != "process" &&
