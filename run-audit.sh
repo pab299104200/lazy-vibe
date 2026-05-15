@@ -1104,6 +1104,7 @@ run_native_sast() {
       printf '[native-sast] npm unavailable; skipping npm audit\n' >> "$log_file"
     fi
   fi
+  return 0
 }
 
 write_unverified_summary() {
@@ -1238,6 +1239,7 @@ NODE
   NODE_PATH="$AUDIT_NODE_TOOLING_DIR/node_modules" \
   PLAYWRIGHT_BROWSERS_PATH="$AUDIT_NODE_TOOLING_DIR/playwright-browsers" \
   node "$script_file" >> "$log_file" 2>&1 || true
+  return 0
 }
 
 run_native_lighthouse() {
@@ -1313,7 +1315,7 @@ run_native_lighthouse() {
     return 0
   fi
 
-  LIGHTHOUSE_DIR="$out_dir" LIGHTHOUSE_SUMMARY_JSON="$summary_json" LIGHTHOUSE_SUMMARY_MD="$summary_md" python3 - <<'PY'
+LIGHTHOUSE_DIR="$out_dir" LIGHTHOUSE_SUMMARY_JSON="$summary_json" LIGHTHOUSE_SUMMARY_MD="$summary_md" python3 - <<'PY'
 import json, os, pathlib
 
 out_dir = pathlib.Path(os.environ["LIGHTHOUSE_DIR"])
@@ -1366,6 +1368,7 @@ for row in rows:
     )
 summary_md.write_text("\n".join(lines) + "\n")
 PY
+  return 0
 }
 
 run_native_external_services() {
@@ -1450,6 +1453,7 @@ run_native_external_services() {
   if [[ "$found" == "0" ]]; then
     printf '\nSTATUS: EXTERNAL_SERVICES_NONE_CONFIGURED\n' >> "$summary_md"
   fi
+  return 0
 }
 
 run_native_load_test() {
@@ -1477,7 +1481,7 @@ run_native_load_test() {
     return 0
   fi
 
-  LOAD_URLS_FILE="$urls_file" LOAD_SUMMARY_JSON="$summary_json" LOAD_SUMMARY_MD="$summary_md" python3 - <<'PY'
+LOAD_URLS_FILE="$urls_file" LOAD_SUMMARY_JSON="$summary_json" LOAD_SUMMARY_MD="$summary_md" python3 - <<'PY'
 import concurrent.futures
 import json
 import os
@@ -1566,6 +1570,7 @@ for row in rows:
     )
 summary_md.write_text("\n".join(lines) + "\n")
 PY
+  return 0
 }
 
 run_native_runtime_checks() {
@@ -1584,6 +1589,7 @@ run_native_runtime_checks() {
     run_native_external_services "$job_id"
   fi
   write_ux_browser_gate_summary
+  return 0
 }
 
 write_ux_browser_gate_summary() {
