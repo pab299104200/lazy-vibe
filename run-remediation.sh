@@ -52,6 +52,8 @@ REMEDIATION_REWRITE_UNITS="${REMEDIATION_REWRITE_UNITS:-0}"
 REMEDIATION_IMPORT_PRIOR_RUNS="${REMEDIATION_IMPORT_PRIOR_RUNS:-1}"
 REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-0}"
 REMEDIATION_COMMIT_ROOTS="${REMEDIATION_COMMIT_ROOTS:-backend,frontend}"
+REMEDIATION_COLLECT_EVIDENCE="${REMEDIATION_COLLECT_EVIDENCE:-1}"
+REMEDIATION_EVIDENCE_MAX_ROUNDS="${REMEDIATION_EVIDENCE_MAX_ROUNDS:-1}"
 NO_CATALOG=0
 FEATURE=""
 SCORECARD=""
@@ -103,6 +105,12 @@ Environment:
                               Defaults to 0. Forces serialized implementation/verification waves.
   REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
                               REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to backend,frontend.
+  REMEDIATION_COLLECT_EVIDENCE
+                              1 to automatically collect deterministic launch evidence after
+                              verification finds only evidence/coordination gaps. Defaults to 1.
+                              Set to 0 only to force a manual evidence pass.
+  REMEDIATION_EVIDENCE_MAX_ROUNDS
+                              Max collect-evidence then verify-only loops. Defaults to 1.
   REMEDIATION_ALLOW_WORKTREE_FALLBACK
                               1 to fall back to the live REPO_ROOT when git worktree creation fails.
                               Defaults to 0 for git-root repos because live fallback can make
@@ -860,6 +868,97 @@ command_is_forbidden() {
     fi
   done < <(normalize_profile_commands "Commands that must not be run")
   return 1
+}
+
+evidence_command_is_allowed() {
+  local command="$1"
+  [[ -n "$command" ]] || return 1
+  command_is_forbidden "$command" && return 1
+  case "$command" in
+    "cd backend && python3 -m pytest "*|\
+    "cd backend && python -m pytest "*|\
+    "cd backend && pytest "*|\
+    "cd frontend && npm run typecheck"|\
+    "cd frontend && npm run build"|\
+    "cd frontend && npm run lint"|\
+    "cd frontend && npm run test"*|\
+    "cd frontend && npm run test:e2e"*|\
+    "cd frontend && npx playwright test "*|\
+    "npx playwright test "*)
+      return 0
+      ;;
+  esac
+
+  local supported
+  for supported in \
+    "Supported backend test commands" \
+    "Supported frontend test commands" \
+    "Supported E2E/browser commands"; do
+    while IFS= read -r profile_cmd; do
+      profile_cmd="$(extract_profile_command "$profile_cmd")"
+      [[ -n "$profile_cmd" ]] || continue
+      [[ "$profile_cmd" == *"<"*">"* ]] && continue
+      if [[ "$command" == "$profile_cmd" || "$command" == "$profile_cmd "* ]]; then
+        return 0
+      fi
+    done < <(normalize_profile_commands "$supported")
+  done
+
+  return 1
+}
+
+extract_first_backtick_command() {
+  local text="$1"
+  printf '%s\n' "$text" | sed -n 's/^[^`]*`\([^`][^`]*\)`.*/\1/p' | head -1
+}
+
+evidence_command_for_finding() {
+  local file="$1" finding="$2" required_fix="$3"
+  local text command
+  text="$file $finding $required_fix"
+  command="$(extract_first_backtick_command "$required_fix")"
+
+  if [[ "$text" == *"MERIDIAN_TEST_ALEMBIC_POSTGRES_URL"* && "$text" == *"test_migrations.py"* ]]; then
+    printf 'cd backend && python3 -m pytest tests/test_migrations.py -m postgres -q -rs\n'
+    return 0
+  fi
+
+  if [[ "$text" == *"program-create.spec.ts"* ]]; then
+    printf 'cd frontend && npm run test:e2e -- program-create.spec.ts\n'
+    return 0
+  fi
+
+  if [[ "$text" == *"npm run typecheck"* ]]; then
+    printf 'cd frontend && npm run typecheck\n'
+    return 0
+  fi
+
+  if [[ "$text" == *"auditor-portal.spec.ts"* && "$text" == *"access-review.spec.ts"* ]]; then
+    printf 'cd frontend && npx playwright test --config e2e/playwright.config.ts e2e/auditor-portal.spec.ts e2e/access-review.spec.ts\n'
+    return 0
+  fi
+
+  if [[ "$text" == *"auditor-portal.spec.ts"* ]]; then
+    printf 'cd frontend && npx playwright test --config e2e/playwright.config.ts e2e/auditor-portal.spec.ts\n'
+    return 0
+  fi
+
+  if [[ "$text" == *"access-review.spec.ts"* ]]; then
+    printf 'cd frontend && npx playwright test --config e2e/playwright.config.ts e2e/access-review.spec.ts\n'
+    return 0
+  fi
+
+  if [[ -n "$command" ]] && evidence_command_is_allowed "$command"; then
+    printf '%s\n' "$command"
+  fi
+}
+
+audit_job_for_evidence_finding() {
+  local text="$1"
+  case "$text" in
+    *"15a-compliance-program-operator"*|*"compliance-program-operator"*|*"15a prompt"*|*"15a-"*) printf '15a-compliance-program-operator\n' ;;
+    *"03a-connectors-ingestion"*|*"connectors-ingestion"*|*"03a prompt"*|*"03a-"*) printf '03a-connectors-ingestion\n' ;;
+  esac
 }
 
 unit_packet_source_kinds() {
@@ -4317,6 +4416,7 @@ execute_final_review() {
 
 execute_verifiers() {
   execute_verifier_units
+  execute_evidence_collection_rounds
   execute_final_review
 }
 
@@ -4364,6 +4464,182 @@ execute_revision_rounds() {
   if [[ -n "$remaining_units" ]]; then
     printf '[auto-revise] max rounds reached; remaining verifier-revised units=%s\n' "$remaining_units" >&2
   fi
+}
+
+collect_evidence_units_from_findings() {
+  [[ -d "$REMEDIATION_DIR/artifacts" ]] || return 0
+  local file
+  find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*-findings.tsv' -print 2>/dev/null |
+    sort |
+    while IFS= read -r file; do
+      awk -F '\t' 'NR > 1 && ($3 == "launch_evidence" || $3 == "sandbox_blocked") && $1 != "" { print $1 }' "$file"
+    done |
+    awk '!seen[$0]++'
+}
+
+run_evidence_command() {
+  local unit_id="$1" command="$2" label="$3"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  local safe_label log_file status_file wrapped_command
+  safe_label="$(printf '%s' "$label" | tr -cs 'A-Za-z0-9_.-' '-' | sed 's/^-//; s/-$//')"
+  [[ -n "$safe_label" ]] || safe_label="evidence"
+  mkdir -p "$unit_dir"
+  log_file="$unit_dir/${safe_label}.log"
+  status_file="$unit_dir/${safe_label}.status"
+  wrapped_command="$command"
+  if [[ "$command" == *" -m postgres"* && -z "${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-}" && -x "$REPO_ROOT/scripts/dev-postgres" ]]; then
+    wrapped_command="./scripts/dev-postgres bootstrap && export MERIDIAN_TEST_ALEMBIC_POSTGRES_URL=\"\${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-postgresql://meridian:meridian@127.0.0.1:5432/meridian_test}\" && $command"
+  fi
+  if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* ]]; then
+    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; $wrapped_command"
+  fi
+
+  {
+    printf 'COMMAND: %s\n' "$command"
+    printf 'WRAPPED_COMMAND: %s\n' "$wrapped_command"
+    printf 'STARTED_AT: %s\n\n' "$(date -Is)"
+  } > "$log_file"
+
+  if (cd "$REPO_ROOT" && bash -lc "$wrapped_command") >> "$log_file" 2>&1; then
+    {
+      printf 'STATUS: pass\n'
+      printf 'COMMAND: %s\n' "$command"
+      printf 'LOG: %s\n' "$log_file"
+      printf 'FINISHED_AT: %s\n' "$(date -Is)"
+    } > "$status_file"
+    printf '[evidence] %s: pass: %s\n' "$unit_id" "$command"
+    return 0
+  fi
+
+  {
+    printf 'STATUS: fail\n'
+    printf 'COMMAND: %s\n' "$command"
+    printf 'LOG: %s\n' "$log_file"
+    printf 'FINISHED_AT: %s\n' "$(date -Is)"
+  } > "$status_file"
+  printf '[evidence] %s: failed: %s (see %s)\n' "$unit_id" "$command" "$log_file" >&2
+  return 1
+}
+
+run_evidence_audit_job() {
+  local unit_id="$1" job_id="$2"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  local log_file status_file
+  mkdir -p "$unit_dir"
+  log_file="$unit_dir/audit-$job_id.log"
+  status_file="$unit_dir/audit-$job_id.status"
+
+  {
+    printf 'COMMAND: %s\n' "PROFILE=${PROFILE:-} REPO_ROOT=$REPO_ROOT RUN_DIR=$AUDIT_RUN RUNNER=${REVIEWER_AGENT:-${IMPLEMENTER_AGENT:-codex}} MAX_PARALLEL=1 AUDIT_STALL_INTERVALS=${AUDIT_STALL_INTERVALS:-30} $SCRIPT_DIR/run-audit.sh --only $job_id"
+    printf 'STARTED_AT: %s\n\n' "$(date -Is)"
+  } > "$log_file"
+
+  if (
+    cd "$REPO_ROOT"
+    PROFILE="${PROFILE:-}" \
+    REPO_ROOT="$REPO_ROOT" \
+    RUN_DIR="$AUDIT_RUN" \
+    RUNNER="${REVIEWER_AGENT:-${IMPLEMENTER_AGENT:-codex}}" \
+    MAX_PARALLEL=1 \
+    AUDIT_STALL_INTERVALS="${AUDIT_STALL_INTERVALS:-30}" \
+    "$SCRIPT_DIR/run-audit.sh" --only "$job_id"
+  ) >> "$log_file" 2>&1; then
+    {
+      printf 'STATUS: pass\n'
+      printf 'JOB: %s\n' "$job_id"
+      printf 'LOG: %s\n' "$log_file"
+      printf 'FINISHED_AT: %s\n' "$(date -Is)"
+    } > "$status_file"
+    printf '[evidence] %s: audit job pass: %s\n' "$unit_id" "$job_id"
+    return 0
+  fi
+
+  {
+    printf 'STATUS: fail\n'
+    printf 'JOB: %s\n' "$job_id"
+    printf 'LOG: %s\n' "$log_file"
+    printf 'FINISHED_AT: %s\n' "$(date -Is)"
+  } > "$status_file"
+  printf '[evidence] %s: audit job failed: %s (see %s)\n' "$unit_id" "$job_id" "$log_file" >&2
+  return 1
+}
+
+collect_launch_evidence_once() {
+  aggregate_verifier_findings
+  local units_csv
+  units_csv="$(collect_evidence_units_from_findings | paste -sd, -)"
+  [[ -n "$units_csv" ]] || return 1
+
+  local ran=0 failed=0 unit_id findings_file
+  local IFS=,
+  for unit_id in $units_csv; do
+    findings_file="$(verifier_findings_tsv_for_unit "$unit_id")"
+    [[ -s "$findings_file" ]] || continue
+    local tmp_commands tmp_jobs
+    tmp_commands="$(mktemp)"
+    tmp_jobs="$(mktemp)"
+    awk -F '\t' 'NR > 1 && ($3 == "launch_evidence" || $3 == "sandbox_blocked") { print $4 "\t" $6 "\t" $7 }' "$findings_file" |
+      while IFS=$'\t' read -r file finding required_fix; do
+        local command job text
+        command="$(evidence_command_for_finding "$file" "$finding" "$required_fix" || true)"
+        if [[ -n "$command" ]] && evidence_command_is_allowed "$command"; then
+          printf '%s\n' "$command" >> "$tmp_commands"
+        fi
+        text="$file $finding $required_fix"
+        job="$(audit_job_for_evidence_finding "$text" || true)"
+        [[ -n "$job" ]] && printf '%s\n' "$job" >> "$tmp_jobs"
+      done
+
+    while IFS= read -r command; do
+      [[ -n "$command" ]] || continue
+      ran=1
+      if ! run_evidence_command "$unit_id" "$command" "$(basename "$unit_id")-$(printf '%s' "$command" | awk '{print $1 "-" $2 "-" $3}')"; then
+        failed=1
+      fi
+    done < <(sort -u "$tmp_commands")
+
+    while IFS= read -r job; do
+      [[ -n "$job" ]] || continue
+      ran=1
+      if ! run_evidence_audit_job "$unit_id" "$job"; then
+        failed=1
+      fi
+    done < <(sort -u "$tmp_jobs")
+
+    rm -f "$tmp_commands" "$tmp_jobs"
+  done
+
+  [[ "$ran" == "1" ]] || return 1
+  [[ "$failed" == "0" ]]
+}
+
+execute_evidence_collection_rounds() {
+  if [[ "$REMEDIATION_COLLECT_EVIDENCE" != "1" || "$VERIFY_SCOPE" != "implementation" || "$DRY_RUN" == "1" ]]; then
+    return 0
+  fi
+
+  local round=1
+  while ((round <= REMEDIATION_EVIDENCE_MAX_ROUNDS)); do
+    local evidence_units
+    evidence_units="$(collect_evidence_units_from_findings | paste -sd, -)"
+    [[ -n "$evidence_units" ]] || return 0
+
+    printf '[evidence] round=%s units=%s\n' "$round" "$evidence_units"
+    if ! collect_launch_evidence_once; then
+      printf '[evidence] deterministic evidence collection incomplete; leaving remaining items in queue\n' >&2
+      return 0
+    fi
+
+    local previous_only="$ONLY_UNIT"
+    local previous_revise="$REVISE_EXISTING"
+    ONLY_UNIT="$evidence_units"
+    REVISE_EXISTING=1
+    execute_verifier_units
+    aggregate_verifier_findings
+    ONLY_UNIT="$previous_only"
+    REVISE_EXISTING="$previous_revise"
+    round=$((round + 1))
+  done
 }
 
 if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
@@ -4689,6 +4965,7 @@ elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" ]]; then
   if [[ "$VERIFY" == "1" ]]; then
     execute_verifier_units
     execute_revision_rounds
+    execute_evidence_collection_rounds
     execute_final_review
   fi
 else
