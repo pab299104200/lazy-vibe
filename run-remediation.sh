@@ -606,7 +606,7 @@ revised_units_from_verifiers() {
       printf '[auto-revise] %s has only packet/process/evidence findings; leaving for coordinator cleanup\n' "$unit_id" >&2
       continue
     fi
-    if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(blocked)' "$verifier"; then
+    if file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' "$verifier"; then
       printf '[auto-revise] %s blocked by verifier decision; leaving for manual triage\n' "$unit_id" >&2
       continue
     fi
@@ -619,7 +619,7 @@ revised_units_from_verifiers() {
         "$unit_id" "$MAX_AUTO_REVISE_FINDINGS" >&2
       continue
     fi
-    if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(revise)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(revise)' "$verifier"; then
+    if file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(revise)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(revise)' "$verifier"; then
       units+=("$unit_id")
     fi
   done < <(tail -n +2 "$UNITS_TSV")
@@ -3696,16 +3696,16 @@ verifier_accepts_unit() {
   local unit_id="$1"
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
   [[ -s "$verifier" ]] || return 1
-  grep -qiE '^[[:space:]-]*Decision:[[:space:]]*`?accept`?' "$verifier" || return 1
-  grep -qiE '^[[:space:]-]*Implementation decision:[[:space:]]*`?fixed`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?accept`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*(\*\*)?Implementation decision[^[:alnum:]]+`?fixed`?' "$verifier" || return 1
 }
 
 verifier_has_terminal_decision() {
   local unit_id="$1"
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
   [[ -s "$verifier" ]] || return 1
-  grep -qiE '^[[:space:]-]*Decision:[[:space:]]*`?(accept|revise|stop)`?' "$verifier" || return 1
-  grep -qiE '^[[:space:]-]*Implementation decision:[[:space:]]*`?(fixed|revise|blocked)`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?(accept|revise|stop)`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*(\*\*)?Implementation decision[^[:alnum:]]+`?(fixed|revise|blocked)`?' "$verifier" || return 1
 }
 
 verifier_is_complete_for_packets() {
@@ -4829,9 +4829,9 @@ write_run_summary() {
     local verify_decision
     if [[ -s "$verify_artifact" ]]; then
       verify_decision="$(
-        grep -oiE 'Decision:[[:space:]]*`?(accept|revise|stop)`?' "$verify_artifact" 2>/dev/null \
+        grep -oiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?(accept|revise|stop)`?' "$verify_artifact" 2>/dev/null \
           | head -1 \
-          | sed -E 's/.*Decision:[[:space:]]*`?([^`[:space:]]+)`?.*/\1/'
+          | sed -E 's/.*`?(accept|revise|stop)`?.*/\1/I'
       )"
       [[ -z "$verify_decision" ]] && verify_decision="unreadable"
     else
@@ -4905,9 +4905,9 @@ verifier_queue_category() {
     printf 'blocked\n'
   elif [[ ! -s "$verifier" ]]; then
     printf 'not_verified\n'
-  elif file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(blocked)' "$verifier"; then
+  elif file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' "$verifier"; then
     printf 'blocked\n'
-  elif file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(revise)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(revise)' "$verifier"; then
+  elif file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(revise)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(revise)' "$verifier"; then
     printf 'needs_targeted_revision\n'
   else
     printf 'needs_review\n'
