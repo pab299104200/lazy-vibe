@@ -1791,7 +1791,13 @@ wait_for_group() {
             fi
           fi
           if ((job_passed)); then
-            printf '[ok] %s\n' "$job_name"
+            local audit_result
+            audit_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$job_log_file" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"
+            [[ -n "$audit_result" ]] || audit_result="completed"
+            case "$audit_result" in
+              PASS|completed) printf '[ok] %s result=%s\n' "$job_name" "$audit_result" ;;
+              *) printf '[complete] %s result=%s\n' "$job_name" "$audit_result" ;;
+            esac
             if [[ "$DRY_RUN" != "1" ]]; then
               printf '%s\n' "$job_name" >> "$CHECKPOINT_FILE"
             fi
