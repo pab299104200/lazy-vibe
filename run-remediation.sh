@@ -721,6 +721,19 @@ verifier_has_only_coordinator_or_evidence_findings() {
   ' "$findings"
 }
 
+unit_evidence_has_failed_status() {
+  local unit_id="$1"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  [[ -d "$unit_dir" ]] || return 1
+  local status_file
+  while IFS= read -r status_file; do
+    if awk 'BEGIN { found = 0 } /^STATUS:[[:space:]]*fail[[:space:]]*$/ { found = 1 } END { exit found ? 0 : 1 }' "$status_file"; then
+      return 0
+    fi
+  done < <(find "$unit_dir" -maxdepth 1 -name '*.status' -print 2>/dev/null)
+  return 1
+}
+
 unit_packets_have_terminal_status() {
   local packets_csv="$1"
   local packet_id packet
@@ -4491,7 +4504,7 @@ run_evidence_command() {
     wrapped_command="./scripts/dev-postgres bootstrap && export MERIDIAN_TEST_ALEMBIC_POSTGRES_URL=\"\${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-postgresql://meridian:meridian@127.0.0.1:5432/meridian_test}\" && $command"
   fi
   if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* ]]; then
-    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; $wrapped_command"
+    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\"; $wrapped_command"
   fi
 
   {
@@ -4519,6 +4532,18 @@ run_evidence_command() {
   } > "$status_file"
   printf '[evidence] %s: failed: %s (see %s)\n' "$unit_id" "$command" "$log_file" >&2
   return 1
+}
+
+evidence_command_label() {
+  local unit_id="$1" command="$2" slug hash
+  slug="$(printf '%s' "$command" | awk '{ print $1 "-" $2 "-" $3 "-" $4 "-" $5 }')"
+  slug="$(printf '%s' "$slug" | tr -cs 'A-Za-z0-9_.-' '-' | sed 's/^-//; s/-$//')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$command" | sha256sum | awk '{ print substr($1, 1, 10) }')"
+  else
+    hash="$(printf '%s' "$command" | cksum | awk '{ print $1 }')"
+  fi
+  printf '%s-%s-%s\n' "$unit_id" "${slug:-evidence}" "$hash"
 }
 
 run_evidence_audit_job() {
@@ -4593,7 +4618,7 @@ collect_launch_evidence_once() {
     while IFS= read -r command; do
       [[ -n "$command" ]] || continue
       ran=1
-      if ! run_evidence_command "$unit_id" "$command" "$(basename "$unit_id")-$(printf '%s' "$command" | awk '{print $1 "-" $2 "-" $3}')"; then
+      if ! run_evidence_command "$unit_id" "$command" "$(evidence_command_label "$unit_id" "$command")"; then
         failed=1
       fi
     done < <(sort -u "$tmp_commands")
@@ -4885,7 +4910,9 @@ verifier_queue_category() {
   findings="$(verifier_findings_tsv_for_unit "$unit_id")"
 
   if verifier_accepts_unit "$unit_id"; then
-    if verifier_finding_type_exists "$findings" "launch_evidence" || verifier_finding_type_exists "$findings" "sandbox_blocked"; then
+    if unit_evidence_has_failed_status "$unit_id"; then
+      printf 'evidence_failed\n'
+    elif verifier_finding_type_exists "$findings" "launch_evidence" || verifier_finding_type_exists "$findings" "sandbox_blocked"; then
       printf 'accepted_evidence_pending\n'
     else
       printf 'accepted\n'
