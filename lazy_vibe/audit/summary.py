@@ -14,8 +14,8 @@ RUNNER_UNAVAILABLE_RE = re.compile(
     r"rate limit|too many requests|temporarily unavailable|service unavailable|"
     r"overloaded|quota exceeded|authentication failed|invalid api key|"
     r"api[\s_-]*(error|unavailable)|claude.*(down|unavailable|overloaded)|"
-    r"anthropic.*(down|unavailable|overloaded)|HTTP\s*(429|503)|"
-    r"(^|[^0-9])(429|503)([^0-9]|$)",
+    r"anthropic.*(down|unavailable|overloaded)|openai.*(down|unavailable|overloaded)|"
+    r"provider.*(down|unavailable|overloaded)|HTTP\s*(429|503).*model",
     re.IGNORECASE,
 )
 
@@ -75,7 +75,7 @@ def job_result(job_id: str, log_path: Path, completed: set[str]) -> str:
         return extract_result(log_path)
     if log_path.exists():
         text = log_path.read_text(encoding="utf-8", errors="replace")
-        if RUNNER_UNAVAILABLE_RE.search(text):
+        if not RESULT_RE.search(text) and RUNNER_UNAVAILABLE_RE.search(text):
             return "RUNNER_UNAVAILABLE"
         return "FAIL"
     return "not-run"
@@ -159,7 +159,7 @@ def log_hint(log_path: Path) -> str:
         ("syntax error", "A shell syntax error is present in the log."),
     ]
     lower = text.lower()
-    if RUNNER_UNAVAILABLE_RE.search(text):
+    if not RESULT_RE.search(text) and RUNNER_UNAVAILABLE_RE.search(text):
         return "The model runner or provider appears unavailable; rerun with another RUNNER or after provider recovery."
     for needle, hint in checks:
         if needle.lower() in lower:
