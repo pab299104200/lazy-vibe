@@ -725,12 +725,18 @@ unit_evidence_has_failed_status() {
   local unit_id="$1"
   local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
   [[ -d "$unit_dir" ]] || return 1
-  local status_file
+  local status_file command status
+  declare -A latest_status_by_command=()
   while IFS= read -r status_file; do
-    if awk 'BEGIN { found = 0 } /^STATUS:[[:space:]]*fail[[:space:]]*$/ { found = 1 } END { exit found ? 0 : 1 }' "$status_file"; then
-      return 0
-    fi
-  done < <(find "$unit_dir" -maxdepth 1 -name '*.status' -print 2>/dev/null)
+    command="$(awk -F ': ' '/^COMMAND: / { print substr($0, index($0, $2)); exit }' "$status_file")"
+    [[ -n "$command" ]] || command="$(awk -F ': ' '/^JOB: / { print "audit:" substr($0, index($0, $2)); exit }' "$status_file")"
+    [[ -n "$command" ]] || command="$status_file"
+    status="$(awk -F ': ' '/^STATUS: / { print $2; exit }' "$status_file")"
+    latest_status_by_command["$command"]="$status"
+  done < <(find "$unit_dir" -maxdepth 1 -name '*.status' -printf '%T@ %p\n' 2>/dev/null | sort -n | awk '{ $1 = ""; sub(/^ /, ""); print }')
+  for status in "${latest_status_by_command[@]}"; do
+    [[ "$status" == "fail" ]] && return 0
+  done
   return 1
 }
 
