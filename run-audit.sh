@@ -462,7 +462,7 @@ audit_install_node_packages() {
     return 1
   }
   printf '[native-tooling] installing node packages into %s: %s\n' "$AUDIT_NODE_TOOLING_DIR" "$*" >> "$log_file"
-  (cd "$AUDIT_NODE_TOOLING_DIR" && npm install --no-save "$@") >> "$log_file" 2>&1 || {
+  (cd "$AUDIT_NODE_TOOLING_DIR" && npm install --save-dev "$@") >> "$log_file" 2>&1 || {
     printf '[native-tooling] node install failed for packages=%s\n' "$*" >> "$log_file"
     return 1
   }
@@ -527,6 +527,12 @@ audit_ensure_playwright_chromium() {
   }
 }
 
+audit_runner_unavailable_log() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 1
+  grep -qiE 'rate limit|too many requests|temporarily unavailable|service unavailable|overloaded|quota exceeded|authentication failed|invalid api key|api[[:space:]_-]*(error|unavailable)|claude.*(down|unavailable|overloaded)|anthropic.*(down|unavailable|overloaded)|HTTP[[:space:]]*(429|503)|(^|[^0-9])(429|503)([^0-9]|$)' "$log_file"
+}
+
 FROM_GROUP=""
 TO_GROUP=""
 ONLY_JOB=""
@@ -583,6 +589,7 @@ JOBS_FILE="${JOBS_FILE:-$SCRIPT_DIR/generic-jobs.tsv}"
 
 mkdir -p "$RUN_DIR"/{prompts,logs,artifacts,01-domain,02-cross-cutting,03-spec-additions}
 CHECKPOINT_FILE="$RUN_DIR/completed-jobs.txt"
+RUNNER_UNAVAILABLE_FILE="$RUN_DIR/runner-unavailable.txt"
 
 group_selected() {
   local group="$1"
@@ -1282,11 +1289,17 @@ run_native_lighthouse() {
     return 0
   fi
 
+  local lighthouse_bin
+  if ! lighthouse_bin="$(audit_resolve_node_bin "lighthouse")"; then
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Could not resolve Lighthouse executable after install check. See $log_file."
+    return 0
+  fi
+
   local url slug
   while IFS= read -r url; do
     [[ -n "$url" ]] || continue
     slug="$(slugify "$url")"
-    "$(audit_resolve_node_bin "lighthouse")" "$url" \
+    "$lighthouse_bin" "$url" \
       --output=json \
       --output-path="$out_dir/$slug.json" \
       --chrome-path="$chrome_path" \
@@ -1672,6 +1685,10 @@ run_prompt() {
     if ((cmd_exit == 0)); then
       break
     fi
+    if audit_runner_unavailable_log "$log_file"; then
+      printf '[runner-unavailable] %s runner=%s log=%s\n' "$job_id" "${RUNNER:-${AUDIT_RUNNER:-unknown}}" "$log_file" | tee "$RUNNER_UNAVAILABLE_FILE" >&2
+      break
+    fi
     attempt=$((attempt + 1))
   done
 
@@ -1772,6 +1789,9 @@ wait_for_group() {
           fi
         else
           printf '[fail] %s (see %s/logs/%s.log)\n' "$job_name" "$RUN_DIR" "$job_name" >&2
+          if audit_runner_unavailable_log "$job_log_file"; then
+            printf '[runner-unavailable] %s runner=%s log=%s\n' "$job_name" "${RUNNER:-${AUDIT_RUNNER:-unknown}}" "$job_log_file" | tee "$RUNNER_UNAVAILABLE_FILE" >&2
+          fi
           failed=1
         fi
 
@@ -1951,6 +1971,10 @@ DDEND
 
 drain_pending_jobs() {
   _DRAIN_STARTED=0
+  if [[ -f "$RUNNER_UNAVAILABLE_FILE" ]]; then
+    printf '[runner-unavailable] not draining dynamic jobs; runner outage already recorded at %s\n' "$RUNNER_UNAVAILABLE_FILE" >&2
+    return 0
+  fi
   local pending_file="$RUN_DIR/artifacts/pending-jobs.tsv"
   [[ -f "$pending_file" ]] || return 0
 
@@ -2162,6 +2186,11 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       continue
     fi
     if ! group_selected "$group"; then
+      continue
+    fi
+
+    if [[ -f "$RUNNER_UNAVAILABLE_FILE" ]]; then
+      printf '[runner-unavailable] skipping job %s; runner outage already recorded at %s\n' "$job_id" "$RUNNER_UNAVAILABLE_FILE" >&2
       continue
     fi
 

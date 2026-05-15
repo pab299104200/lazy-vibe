@@ -10,6 +10,14 @@ from pathlib import Path
 
 PASS_RESULTS = {"PASS", "completed"}
 RESULT_RE = re.compile(r"RESULT:\s*([A-Za-z/]+)")
+RUNNER_UNAVAILABLE_RE = re.compile(
+    r"rate limit|too many requests|temporarily unavailable|service unavailable|"
+    r"overloaded|quota exceeded|authentication failed|invalid api key|"
+    r"api[\s_-]*(error|unavailable)|claude.*(down|unavailable|overloaded)|"
+    r"anthropic.*(down|unavailable|overloaded)|HTTP\s*(429|503)|"
+    r"(^|[^0-9])(429|503)([^0-9]|$)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,9 @@ def job_result(job_id: str, log_path: Path, completed: set[str]) -> str:
     if job_id in completed:
         return extract_result(log_path)
     if log_path.exists():
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        if RUNNER_UNAVAILABLE_RE.search(text):
+            return "RUNNER_UNAVAILABLE"
         return "FAIL"
     return "not-run"
 
@@ -138,14 +149,18 @@ def log_hint(log_path: Path) -> str:
         return "No log was written. The job likely did not start."
     text = log_path.read_text(encoding="utf-8", errors="replace")
     checks = [
+        ("[runner-unavailable]", "The model runner or provider appears unavailable; rerun with another RUNNER or after provider recovery."),
         ("[stall-kill]", "The runner stalled with no log growth and was terminated."),
         ("[missing-output]", "The runner exited but did not produce the required output artifact."),
+        ("Cannot find module", "Native Node audit tooling is incomplete or was pruned before execution."),
         ("TimeoutExpired", "A subprocess timed out."),
         ("timed out", "A subprocess or tool timed out."),
         ("Traceback", "A Python traceback is present in the log."),
         ("syntax error", "A shell syntax error is present in the log."),
     ]
     lower = text.lower()
+    if RUNNER_UNAVAILABLE_RE.search(text):
+        return "The model runner or provider appears unavailable; rerun with another RUNNER or after provider recovery."
     for needle, hint in checks:
         if needle.lower() in lower:
             return hint
