@@ -1614,7 +1614,7 @@ write_ux_browser_gate_summary() {
     elif grep -qiE 'WARN|WARNING|poor|score[[:space:]]*< ?50' "$summary_file"; then
       status="WARN"
     fi
-    reason="$(grep -E 'STATUS:|UNVERIFIED|FAIL|BLOCK|WARN|poor|score' "$summary_file" | head -3 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+    reason="$(grep -E 'STATUS:|UNVERIFIED|FAIL|BLOCK|WARN|poor|score' "$summary_file" 2>/dev/null | head -3 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' || true)"
     [[ -n "$reason" ]] || reason="summary available"
     printf '%s\t%s\t%s\t%s\n' "$job_id" "$lane" "$status" "$reason" >> "$summary_tsv"
   done
@@ -2248,6 +2248,6 @@ while (( _DRAIN_STARTED > 0 )); do
   drain_pending_jobs
 done
 
-write_ux_browser_gate_summary
+  write_ux_browser_gate_summary || true
 write_run_summary
 printf 'Audit launcher complete. Run directory: %s\n' "$RUN_DIR"
