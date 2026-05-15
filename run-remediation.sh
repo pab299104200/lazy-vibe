@@ -103,6 +103,10 @@ Environment:
                               Defaults to 0. Forces serialized implementation/verification waves.
   REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
                               REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to backend,frontend.
+  REMEDIATION_ALLOW_WORKTREE_FALLBACK
+                              1 to fall back to the live REPO_ROOT when git worktree creation fails.
+                              Defaults to 0 for git-root repos because live fallback can make
+                              parallel units overwrite each other.
   REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL
                               1 to allow parallel execution when REPO_ROOT is not a git root.
                               This is unsafe for general use because units edit the same live
@@ -590,6 +594,10 @@ revised_units_from_verifiers() {
     if verifier_has_only_launch_evidence_findings "$unit_id"; then
       continue
     fi
+    if verifier_has_only_coordinator_or_evidence_findings "$unit_id"; then
+      printf '[auto-revise] %s has only packet/process/evidence findings; leaving for coordinator cleanup\n' "$unit_id" >&2
+      continue
+    fi
     if file_matches '(^|[-*[:space:]])Decision:[[:space:]]*`?(stop)|(^|[-*[:space:]])Implementation decision:[[:space:]]*`?(blocked)' "$verifier"; then
       printf '[auto-revise] %s blocked by verifier decision; leaving for manual triage\n' "$unit_id" >&2
       continue
@@ -672,6 +680,28 @@ verifier_has_only_launch_evidence_findings() {
       }
     }
     END { exit count > 0 && blocked != 1 ? 0 : 1 }
+  ' "$findings"
+}
+
+verifier_has_only_coordinator_or_evidence_findings() {
+  local unit_id="$1"
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' '
+    NR > 1 && $1 != "" {
+      count += 1
+      if ($3 != "launch_evidence" &&
+          $3 != "sandbox_blocked" &&
+          $3 != "docs/process" &&
+          $3 != "process" &&
+          $3 != "packet_status" &&
+          $3 != "packet-worklog" &&
+          $3 != "packet_worklog") {
+        code_work = 1
+      }
+    }
+    END { exit count > 0 && code_work != 1 ? 0 : 1 }
   ' "$findings"
 }
 
@@ -3472,7 +3502,28 @@ prepare_unit_workspace() {
 
   if [[ ! -d "$worktree_dir" ]]; then
     mkdir -p "$REMEDIATION_DIR/worktrees"
-    if ! git -C "$REPO_ROOT" worktree add -b "remediation-$unit_id" "$worktree_dir" HEAD >/dev/null 2>&1; then
+    local branch_name="remediation-$unit_id"
+    local -a add_cmd
+    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
+      add_cmd=(git -C "$REPO_ROOT" worktree add "$worktree_dir" "$branch_name")
+    else
+      add_cmd=(git -C "$REPO_ROOT" worktree add -b "$branch_name" "$worktree_dir" HEAD)
+    fi
+    if ! "${add_cmd[@]}" >/dev/null 2>&1; then
+      if [[ "${REMEDIATION_ALLOW_WORKTREE_FALLBACK:-0}" != "1" ]]; then
+        cat >&2 <<EOF
+[workspace] $unit_id: failed to create git worktree under $worktree_dir.
+
+Refusing to fall back to the live repo because this run may execute units in
+parallel. Falling back here can make multiple implementers edit the same files
+and produce misleading verifier results.
+
+Fix the git worktree problem, lower MAX_PARALLEL to 1 and set
+REMEDIATION_ALLOW_WORKTREE_FALLBACK=1 for an intentional live-workspace run, or
+use a non-git split-root workspace with REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL=1.
+EOF
+        return 1
+      fi
       printf '[workspace] %s: failed to create git worktree under %s; using %s directly\n' \
         "$unit_id" "$worktree_dir" "$REPO_ROOT" >&2
       printf '%s\n' "$REPO_ROOT"
@@ -4099,6 +4150,10 @@ execute_workstreams() {
         printf '[revise] skipping launch-evidence-only unit %s\n' "implement-$unit_id"
         continue
       fi
+      if verifier_has_only_coordinator_or_evidence_findings "$unit_id"; then
+        printf '[revise] skipping packet/process/evidence-only unit %s\n' "implement-$unit_id"
+        continue
+      fi
     fi
     if [[ "$REVISE_EXISTING" != "1" ]]; then
       local _already_complete_packets
@@ -4136,7 +4191,12 @@ execute_workstreams() {
       fi
     fi
     local worktree_dir
-    worktree_dir="$(prepare_unit_workspace "$unit_id")"
+    if ! worktree_dir="$(prepare_unit_workspace "$unit_id")"; then
+      if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+        exit 1
+      fi
+      continue
+    fi
 
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
@@ -4496,9 +4556,10 @@ write_run_summary() {
 
     printf '%s\t%s\t%s\t%s\t%s\n' "$unit_id" "$group" "$model_class" "$impl_result" "$verify_decision" >> "$summary"
     total=$((total + 1))
-    case "$impl_result" in
-      fixed|pass|PASS|completed) fixed=$((fixed + 1)) ;;
-      partial|incomplete|INCOMPLETE) partial=$((partial + 1)) ;;
+    case "$impl_result:$verify_decision" in
+      *:accept) fixed=$((fixed + 1)) ;;
+      fixed:*|pass:*|PASS:*|completed:*) fixed=$((fixed + 1)) ;;
+      partial:*|incomplete:*|INCOMPLETE:*) partial=$((partial + 1)) ;;
       *) blocked=$((blocked + 1)) ;;
     esac
   done < <(tail -n +2 "$UNITS_TSV")
@@ -4507,7 +4568,7 @@ write_run_summary() {
   printf 'fixed/completed: %d  partial: %d  failed/not-run: %d\n' "$fixed" "$partial" "$blocked"
   if ((partial > 0 || blocked > 0)); then
     printf 'Non-fixed units:\n'
-    awk -F'\t' 'NR>1 && $4 !~ /^(fixed|pass|PASS|completed)$/ { printf "  %s (%s): impl=%s verify=%s\n", $1, $2, $4, $5 }' "$summary"
+    awk -F'\t' 'NR>1 && $5 != "accept" && $4 !~ /^(fixed|pass|PASS|completed)$/ { printf "  %s (%s): impl=%s verify=%s\n", $1, $2, $4, $5 }' "$summary"
   fi
   printf 'Summary: %s\n' "$summary"
   printf '==========================================\n'
@@ -4550,6 +4611,8 @@ verifier_queue_category() {
 
   if verifier_finding_type_exists "$findings" "contract_conflict"; then
     printf 'contract_conflict\n'
+  elif verifier_has_only_coordinator_or_evidence_findings "$unit_id"; then
+    printf 'coordinator_cleanup\n'
   elif verifier_finding_type_exists "$findings" "test_harness"; then
     printf 'test_harness\n'
   elif verifier_finding_type_exists "$findings" "split_required"; then
