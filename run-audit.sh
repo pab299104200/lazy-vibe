@@ -2448,7 +2448,7 @@ audit_should_skip_checkpointed_job() {
   local job_id="$1"
   grep -qxF "$job_id" "$CHECKPOINT_FILE" 2>/dev/null || return 1
 
-  if [[ -n "$ONLY_JOB" && "$job_id" == "$ONLY_JOB" ]]; then
+  if [[ -n "$ONLY_JOB" || -n "$FROM_GROUP" || -n "$TO_GROUP" ]]; then
     local prior_result
     prior_result="$(audit_summary_result_for_job "$job_id" 2>/dev/null || true)"
     case "$prior_result" in
