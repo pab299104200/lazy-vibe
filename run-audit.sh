@@ -424,6 +424,9 @@ join_url() {
     return 1
   fi
   base="${base%/}"
+  if [[ ! "$base" =~ ^https?:// ]]; then
+    base="https://$base"
+  fi
   if [[ "$path" == /* ]]; then
     printf '%s%s\n' "$base" "$path"
   else
