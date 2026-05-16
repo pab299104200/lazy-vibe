@@ -2190,15 +2190,16 @@ DDEND
 
 drain_pending_jobs() {
   _DRAIN_STARTED=0
+  local pending_file="$RUN_DIR/artifacts/pending-jobs.tsv"
+  local queued_file="$RUN_DIR/artifacts/queued-deep-dives.txt"
+  local drained_file="$RUN_DIR/artifacts/drained-deep-dives.txt"
+
   if [[ -f "$RUNNER_UNAVAILABLE_FILE" ]]; then
     printf '[runner-unavailable] not draining dynamic jobs; runner outage already recorded at %s\n' "$RUNNER_UNAVAILABLE_FILE" >&2
     return 0
   fi
-  local pending_file="$RUN_DIR/artifacts/pending-jobs.tsv"
   [[ -f "$pending_file" ]] || return 0
 
-  local queued_file="$RUN_DIR/artifacts/queued-deep-dives.txt"
-  local drained_file="$RUN_DIR/artifacts/drained-deep-dives.txt"
   touch "$queued_file"
   touch "$drained_file"
 
