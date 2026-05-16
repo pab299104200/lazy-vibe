@@ -889,10 +889,17 @@ command_is_forbidden() {
   return 1
 }
 
+shell_fragment_is_valid() {
+  local fragment="$1"
+  [[ -n "$fragment" ]] || return 1
+  bash -n < <(printf '%s\n' "$fragment") >/dev/null 2>&1
+}
+
 evidence_command_is_allowed() {
   local command="$1"
   [[ -n "$command" ]] || return 1
   command_is_forbidden "$command" && return 1
+  shell_fragment_is_valid "$command" || return 1
   case "$command" in
     "cd backend && python3 -m pytest "*|\
     "cd backend && python -m pytest "*|\
@@ -4537,7 +4544,7 @@ collect_evidence_units_from_findings() {
 run_evidence_command() {
   local unit_id="$1" command="$2" label="$3"
   local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
-  local safe_label log_file status_file wrapped_command
+  local safe_label log_file status_file run_script wrapped_command
   safe_label="$(printf '%s' "$label" | tr -cs 'A-Za-z0-9_.-' '-' | sed 's/^-//; s/-$//')"
   [[ -n "$safe_label" ]] || safe_label="evidence"
   mkdir -p "$unit_dir"
@@ -4551,13 +4558,32 @@ run_evidence_command() {
     wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\"; if [[ -n \"\${E2E_BASE_URL:-}\" && \"\$E2E_BASE_URL\" != http://* && \"\$E2E_BASE_URL\" != https://* ]]; then export E2E_BASE_URL=\"https://\$E2E_BASE_URL\"; fi; if [[ -z \"\${E2E_API_BASE:-}\" && \"\$E2E_BASE_URL\" =~ ^https?://([^/:]+)(:[0-9]+)?/?$ && \"\${BASH_REMATCH[1]}\" != localhost && \"\${BASH_REMATCH[1]}\" != 127.* ]]; then export E2E_API_BASE=\"https://api-\${BASH_REMATCH[1]}\"; fi; $wrapped_command"
   fi
 
+  run_script="$(mktemp "$unit_dir/${safe_label}.XXXXXX.sh")"
+  chmod 700 "$run_script"
+  {
+    printf 'set -o pipefail\n'
+    printf '%s\n' "$wrapped_command"
+  } > "$run_script"
+
   {
     printf 'COMMAND: %s\n' "$command"
     printf 'WRAPPED_COMMAND: %s\n' "$wrapped_command"
+    printf 'RUN_SCRIPT: %s\n' "$run_script"
     printf 'STARTED_AT: %s\n\n' "$(date -Is)"
   } > "$log_file"
 
-  if (cd "$REPO_ROOT" && bash -lc "$wrapped_command") >> "$log_file" 2>&1; then
+  if ! bash -n "$run_script" >> "$log_file" 2>&1; then
+    {
+      printf 'STATUS: fail\n'
+      printf 'COMMAND: %s\n' "$command"
+      printf 'LOG: %s\n' "$log_file"
+      printf 'FINISHED_AT: %s\n' "$(date -Is)"
+    } > "$status_file"
+    printf '[evidence] %s: failed shell validation: %s (see %s)\n' "$unit_id" "$command" "$log_file" >&2
+    return 1
+  fi
+
+  if (cd "$REPO_ROOT" && bash "$run_script") >> "$log_file" 2>&1; then
     {
       printf 'STATUS: pass\n'
       printf 'COMMAND: %s\n' "$command"
