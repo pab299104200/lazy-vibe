@@ -3341,7 +3341,18 @@ run_command_with_heartbeat() {
 validate_prompt_outputs() {
   local workstream="$1" class="$2"
   local worktree_dir="${3:-$REPO_ROOT}"
-  if [[ "$workstream" == implement-* ]]; then
+  if [[ "$workstream" == plan-* ]]; then
+    local unit_id="${workstream#plan-}"
+    local design="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+    if [[ ! -s "$design" ]]; then
+      printf '[postcheck] missing planner design artifact: %s\n' "$design" >&2
+      return 1
+    fi
+    if ! final_result_is_pass "$design"; then
+      printf '[postcheck] planner design artifact missing RESULT: PASS: %s\n' "$design" >&2
+      return 1
+    fi
+  elif [[ "$workstream" == implement-* ]]; then
     local unit_id="${workstream#implement-}"
     copy_unit_artifacts_from_worktree "$unit_id" "$worktree_dir" 2>/dev/null || true
     recover_implementation_summary_from_log "$unit_id" "$REMEDIATION_DIR/logs/$workstream.log" 2>/dev/null || true
@@ -3960,6 +3971,10 @@ run_prompt() {
     fi
 
     if ((status == 0)); then
+      validate_prompt_outputs "$workstream" "$class" "$worktree_dir" || status="$?"
+    fi
+
+    if ((status == 0)); then
       break
     fi
     attempt=$((attempt + 1))
@@ -3967,9 +3982,8 @@ run_prompt() {
 
   # validate_prompt_outputs and the integrity check run once after the final
   # attempt — retries only fire on runner exit-code failures, not content failures.
-  if [[ "$status" == "0" ]]; then
-    validate_prompt_outputs "$workstream" "$class" "$worktree_dir" || status="$?"
-  fi
+  # validate_prompt_outputs now runs inside the retry loop so missing required
+  # artifacts from transient runner disconnects are retried like command errors.
 
   # Coordinator, cataloger, verifier, and reviewer roles must not modify product
   # source code. Compare against the pre-run diff snapshot so verifier/reviewer
