@@ -942,6 +942,23 @@ _run_gemini() {
   (cd "$REPO_ROOT" && "${cmd[@]}" -p "$(cat "$prompt_file")") >"$log_file" 2>&1
 }
 
+audit_progress_enabled() {
+  [[ -t 1 && "${AUDIT_PROGRESS:-auto}" != "0" && "${TERM:-}" != "dumb" ]]
+}
+
+audit_clear_progress_line() {
+  if audit_progress_enabled; then
+    printf '\r\033[K'
+  fi
+}
+
+audit_write_progress_line() {
+  local content="$1"
+  if audit_progress_enabled; then
+    printf '\r\033[K%s' "$content"
+  fi
+}
+
 run_with_spinner() {
   local job_id="$1" log_file="$2"
   shift 2
@@ -959,6 +976,8 @@ run_with_spinner() {
     (
       local spin_chars='-\|/'
       local spin_idx=0
+      local last_status_ts=0
+      local status_interval="${AUDIT_STATUS_SECONDS:-30}"
       local prev_size=-1
       local last_change_ts="$start_ts"
       local stall_threshold=$(( stall_intervals * heartbeat_interval ))
@@ -968,7 +987,12 @@ run_with_spinner() {
         elapsed=$((now - start_ts))
         local spin_char="${spin_chars:$((spin_idx % 4)):1}"
         spin_idx=$((spin_idx + 1))
-        printf '\r[%s] %s (%ds)  ' "$spin_char" "$job_id" "$elapsed"
+        if audit_progress_enabled; then
+          audit_write_progress_line "[$spin_char] $job_id (${elapsed}s)"
+        elif ((now - last_status_ts >= status_interval)); then
+          printf '[running] %s (%ds)\n' "$job_id" "$elapsed"
+          last_status_ts="$now"
+        fi
         if [[ -f "$log_file" ]]; then
           size="$(wc -c <"$log_file" | tr -d ' ')"
         else
@@ -980,7 +1004,8 @@ run_with_spinner() {
         elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
           local stall_secs=$((now - last_change_ts))
           if [[ "$stall_secs" -ge "$stall_threshold" ]]; then
-            printf '\r[!] %s: stalled after %ds — terminating\033[K\n' "$job_id" "$elapsed" >&2
+            audit_clear_progress_line
+            printf '[!] %s: stalled after %ds - terminating\n' "$job_id" "$elapsed" >&2
             printf '[stall-kill] log stalled after %ds — terminating\n' "$elapsed" >>"$log_file"
             kill "$cmd_pid" 2>/dev/null || true
             break
@@ -994,7 +1019,9 @@ run_with_spinner() {
     set -e
     kill "$heartbeat_pid" >/dev/null 2>&1 || true
     wait "$heartbeat_pid" >/dev/null 2>&1 || true
-    printf '\n'
+    if audit_progress_enabled; then
+      audit_clear_progress_line
+    fi
   else
     wait "$cmd_pid"
     local status="$?"
@@ -1759,6 +1786,8 @@ wait_for_group() {
 
   local spin_chars='-\|/'
   local spin_idx=0
+  local last_status_ts=0
+  local status_interval="${AUDIT_STATUS_SECONDS:-30}"
   local -a remaining=("${!pids_ref[@]}")
 
   while [[ ${#remaining[@]} -gt 0 ]]; do
@@ -1773,9 +1802,7 @@ wait_for_group() {
       if ! kill -0 "${pids_ref[$idx]}" 2>/dev/null; then
         wait "${pids_ref[$idx]}"
         local status=$?
-        local term_width
-        term_width=$(tput cols 2>/dev/null || echo 120)
-        printf '\r%-*s\r' $(( term_width - 1 )) ''
+        audit_clear_progress_line
 
         local job_name="${names_ref[$idx]}"
         local job_log_file="${job_log[$idx]}"
@@ -1828,10 +1855,8 @@ wait_for_group() {
           local stall_secs=$(( now2 - job_last_change[idx] ))
           if [[ "$stall_secs" -ge "$stall_threshold" ]]; then
             local elapsed=$(( now2 - job_start[idx] ))
-            local term_width
-            term_width=$(tput cols 2>/dev/null || echo 120)
-            printf '\r%-*s\r' $(( term_width - 1 )) ''
-            printf '[!] %s: stalled after %ds — terminating\n' "${names_ref[$idx]}" "$elapsed" >&2
+            audit_clear_progress_line
+            printf '[!] %s: stalled after %ds - terminating\n' "${names_ref[$idx]}" "$elapsed" >&2
             printf '[stall-kill] stalled after %ds — terminating\n' "$elapsed" >> "${job_log[$idx]}"
             kill "${pids_ref[$idx]}" 2>/dev/null || true
           fi
@@ -1852,19 +1877,17 @@ wait_for_group() {
       for part in "${parts[@]:1}"; do
         line+=" | $part"
       done
-      local term_width
-      term_width=$(tput cols 2>/dev/null || echo 120)
       local content="[$spin_char] $line"
-      local padded
-      printf -v padded '%-*s' $(( term_width - 1 )) "$content"
-      padded="${padded:0:$(( term_width - 1 ))}"
-      printf '\r%s' "$padded"
+      if audit_progress_enabled; then
+        audit_write_progress_line "$content"
+      elif ((now2 - last_status_ts >= status_interval)); then
+        printf '[running] %s\n' "$line"
+        last_status_ts="$now2"
+      fi
     fi
   done
 
-  local term_width
-  term_width=$(tput cols 2>/dev/null || echo 120)
-  printf '\r%-*s\r' $(( term_width - 1 )) ''
+  audit_clear_progress_line
   return "$failed"
 }
 
