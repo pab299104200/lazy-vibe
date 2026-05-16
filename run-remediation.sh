@@ -4015,9 +4015,10 @@ run_prompt() {
   # a terminal implementation result, the work completed — checkpoint it anyway.
   # This handles rate-limit disconnects and stall-kills where the agent finished
   # writing output before the connection was lost.
-  if [[ "$status" != "0" ]] && [[ "$class" =~ ^(high-risk|standard)$ ]]; then
+  if [[ "$status" != "0" ]] && [[ "$workstream" == implement-* ]]; then
     local unit_id="${workstream#implement-}"
     local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+    recover_implementation_summary_from_log "$unit_id" "$log_file" 2>/dev/null || true
     if implementation_summary_is_terminal "$summary"; then
       printf '\n[auto-recover] %s: non-zero exit but terminal IMPLEMENTATION_RESULT summary exists — treating as success\n' \
         "$workstream" >>"$log_file"
