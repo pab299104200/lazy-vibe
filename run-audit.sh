@@ -32,6 +32,7 @@ AUDIT_TOOLING_VENV="${AUDIT_TOOLING_VENV:-$RUN_DIR/.audit-tooling/venv}"
 AUDIT_NODE_TOOLING_AUTO_INSTALL="${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}"
 AUDIT_NODE_TOOLING_DIR="${AUDIT_NODE_TOOLING_DIR:-$RUN_DIR/.audit-tooling/node}"
 AUDIT_BASE_URL="${AUDIT_BASE_URL:-}"
+AUDIT_BROWSER_BASE_URL="${AUDIT_BROWSER_BASE_URL:-}"
 ACCESSIBILITY_PATHS="${ACCESSIBILITY_PATHS:-/,/login}"
 LIGHTHOUSE_PATHS="${LIGHTHOUSE_PATHS:-/,/login}"
 LOAD_TEST_PATHS="${LOAD_TEST_PATHS:-/}"
@@ -107,6 +108,8 @@ Security scanning (runtime jobs):
                        Tooling directory used for native Lighthouse/accessibility dependencies.
                        Defaults to RUN_DIR/.audit-tooling/node.
   AUDIT_BASE_URL       Optional explicit base URL for native runtime/simulation/load probes.
+  AUDIT_BROWSER_BASE_URL
+                       Optional explicit frontend base URL for native E2E, accessibility, and Lighthouse probes.
   ACCESSIBILITY_PATHS  Comma-separated paths or absolute URLs for native axe scans. Defaults to /,/login.
   LIGHTHOUSE_PATHS     Comma-separated paths or absolute URLs for native Lighthouse runs. Defaults to /,/login.
   LOAD_TEST_PATHS      Comma-separated paths or absolute URLs targeted by the native load-test runner.
@@ -368,6 +371,43 @@ detect_base_url() {
   value="$(extract_first_url "$value" | head -1)"
   [[ -n "$value" ]] || return 1
   printf '%s\n' "$value"
+}
+
+detect_browser_base_url() {
+  if [[ -n "${AUDIT_BROWSER_BASE_URL:-}" ]]; then
+    printf '%s\n' "$AUDIT_BROWSER_BASE_URL"
+    return 0
+  fi
+  if [[ -n "${E2E_BASE_URL:-}" ]]; then
+    printf '%s\n' "$E2E_BASE_URL"
+    return 0
+  fi
+
+  local key value
+  for key in E2E_BASE_URL WEB_URL FRONTEND_URL UI_URL APP_URL APPLICATION_URL STAGING_URL DEV_URL BASE_URL url; do
+    value="$(audit_cred_value "$key" 2>/dev/null || true)"
+    value="$(trim_inline_value "$value")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+
+  value="$(profile_runtime_value "Dev/staging URL and credential source, if any")"
+  value="$(printf '%s\n' "$value" | awk '
+    /UI|frontend|Front-end|front-end/ {
+      if (match($0, /https?:\/\/[^[:space:]`")]+/)) {
+        print substr($0, RSTART, RLENGTH)
+        exit
+      }
+    }
+  ')"
+  if [[ -n "$value" ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+
+  detect_base_url
 }
 
 csv_to_unique_lines() {
@@ -1213,9 +1253,9 @@ run_native_accessibility() {
   mkdir -p "$out_dir"
 
   local base_url
-  base_url="$(detect_base_url 2>/dev/null || true)"
+  base_url="$(detect_browser_base_url 2>/dev/null || true)"
   if [[ -z "$base_url" ]]; then
-    write_unverified_summary "$summary_md" "Accessibility Summary" "Base URL unavailable. Set AUDIT_BASE_URL or provide docs/ux/.creds / product-profile runtime URL."
+    write_unverified_summary "$summary_md" "Accessibility Summary" "Browser base URL unavailable. Set AUDIT_BROWSER_BASE_URL, E2E_BASE_URL, or provide docs/ux/.creds / product-profile frontend URL."
     return 0
   fi
 
@@ -1338,9 +1378,9 @@ run_native_lighthouse() {
   mkdir -p "$out_dir"
 
   local base_url
-  base_url="$(detect_base_url 2>/dev/null || true)"
+  base_url="$(detect_browser_base_url 2>/dev/null || true)"
   if [[ -z "$base_url" ]]; then
-    write_unverified_summary "$summary_md" "Lighthouse Summary" "Base URL unavailable. Set AUDIT_BASE_URL or provide docs/ux/.creds / product-profile runtime URL."
+    write_unverified_summary "$summary_md" "Lighthouse Summary" "Browser base URL unavailable. Set AUDIT_BROWSER_BASE_URL, E2E_BASE_URL, or provide docs/ux/.creds / product-profile frontend URL."
     return 0
   fi
 
@@ -1500,7 +1540,7 @@ run_native_e2e_browser_proof() {
   fi
 
   local base_url
-  base_url="$(detect_base_url 2>/dev/null || true)"
+  base_url="$(detect_browser_base_url 2>/dev/null || true)"
   local creds_file
   creds_file="$(audit_creds_file 2>/dev/null || true)"
 
@@ -1816,6 +1856,8 @@ write_ux_browser_gate_summary() {
     lane="$(basename "$(dirname "$summary_file")")"
     status="PASS"
     if grep -qi 'STATUS:[[:space:]]*UNVERIFIED' "$summary_file"; then
+      status="UNVERIFIED"
+    elif grep -qiE '\|[[:space:]]*unverified[[:space:]]*\|' "$summary_file"; then
       status="UNVERIFIED"
     elif grep -qiE 'STATUS:[[:space:]]*(FAIL|BLOCK|BLOCKER)|\|[[:space:]]*(fail|poor)[[:space:]]*\|' "$summary_file"; then
       status="FAIL"
