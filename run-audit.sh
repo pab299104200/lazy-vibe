@@ -943,7 +943,7 @@ _run_gemini() {
 }
 
 audit_progress_enabled() {
-  [[ -t 1 && "${AUDIT_PROGRESS:-auto}" != "0" && "${TERM:-}" != "dumb" ]]
+  [[ -t 1 && "${AUDIT_PROGRESS:-0}" == "1" && "${TERM:-}" != "dumb" ]]
 }
 
 audit_clear_progress_line() {
