@@ -2219,7 +2219,8 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
 {
   read -r _header
   while IFS=$'\t' read -r group job_id kind title output ref; do
-    [[ -z "${group:-}" ]] && continue
+    [[ -z "${group//[[:space:]]/}" ]] && continue
+    [[ -z "${job_id//[[:space:]]/}" ]] && continue
     if [[ -n "$ONLY_JOB" && "$job_id" != "$ONLY_JOB" ]]; then
       continue
     fi
@@ -2228,8 +2229,8 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
     fi
 
     if [[ -f "$RUNNER_UNAVAILABLE_FILE" ]]; then
-      printf '[runner-unavailable] skipping job %s; runner outage already recorded at %s\n' "$job_id" "$RUNNER_UNAVAILABLE_FILE" >&2
-      continue
+      printf '[runner-unavailable] stopping before job %s; runner outage already recorded at %s\n' "$job_id" "$RUNNER_UNAVAILABLE_FILE" >&2
+      break
     fi
 
     if [[ -z "$current_group" ]]; then
