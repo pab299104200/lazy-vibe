@@ -2437,6 +2437,40 @@ write_run_summary() {
     --audit-runner "${AUDIT_RUNNER:-}"
 }
 
+audit_summary_result_for_job() {
+  local job_id="$1"
+  local summary_file="$RUN_DIR/00-run-summary.tsv"
+  [[ -f "$summary_file" ]] || return 1
+  awk -F'\t' -v job="$job_id" 'NR > 1 && $1 == job { print $3; found = 1; exit } END { exit found ? 0 : 1 }' "$summary_file"
+}
+
+audit_should_skip_checkpointed_job() {
+  local job_id="$1"
+  grep -qxF "$job_id" "$CHECKPOINT_FILE" 2>/dev/null || return 1
+
+  if [[ -n "$ONLY_JOB" && "$job_id" == "$ONLY_JOB" ]]; then
+    local prior_result
+    prior_result="$(audit_summary_result_for_job "$job_id" 2>/dev/null || true)"
+    case "$prior_result" in
+      PASS|completed)
+        printf '[resume] skipping completed job %s\n' "$job_id"
+        return 0
+        ;;
+      "")
+        printf '[resume] re-running %s; checkpoint exists but no summary result was found\n' "$job_id"
+        return 1
+        ;;
+      *)
+        printf '[resume] re-running %s; checkpoint exists but prior result=%s\n' "$job_id" "$prior_result"
+        return 1
+        ;;
+    esac
+  fi
+
+  printf '[resume] skipping completed job %s\n' "$job_id"
+  return 0
+}
+
 printf 'Audit run directory: %s\n' "$RUN_DIR"
 printf 'Job manifest: %s\n' "$JOBS_FILE"
 
@@ -2465,8 +2499,7 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       current_group="$group"
     fi
 
-    if grep -qxF "$job_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-      printf '[resume] skipping completed job %s\n' "$job_id"
+    if audit_should_skip_checkpointed_job "$job_id"; then
       continue
     fi
 
