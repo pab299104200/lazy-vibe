@@ -18,6 +18,9 @@ VERBOSE="${VERBOSE:-0}"
 AUDIT_MAX_RETRIES="${AUDIT_MAX_RETRIES:-2}"
 DYNAMIC_DEPTH_CAP="${DYNAMIC_DEPTH_CAP:-2}"
 ACCESSIBILITY_SCAN="${ACCESSIBILITY_SCAN:-1}"
+E2E_BROWSER_PROOF="${E2E_BROWSER_PROOF:-1}"
+E2E_BROWSER_COMMAND="${E2E_BROWSER_COMMAND:-}"
+E2E_BROWSER_TIMEOUT_SECONDS="${E2E_BROWSER_TIMEOUT_SECONDS:-1200}"
 EXTERNAL_SERVICES_TEST="${EXTERNAL_SERVICES_TEST:-1}"
 LOAD_TEST_ENABLED="${LOAD_TEST_ENABLED:-0}"
 LOAD_TEST_TARGET="${LOAD_TEST_TARGET:-}"
@@ -63,8 +66,18 @@ Environment:
                        cap are logged in pending-jobs.tsv as findings but not run.
 
 Accessibility scanning (RUNNER=claude|codex|gemini, runtime/simulation jobs):
-  ACCESSIBILITY_SCAN   1 to run axe-core accessibility scans during Playwright E2E jobs. Defaults to 1.
+  ACCESSIBILITY_SCAN   1 to run axe-core accessibility scans during runtime/simulation jobs. Defaults to 1.
                        Results written to RUN_DIR/artifacts/<job_id>/accessibility/. Set to 0 to disable.
+
+E2E browser proof (frontend runtime jobs):
+  E2E_BROWSER_PROOF    1 to run the repo's frontend browser proof during the frontend runtime job. Defaults to 1.
+                       The harness selects package scripts in this order:
+                       test:browser-evidence, verify:dev:browser, test:playwright:ci-smoke,
+                       test:e2e, test:playwright. Results are written to
+                       RUN_DIR/artifacts/<job_id>/e2e/. Set to 0 to disable.
+  E2E_BROWSER_COMMAND  Optional explicit shell command to run from frontend/. Overrides script selection.
+  E2E_BROWSER_TIMEOUT_SECONDS
+                       Timeout for native E2E browser proof. Defaults to 1200.
 
 External services testing (runtime jobs):
   EXTERNAL_SERVICES_TEST  1 to probe external service connectivity during runtime verification. Defaults to 1.
@@ -306,6 +319,35 @@ audit_cred_value() {
   local creds
   creds="$(audit_creds_file 2>/dev/null)" || return 1
   awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, "", $0); print $0; exit }' "$creds"
+}
+
+frontend_package_script_exists() {
+  local package_json="$1" script_name="$2"
+  command_exists node || return 1
+  node -e '
+const fs = require("fs");
+const packageJson = process.argv[1];
+const scriptName = process.argv[2];
+const pkg = JSON.parse(fs.readFileSync(packageJson, "utf8"));
+process.exit(pkg.scripts && pkg.scripts[scriptName] ? 0 : 1);
+' "$package_json" "$script_name" >/dev/null 2>&1
+}
+
+detect_frontend_e2e_script() {
+  local package_json="$1"
+  local script_name
+  for script_name in \
+    "test:browser-evidence" \
+    "verify:dev:browser" \
+    "test:playwright:ci-smoke" \
+    "test:e2e" \
+    "test:playwright"; do
+    if frontend_package_script_exists "$package_json" "$script_name"; then
+      printf '%s\n' "$script_name"
+      return 0
+    fi
+  done
+  return 1
 }
 
 detect_base_url() {
@@ -740,6 +782,24 @@ Required evidence inputs:
 
 Read those artifacts directly. If the summary reports \`STATUS: UNVERIFIED\`, carry that forward as missing evidence and cite the exact reason from the native summary instead of inventing a browser pass.
 ACCESSIBILITY
+  fi
+
+  # ── E2E browser proof (frontend runtime jobs) ───────────────────────────
+  if [[ "$kind" == "runtime" && "${E2E_BROWSER_PROOF:-1}" == "1" ]]; then
+    cat >> "$prompt_file" <<E2EPROOF
+
+## E2E Browser Proof
+
+For frontend runtime jobs, the harness has already attempted the repo-native Playwright/browser proof.
+
+Required evidence inputs:
+
+- Native summary: \`$RUN_DIR/artifacts/$job_id/e2e/summary.md\`
+- Raw log: \`$RUN_DIR/artifacts/$job_id/e2e/playwright.log\`
+- Optional Playwright report: \`$RUN_DIR/artifacts/$job_id/e2e/playwright-report/\`
+
+If the summary reports \`STATUS: PASS\`, treat that as the deterministic browser proof for the job. If it reports \`STATUS: FAIL\` or \`STATUS: UNVERIFIED\`, carry the failure forward with the exact summary reason instead of claiming the E2E lane was not run.
+E2EPROOF
   fi
 
   # ── Lighthouse / Core Web Vitals (runtime and simulation jobs) ───────────
@@ -1398,6 +1458,124 @@ PY
   return 0
 }
 
+audit_should_run_native_e2e() {
+  local job_id="$1" kind="$2"
+  [[ "${E2E_BROWSER_PROOF:-1}" == "1" ]] || return 1
+  [[ "$kind" == "runtime" ]] || return 1
+  case "$job_id" in
+    *runtime-frontend*|14b-*|*frontend*|*browser*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_native_e2e_browser_proof() {
+  local job_id="$1"
+  local log_file="$RUN_DIR/logs/$job_id.log"
+  local out_dir="$RUN_DIR/artifacts/$job_id/e2e"
+  local summary_md="$out_dir/summary.md"
+  local frontend_dir="$REPO_ROOT/frontend"
+  local package_json="$frontend_dir/package.json"
+  mkdir -p "$out_dir"
+
+  if [[ ! -f "$package_json" ]]; then
+    write_unverified_summary "$summary_md" "E2E Browser Proof Summary" "No frontend/package.json exists, so the harness could not discover a repo-native browser proof command."
+    return 0
+  fi
+  if ! command_exists npm; then
+    write_unverified_summary "$summary_md" "E2E Browser Proof Summary" "npm is unavailable, so the harness could not run frontend browser proof."
+    return 0
+  fi
+  if ! command_exists timeout; then
+    write_unverified_summary "$summary_md" "E2E Browser Proof Summary" "timeout is unavailable, so the harness could not run bounded frontend browser proof."
+    return 0
+  fi
+
+  local script_name=""
+  if [[ -z "${E2E_BROWSER_COMMAND:-}" ]]; then
+    script_name="$(detect_frontend_e2e_script "$package_json" 2>/dev/null || true)"
+    if [[ -z "$script_name" ]]; then
+      write_unverified_summary "$summary_md" "E2E Browser Proof Summary" "No repo-native browser proof script was found in frontend/package.json."
+      return 0
+    fi
+  fi
+
+  local base_url
+  base_url="$(detect_base_url 2>/dev/null || true)"
+  local creds_file
+  creds_file="$(audit_creds_file 2>/dev/null || true)"
+
+  local started ended elapsed exit_code
+  local run_marker="$out_dir/run-start.marker"
+  : > "$run_marker"
+  started="$(date +%s)"
+  exit_code=0
+  (
+    cd "$frontend_dir"
+    if [[ -n "$creds_file" ]]; then
+      set +u
+      set -a
+      # shellcheck disable=SC1090
+      . "$creds_file"
+      set +a
+      set -u
+    fi
+    export E2E_BASE_URL="${E2E_BASE_URL:-${AUDIT_BASE_URL:-${base_url:-${url:-${APP_URL:-${BASE_URL:-${APPLICATION_URL:-${STAGING_URL:-${DEV_URL:-}}}}}}}}}"
+    export E2E_API_BASE="${E2E_API_BASE:-${api_url:-${API_URL:-${BACKEND_URL:-${VITE_API_URL:-}}}}}"
+    export E2E_EMAIL="${E2E_EMAIL:-${email:-${USERNAME:-${PORTAL_EMAIL:-}}}}"
+    export E2E_PASSWORD="${E2E_PASSWORD:-${password:-${PASSWORD:-${PORTAL_PASSWORD:-}}}}"
+    export E2E_SKIP_WEBSERVER="${E2E_SKIP_WEBSERVER:-1}"
+    export AUDIT_ARTIFACT_DIR="$out_dir"
+    export PLAYWRIGHT_HTML_REPORT="${PLAYWRIGHT_HTML_REPORT:-$out_dir/playwright-report}"
+
+    if [[ -n "${E2E_BROWSER_COMMAND:-}" ]]; then
+      printf '[native-e2e] command: %s\n' "$E2E_BROWSER_COMMAND"
+      timeout "${E2E_BROWSER_TIMEOUT_SECONDS:-1200}" bash -lc "$E2E_BROWSER_COMMAND"
+    else
+      printf '[native-e2e] command: npm run %s\n' "$script_name"
+      timeout "${E2E_BROWSER_TIMEOUT_SECONDS:-1200}" npm run "$script_name"
+    fi
+  ) > "$out_dir/playwright.log" 2>&1 || exit_code=$?
+  ended="$(date +%s)"
+  elapsed=$((ended - started))
+
+  if [[ -d "$frontend_dir/test-results" ]] && find "$frontend_dir/test-results" -type f -newer "$run_marker" | read -r; then
+    rm -rf "$out_dir/test-results"
+    cp -R "$frontend_dir/test-results" "$out_dir/test-results" 2>/dev/null || true
+  fi
+
+  local status reason command_label
+  command_label="${E2E_BROWSER_COMMAND:-npm run $script_name}"
+  if ((exit_code == 0)); then
+    status="PASS"
+    reason="Repo-native browser proof completed successfully."
+  elif ((exit_code == 124)); then
+    status="FAIL"
+    reason="Repo-native browser proof timed out after ${E2E_BROWSER_TIMEOUT_SECONDS:-1200}s."
+  else
+    status="FAIL"
+    reason="Repo-native browser proof exited with status $exit_code."
+  fi
+
+  {
+    printf '# E2E Browser Proof Summary\n\n'
+    printf 'STATUS: %s\n\n' "$status"
+    printf -- '- Command: `%s`\n' "$command_label"
+    printf -- '- Working directory: `%s`\n' "$frontend_dir"
+    printf -- '- Duration seconds: `%s`\n' "$elapsed"
+    printf -- '- Exit code: `%s`\n' "$exit_code"
+    printf -- '- Raw log: `%s`\n' "$out_dir/playwright.log"
+    if [[ -d "$out_dir/playwright-report" ]]; then
+      printf -- '- Playwright report: `%s`\n' "$out_dir/playwright-report"
+    fi
+    if [[ -d "$out_dir/test-results" ]]; then
+      printf -- '- Test results: `%s`\n' "$out_dir/test-results"
+    fi
+    printf '\n%s\n' "$reason"
+  } > "$summary_md"
+  printf '[native-e2e] %s status=%s exit=%s log=%s\n' "$job_id" "$status" "$exit_code" "$out_dir/playwright.log" >> "$log_file"
+  return 0
+}
+
 run_native_external_services() {
   local job_id="$1"
   local log_file="$RUN_DIR/logs/$job_id.log"
@@ -1609,6 +1787,9 @@ run_native_runtime_checks() {
   if [[ "$kind" =~ ^(runtime|simulation)$ && "${ACCESSIBILITY_SCAN:-1}" == "1" ]]; then
     run_native_accessibility "$job_id"
   fi
+  if audit_should_run_native_e2e "$job_id" "$kind"; then
+    run_native_e2e_browser_proof "$job_id"
+  fi
   if [[ "$kind" =~ ^(runtime|simulation)$ && "${LIGHTHOUSE_SCAN:-1}" == "1" ]]; then
     run_native_lighthouse "$job_id"
   fi
@@ -1629,7 +1810,7 @@ write_ux_browser_gate_summary() {
 
   local summary_file job_id lane status reason
   shopt -s nullglob
-  for summary_file in "$RUN_DIR"/artifacts/*/accessibility/summary.md "$RUN_DIR"/artifacts/*/lighthouse/summary.md; do
+  for summary_file in "$RUN_DIR"/artifacts/*/accessibility/summary.md "$RUN_DIR"/artifacts/*/e2e/summary.md "$RUN_DIR"/artifacts/*/lighthouse/summary.md; do
     [[ -s "$summary_file" ]] || continue
     job_id="$(basename "$(dirname "$(dirname "$summary_file")")")"
     lane="$(basename "$(dirname "$summary_file")")"
@@ -1649,11 +1830,11 @@ write_ux_browser_gate_summary() {
 
   {
     printf '# UX Browser Gate Summary\n\n'
-    printf 'This file is generated by the audit harness from native accessibility and Lighthouse artifacts. Final release decisions must treat this as first-class evidence.\n\n'
+    printf 'This file is generated by the audit harness from native accessibility, E2E browser proof, and Lighthouse artifacts. Final release decisions must treat this as first-class evidence.\n\n'
     printf '| Job | Lane | Status | Summary |\n'
     printf '| --- | --- | --- | --- |\n'
     if [[ "$(wc -l < "$summary_tsv" | tr -d ' ')" == "1" ]]; then
-      printf '| _none_ | _none_ | UNVERIFIED | No native UX/browser summaries were produced. |\n'
+      printf '| _none_ | _none_ | UNVERIFIED | No native UX/browser/E2E summaries were produced. |\n'
     else
       tail -n +2 "$summary_tsv" | while IFS=$'\t' read -r job_id lane status reason; do
         printf '| `%s` | `%s` | `%s` | %s |\n' "$job_id" "$lane" "$status" "$reason"
