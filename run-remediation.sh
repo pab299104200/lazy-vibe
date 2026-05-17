@@ -417,6 +417,7 @@ UNITS_TSV="$REMEDIATION_DIR/03-implementation-units.tsv"
 AUDIT_SOURCE_MANIFEST="$REMEDIATION_DIR/00-audit-source-manifest.tsv"
 SPLIT_CANDIDATES_TSV="$REMEDIATION_DIR/05-split-candidates.tsv"
 SPLIT_PLAN_MD="$REMEDIATION_DIR/05-split-plan.md"
+SCOPE_CLASSIFICATION_TSV="$REMEDIATION_DIR/05-scope-classification.tsv"
 COMPLETED_PACKETS_TSV="$REMEDIATION_DIR/04-completed-packets.tsv"
 
 case "$VERIFY_SCOPE" in
@@ -434,7 +435,16 @@ unit_selected() {
   fi
   case ",$ONLY_UNIT," in
     *,"$unit_id",*) return 0 ;;
-    *) return 1 ;;
+    *)
+      local parent_unit="$unit_id"
+      parent_unit="${parent_unit%-S[0-9][0-9]}"
+      if [[ "$parent_unit" != "$unit_id" ]]; then
+        case ",$ONLY_UNIT," in
+          *,"$parent_unit",*) return 0 ;;
+        esac
+      fi
+      return 1
+      ;;
   esac
 }
 
@@ -506,6 +516,36 @@ combine_unit_lists() {
     tr ',' '\n' |
     awk 'NF && !seen[$0]++ { print }' |
     paste -sd, -
+}
+
+tsv_escape() {
+  printf '%s' "$1" | tr '\t\r\n' '   '
+}
+
+slugify_id() {
+  local text="$1"
+  text="$(printf '%s' "$text" | sed -E 's#^backend/##; s#^frontend/##; s#^docs/##; s#\.[A-Za-z0-9]+$##')"
+  text="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##; s#-{2,}#-#g')"
+  [[ -n "$text" ]] || text="scope"
+  printf '%s\n' "$text" | cut -c1-48
+}
+
+append_scope_classification() {
+  local unit_id="$1" decision="$2" reason="$3" owner="$4" files="$5" child_units="$6"
+  if [[ ! -s "$SCOPE_CLASSIFICATION_TSV" ]]; then
+    printf 'unit_id\tdecision\treason\towner\tfiles\tchild_units\n' > "$SCOPE_CLASSIFICATION_TSV"
+  fi
+  awk -F '\t' -v unit="$unit_id" -v decision="$decision" '
+    NR > 1 && $1 == unit && $2 == decision { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$SCOPE_CLASSIFICATION_TSV" 2>/dev/null && return 0
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(tsv_escape "$unit_id")" \
+    "$(tsv_escape "$decision")" \
+    "$(tsv_escape "$reason")" \
+    "$(tsv_escape "$owner")" \
+    "$(tsv_escape "$files")" \
+    "$(tsv_escape "$child_units")" >> "$SCOPE_CLASSIFICATION_TSV"
 }
 
 pending_split_child_units() {
@@ -599,6 +639,10 @@ revised_units_from_verifiers() {
     if verifier_accepts_unit "$unit_id"; then
       continue
     fi
+    if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
+      printf '[auto-revise] %s decomposed into split child units; parent will not be revised directly\n' "$unit_id" >&2
+      continue
+    fi
     if verifier_has_only_launch_evidence_findings "$unit_id"; then
       continue
     fi
@@ -659,6 +703,78 @@ unit_has_split_children() {
     }
     END { exit found ? 0 : 1 }
   ' "$UNITS_TSV"
+}
+
+split_child_units_csv() {
+  local unit_id="$1"
+  [[ -s "$UNITS_TSV" ]] || return 0
+  awk -F '\t' -v prefix="$unit_id-S" '
+    FNR > 1 && index($1, prefix) == 1 {
+      print $1
+    }
+  ' "$UNITS_TSV" | paste -sd, -
+}
+
+unit_split_children_pending() {
+  local unit_id="$1"
+  local child_id packets_csv _group _model _severity _rationale
+  [[ -s "$UNITS_TSV" ]] || return 1
+  while IFS=$'\t' read -r child_id packets_csv _group _model _severity _rationale; do
+    [[ "$child_id" == "$unit_id"-S[0-9][0-9]* ]] || continue
+    verifier_accepts_unit "$child_id" && continue
+    if ! unit_packets_have_terminal_status "$packets_csv"; then
+      return 0
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+  return 1
+}
+
+unit_packets_marked_split_parent() {
+  local unit_id="$1" packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  [[ -n "$packets_csv" ]] || return 1
+  local packet_id packet_file
+  local IFS=,
+  for packet_id in $packets_csv; do
+    [[ -n "${packet_id:-}" ]] || continue
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    file_matches 'Status:[[:space:]]*`?split-into-child-units|split-into-child-units' "$packet_file" && return 0
+  done
+  return 1
+}
+
+unit_changed_files_text() {
+  local unit_id="$1"
+  local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  local packets_csv packet_id packet_file
+  {
+    if [[ -s "$summary" ]]; then
+      awk '
+        /^## Changed Files/ { in_section = 1; next }
+        /^## / && in_section { in_section = 0 }
+        in_section { print }
+      ' "$summary"
+    fi
+    packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+    local IFS=,
+    for packet_id in $packets_csv; do
+      packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+      [[ -s "$packet_file" ]] || continue
+      awk '
+        /Files changed:/ || /Implemented .* in `/ || /Added .* in `/ || /Replaced .* in `/ || /Removed .* from `/ { print }
+      ' "$packet_file"
+    done
+  } | tr '\n' ' '
+}
+
+finding_is_sibling_drift() {
+  local unit_id="$1" finding_file="$2" finding_type="$3"
+  [[ "$finding_type" == "test_harness" ]] || return 1
+  [[ -n "$finding_file" ]] || return 1
+  local changed_text
+  changed_text="$(unit_changed_files_text "$unit_id")"
+  [[ -n "$changed_text" ]] || return 0
+  [[ "$changed_text" != *"$finding_file"* ]]
 }
 
 split_plan_marks_no_split() {
@@ -2767,6 +2883,183 @@ split_incomplete_units() {
   fi
 }
 
+next_split_child_number() {
+  local parent="$1"
+  local max
+  max="$(
+    awk -F '\t' -v prefix="$parent-S" '
+      FNR > 1 && index($1, prefix) == 1 {
+        suffix = substr($1, length(prefix) + 1)
+        if (suffix ~ /^[0-9][0-9]$/ && suffix + 0 > max) {
+          max = suffix + 0
+        }
+      }
+      END { printf "%02d", max + 1 }
+    ' "$UNITS_TSV" 2>/dev/null
+  )"
+  [[ -n "$max" ]] || max="01"
+  printf '%s\n' "$max"
+}
+
+split_child_exists_for_file() {
+  local parent="$1" finding_file="$2"
+  [[ -n "$finding_file" ]] || return 1
+  awk -F '\t' -v prefix="$parent-S" -v file="$finding_file" -v rdir="$REMEDIATION_DIR" '
+    FNR > 1 && index($1, prefix) == 1 {
+      packet_count = split($2, packets, ",")
+      for (i = 1; i <= packet_count; i += 1) {
+        packet = packets[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", packet)
+        if (packet == "") continue
+        packet_file = rdir "/packets/" packet ".md"
+        while ((getline line < packet_file) > 0) {
+          if (index(line, file) > 0) {
+            found = 1
+          }
+        }
+        close(packet_file)
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$UNITS_TSV" 2>/dev/null
+}
+
+append_split_child_unit() {
+  local parent_unit="$1" parent_packets="$2" group="$3" model_class="$4" severity="$5"
+  local finding_type="$6" finding_file="$7" finding="$8" required_fix="$9"
+
+  split_child_exists_for_file "$parent_unit" "$finding_file" && return 0
+
+  local parent_packet child_num child_unit child_packet slug packet_file rationale
+  parent_packet="${parent_packets%%,*}"
+  child_num="$(next_split_child_number "$parent_unit")"
+  slug="$(slugify_id "$finding_file")"
+  child_unit="$parent_unit-S$child_num"
+  child_packet="$parent_packet-S$child_num"
+  packet_file="$REMEDIATION_DIR/packets/$child_packet.md"
+
+  cat > "$packet_file" <<EOF
+# Remediation Packet $child_packet
+
+- Severity: \`${severity:-P1}\`
+- Workstream: \`$group\`
+- Model class: \`$model_class\`
+- Status: \`not-started\`
+- Parent unit: \`$parent_unit\`
+- Parent packets: \`$parent_packets\`
+- Split reason: \`$finding_type\`
+
+## Scope
+
+Deterministic child packet created from verifier finding on \`$finding_file\`.
+
+## Required Remediation
+
+Implement this bounded child packet. Do not re-cut it again unless a fresh verifier finding identifies unrelated ownership inside this child scope.
+
+Original verifier routing note:
+
+$(printf '%s\n' "$required_fix")
+
+## Source Finding
+
+$(printf '%s\n' "$finding")
+
+## File Ownership
+
+- Primary file or subsystem: \`$finding_file\`
+- Do not modify sibling subsystem files unless they are direct dependencies of this child packet.
+
+## Verification Gates
+
+- Run focused tests and standards checks for \`$finding_file\` or its owning subsystem.
+- Re-run the parent verifier after this child packet is complete.
+
+## Work Log
+
+- Status: \`not-started\`
+EOF
+
+  rationale="$finding_type:$slug"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$child_unit" "$child_packet" "$group" "$model_class" "${severity:-P1}" "$rationale" >> "$UNITS_TSV"
+
+  printf '%s\n' "$child_unit"
+}
+
+mark_parent_split_decomposed() {
+  local parent_unit="$1" parent_packets="$2" child_units="$3"
+  local packet_id packet_file
+  local IFS=,
+  for packet_id in $parent_packets; do
+    [[ -n "${packet_id:-}" ]] || continue
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    [[ -f "$packet_file" ]] || continue
+    file_matches 'Status:[[:space:]]*`?split-into-child-units|split-into-child-units' "$packet_file" && continue
+    {
+      printf '\n- Status: `split-into-child-units`\n'
+      printf -- '- Split child units: `%s`\n' "$child_units"
+      printf -- '- Split reason: deterministic verifier decomposition from `split_required` / sibling-owned `test_harness` findings.\n'
+    } >> "$packet_file"
+  done
+}
+
+decompose_verifier_split_findings() {
+  [[ -s "$UNITS_TSV" && -d "$REMEDIATION_DIR/artifacts" ]] || return 0
+  local created_any=0
+  local unit_id packets_csv group model_class severity rationale
+
+  while IFS=$'\t' read -r unit_id packets_csv group model_class severity rationale; do
+    [[ -z "${unit_id:-}" ]] && continue
+    unit_selected "$unit_id" || continue
+    [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]] && continue
+    [[ "$unit_id" == *-S[0-9][0-9] ]] && continue
+
+    local findings_file
+    findings_file="$(verifier_findings_tsv_for_unit "$unit_id")"
+    [[ -s "$findings_file" ]] || continue
+
+    local tmp_rows
+    tmp_rows="$(mktemp)"
+    awk -F '\t' 'NR > 1 && ($3 == "split_required" || $3 == "test_harness") && $1 != "" { print }' "$findings_file" > "$tmp_rows"
+    [[ -s "$tmp_rows" ]] || {
+      rm -f "$tmp_rows"
+      continue
+    }
+
+    local created_units=()
+    local row_unit row_severity finding_type finding_file finding_line finding required_fix
+    while IFS=$'\t' read -r row_unit row_severity finding_type finding_file finding_line finding required_fix; do
+      [[ "$row_unit" == "$unit_id" ]] || continue
+      if [[ "$finding_type" == "test_harness" ]] && ! finding_is_sibling_drift "$unit_id" "$finding_file" "$finding_type"; then
+        continue
+      fi
+      local child
+      child="$(append_split_child_unit "$unit_id" "$packets_csv" "$group" "$model_class" "${row_severity:-$severity}" "$finding_type" "$finding_file" "$finding" "$required_fix" || true)"
+      [[ -n "$child" ]] && created_units+=("$child")
+    done < "$tmp_rows"
+    rm -f "$tmp_rows"
+
+    local child_units
+    child_units="$(split_child_units_csv "$unit_id")"
+    if [[ -n "$child_units" ]]; then
+      mark_parent_split_decomposed "$unit_id" "$packets_csv" "$child_units"
+      append_scope_classification "$unit_id" "split" "verifier_split_required_or_sibling_test_harness" "$group" "$packets_csv" "$child_units"
+      created_any=1
+    fi
+    if ((${#created_units[@]} > 0)); then
+      local IFS=,
+      printf '[split-verifier] parent=%s children=%s\n' "$unit_id" "${created_units[*]}"
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+
+  if [[ "$created_any" == "1" ]]; then
+    normalize_units_tsv
+    rebuild_unit_prompts
+    build_final_review_prompt
+  fi
+}
+
 build_workstream_prompt() {
   local unit_id="$1" group="$2" model_class="$3" packets_csv="$4"
   local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
@@ -4338,6 +4631,10 @@ execute_workstreams() {
         printf '[revise] skipping verifier-accepted unit %s\n' "implement-$unit_id"
         continue
       fi
+      if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
+        printf '[revise] skipping decomposed parent unit %s; split children will run instead\n' "implement-$unit_id"
+        continue
+      fi
       if verifier_has_only_launch_evidence_findings "$unit_id"; then
         printf '[revise] skipping launch-evidence-only unit %s\n' "implement-$unit_id"
         continue
@@ -4484,6 +4781,8 @@ execute_verifier_units() {
       fi
     fi
   fi
+  aggregate_verifier_findings
+  decompose_verifier_split_findings
   aggregate_verifier_findings
 }
 
@@ -4936,7 +5235,9 @@ write_run_summary() {
     local impl_log="$REMEDIATION_DIR/logs/implement-$unit_id.log"
 
     local impl_result
-    if [[ -s "$impl_artifact" ]]; then
+    if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
+      impl_result="split"
+    elif [[ -s "$impl_artifact" ]]; then
       impl_result="$(grep -oi 'IMPLEMENTATION_RESULT:[[:space:]]*[a-z]*' "$impl_artifact" 2>/dev/null | head -1 | sed 's/.*IMPLEMENTATION_RESULT:[[:space:]]*//' || true)"
       [[ -z "$impl_result" ]] && impl_result="$(grep -oi 'RESULT:[[:space:]]*[A-Za-z/]*' "$impl_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"
       [[ -z "$impl_result" ]] && impl_result="completed"
@@ -4947,7 +5248,9 @@ write_run_summary() {
     fi
 
     local verify_decision
-    if [[ -s "$verify_artifact" ]]; then
+    if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
+      verify_decision="decomposed"
+    elif [[ -s "$verify_artifact" ]]; then
       verify_decision="$(
         grep -oiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?(accept|revise|stop)`?' "$verify_artifact" 2>/dev/null \
           | head -1 \
@@ -4964,7 +5267,7 @@ write_run_summary() {
     case "$impl_result:$verify_decision" in
       *:accept) fixed=$((fixed + 1)) ;;
       fixed:*|pass:*|PASS:*|completed:*) fixed=$((fixed + 1)) ;;
-      partial:*|incomplete:*|INCOMPLETE:*) partial=$((partial + 1)) ;;
+      split:*|*:decomposed|partial:*|incomplete:*|INCOMPLETE:*) partial=$((partial + 1)) ;;
       *) blocked=$((blocked + 1)) ;;
     esac
   done < <(tail -n +2 "$UNITS_TSV")
@@ -5016,7 +5319,13 @@ verifier_queue_category() {
     return 0
   fi
 
-  if verifier_finding_type_exists "$findings" "contract_conflict"; then
+  if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
+    if unit_split_children_pending "$unit_id"; then
+      printf 'split_children_pending\n'
+    else
+      printf 'split_decomposed\n'
+    fi
+  elif verifier_finding_type_exists "$findings" "contract_conflict"; then
     printf 'contract_conflict\n'
   elif verifier_has_only_coordinator_or_evidence_findings "$unit_id"; then
     printf 'coordinator_cleanup\n'
