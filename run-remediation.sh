@@ -4553,10 +4553,14 @@ execute_revision_rounds() {
 
 collect_evidence_units_from_findings() {
   [[ -d "$REMEDIATION_DIR/artifacts" ]] || return 0
-  local file
+  local file unit_id
   find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*-findings.tsv' -print 2>/dev/null |
     sort |
     while IFS= read -r file; do
+      unit_id="$(basename "$file")"
+      unit_id="${unit_id#verify-}"
+      unit_id="${unit_id%-findings.tsv}"
+      unit_selected "$unit_id" || continue
       awk -F '\t' 'NR > 1 && ($3 == "launch_evidence" || $3 == "sandbox_blocked") && $1 != "" { print $1 }' "$file"
     done |
     awk '!seen[$0]++'
