@@ -430,17 +430,54 @@ def run_agent(agent: str, prompt_file: Path, cwd: Path, log_file: Path, model_cl
     else:
         raise ValueError(f"unsupported agent {agent!r}; use codex, claude, or gemini")
 
+    label = log_file.stem
+    status_interval = feature_build_status_interval()
+    start = time.monotonic()
+    last_emit = 0.0
+    last_size = -1
+    spin_chars = "-\\|/"
+    spin_index = 0
+
     with log_file.open("w", encoding="utf-8") as log:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            input=input_text,
-            text=True,
+            stdin=subprocess.PIPE if input_text is not None else None,
             stdout=log,
             stderr=subprocess.STDOUT,
-            check=False,
+            text=True,
         )
-    return proc.returncode
+        if input_text is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(input_text)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        while True:
+            returncode = proc.poll()
+            now = time.monotonic()
+            if status_interval > 0 and (now - last_emit >= status_interval or returncode is not None):
+                elapsed = int(now - start)
+                size = log_file.stat().st_size if log_file.exists() else 0
+                delta = "same" if size == last_size else f"+{max(size - max(last_size, 0), 0)}"
+                spin = spin_chars[spin_index % len(spin_chars)]
+                spin_index += 1
+                print(f"[{spin}] task={label} agent={agent} elapsed={elapsed}s log_bytes={size} delta={delta}", flush=True)
+                last_emit = now
+                last_size = size
+            if returncode is not None:
+                return returncode
+            time.sleep(0.5)
+
+
+def feature_build_status_interval() -> float:
+    raw = os.getenv("FEATURE_BUILD_STATUS_INTERVAL_SECONDS", "30").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 30.0
+    return max(0.0, value)
 
 
 def select_agent_model(agent: str, model_class: str) -> str:
