@@ -684,6 +684,7 @@ Requirements:
 - Include review tasks after foundation, backend, frontend, tests/docs, and final readiness.
 - Include contract-gate tasks for every multi-layer feature that crosses backend, frontend, agent, BES, job payload, telemetry, permission, webhook, or external integration boundaries.
 - Verification commands must be real shell commands run from the repo root.
+- Task verification commands must be targeted to the task surface. Do not put full-suite commands such as `cd backend && python3 -m pytest`, `cd backend && pytest`, `cd frontend && npm run test`, or `cd frontend && npm run build` in individual tasks. Full suites are final gates after all tasks complete.
 - Include coding-standard, UI-standard, and definition-of-done verification where relevant.
 - Do not defer, phase, postpone, or mark feature requirements as future work unless the user explicitly accepted that deferral.
 - Do not create workaround tasks when a full implementation task is possible.
@@ -725,6 +726,17 @@ def enforce_task_contract(args: argparse.Namespace, root: Path, tasks: list[Task
         reject_deferral_tasks(tasks)
 
     changed = False
+    for task in tasks:
+        before = list(task.verification_commands)
+        task.verification_commands = task_scoped_verification_commands(task)
+        if task.verification_commands != before:
+            removed = [command for command in before if command not in task.verification_commands]
+            if removed:
+                print(
+                    f"[task-gate] removed full-suite command(s) from {task.task_id}; "
+                    "full suites run only at final gates"
+                )
+            changed = True
     if standard_gates_enabled(args):
         for task in tasks:
             before = list(task.verification_commands)
@@ -734,6 +746,30 @@ def enforce_task_contract(args: argparse.Namespace, root: Path, tasks: list[Task
             if task.verification_commands != before:
                 changed = True
     return changed
+
+
+def task_scoped_verification_commands(task: Task) -> list[str]:
+    return [
+        command
+        for command in task.verification_commands
+        if not is_full_suite_task_command(command)
+    ]
+
+
+def is_full_suite_task_command(command: str) -> bool:
+    normalized = re.sub(r"\s+", " ", command.strip())
+    normalized = normalized.replace("python -m pytest", "python3 -m pytest")
+    full_suite_commands = {
+        "cd backend && python3 -m pytest",
+        "cd backend && pytest",
+        "cd frontend && npm run test",
+        "cd frontend && npm test",
+        "cd frontend && npm run build",
+        "npm run test",
+        "npm test",
+        "npm run build",
+    }
+    return normalized in full_suite_commands
 
 
 def is_review_task(task: Task) -> bool:
@@ -787,7 +823,7 @@ def default_verification_commands(root: Path, task: Task) -> list[str]:
     if touches_backend:
         commands.extend(backend_standard_commands(root, task))
     if touches_frontend:
-        commands.extend(frontend_standard_commands(root))
+        commands.extend(frontend_standard_commands(root, task))
     if touches_docs:
         commands.append("test -d docs")
     if touches_routes:
@@ -866,14 +902,15 @@ def backend_standard_commands(root: Path, task: Task | None = None) -> list[str]
     return commands
 
 
-def frontend_standard_commands(root: Path) -> list[str]:
+def frontend_standard_commands(root: Path, task: Task | None = None) -> list[str]:
     frontend = root / "frontend"
     package_json = frontend / "package.json"
     if not package_json.exists():
         return []
     scripts = package_scripts(package_json)
     commands: list[str] = []
-    for script in ("lint", "typecheck", "build", "test"):
+    scripts_to_run = ("lint", "typecheck", "build", "test") if task is None else ("lint", "typecheck")
+    for script in scripts_to_run:
         if script in scripts:
             commands.append(f"cd frontend && npm run {script}")
     return commands
