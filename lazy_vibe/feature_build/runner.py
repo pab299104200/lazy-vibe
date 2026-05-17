@@ -454,8 +454,8 @@ def select_agent_model(agent: str, model_class: str) -> str:
             tier=tier,
             defaults={
                 "fast": "gpt-5.3-codex-spark",
-                "balanced": "gpt-5.4-codex",
-                "advanced": "gpt-5.5-codex",
+                "balanced": "gpt-5.3-codex",
+                "advanced": "gpt-5.3-codex",
             },
         )
     if agent == "claude":
