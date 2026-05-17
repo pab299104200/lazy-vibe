@@ -828,14 +828,15 @@ def contract_gate_commands(root: Path, task: Task) -> list[str]:
     return commands
 
 
-def backend_standard_commands(root: Path, task: Task) -> list[str]:
+def backend_standard_commands(root: Path, task: Task | None = None) -> list[str]:
     backend = root / "backend"
     if not backend.is_dir():
         return []
     commands: list[str] = []
+    task_files = task.files_expected if task is not None else []
     backend_py_files = [
         path.removeprefix("backend/")
-        for path in task.files_expected
+        for path in task_files
         if path.startswith("backend/") and path.endswith(".py")
     ]
     backend_py_args = " ".join(shlex.quote(path) for path in backend_py_files)
@@ -856,7 +857,7 @@ def backend_standard_commands(root: Path, task: Task) -> list[str]:
             )
     backend_test_files = [
         path.removeprefix("backend/")
-        for path in task.files_expected
+        for path in task_files
         if path.startswith("backend/tests/") and path.endswith(".py")
     ]
     if backend_test_files:
