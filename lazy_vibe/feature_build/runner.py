@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -58,11 +59,22 @@ DEFERRAL_MARKERS = {
     "future work",
     "later",
     "out of scope",
-    "phase 2",
     "todo",
     "tbd",
     "nice-to-have",
     "stretch",
+}
+NON_DEFERRAL_PHRASES = {
+    "explicit deferrals",
+    "no deferral",
+    "no deferrals",
+    "no deferred work",
+    "no todo",
+    "no `todo`",
+    "no todo/fixme",
+    "no `todo`/`fixme`",
+    "not deferrals",
+    "not deferred",
 }
 
 
@@ -692,16 +704,23 @@ def is_review_task(task: Task) -> bool:
 def reject_deferral_tasks(tasks: list[Task]) -> None:
     offenders: list[str] = []
     for task in tasks:
-        text = " ".join(
-            [task.title, task.task_type, task.last_error, *task.files_expected, *task.verification_commands]
-        ).lower()
-        if any(marker in text for marker in DEFERRAL_MARKERS):
+        fields = [task.title, task.task_type, task.last_error, *task.files_expected, *task.verification_commands]
+        if any(contains_deferral_marker(field) for field in fields):
             offenders.append(task.task_id)
     if offenders:
         raise ValueError(
             f"feature build plan contains deferral/workaround language in tasks: {', '.join(offenders)}. "
             f"{no_user_deferral_allowed()}"
         )
+
+
+def contains_deferral_marker(value: str | None) -> bool:
+    text = (value or "").lower()
+    if not text:
+        return False
+    for phrase in NON_DEFERRAL_PHRASES:
+        text = text.replace(phrase, "")
+    return any(re.search(rf"(?<![a-z0-9_-]){re.escape(marker)}(?![a-z0-9_-])", text) for marker in DEFERRAL_MARKERS)
 
 
 def merge_unique(values: list[str]) -> list[str]:
