@@ -3861,11 +3861,32 @@ run_implementer_and_test() {
       local cmd_status=0
       for test_cmd in "${test_cmds[@]}"; do
         printf '\n[native-test] running: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+        local test_script
+        test_script="$REMEDIATION_DIR/artifacts/$unit_id-native-test-$(printf '%s' "$test_cmd" | sha256sum | awk '{print substr($1, 1, 10)}').sh"
         {
-          printf '$ %s\n' "$test_cmd"
-          (cd "$worktree_dir" && eval "$test_cmd")
-        } >> "$test_log" 2>&1
-        cmd_status=$?
+          printf '#!/usr/bin/env bash\n'
+          printf 'set -euo pipefail\n'
+          printf '%s\n' "$test_cmd"
+        } > "$test_script"
+        chmod +x "$test_script"
+        if shell_fragment_is_valid "$test_cmd"; then
+          if {
+            printf '$ %s\n' "$test_cmd"
+            printf '[native-test] script: %s\n' "$test_script"
+            (cd "$worktree_dir" && bash "$test_script")
+          } >> "$test_log" 2>&1; then
+            cmd_status=0
+          else
+            cmd_status=$?
+          fi
+        else
+          {
+            printf '$ %s\n' "$test_cmd"
+            printf '[native-test] script: %s\n' "$test_script"
+            printf '[native-test] invalid shell fragment; refusing to execute\n'
+          } >> "$test_log" 2>&1
+          cmd_status=2
+        fi
         if [[ "$cmd_status" == "0" ]]; then
           printf '[native-test] passed: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
         else
@@ -4912,8 +4933,8 @@ write_run_summary() {
 
     local impl_result
     if [[ -s "$impl_artifact" ]]; then
-      impl_result="$(grep -oi 'IMPLEMENTATION_RESULT:[[:space:]]*[a-z]*' "$impl_artifact" 2>/dev/null | head -1 | sed 's/.*IMPLEMENTATION_RESULT:[[:space:]]*//')"
-      [[ -z "$impl_result" ]] && impl_result="$(grep -oi 'RESULT:[[:space:]]*[A-Za-z/]*' "$impl_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//')"
+      impl_result="$(grep -oi 'IMPLEMENTATION_RESULT:[[:space:]]*[a-z]*' "$impl_artifact" 2>/dev/null | head -1 | sed 's/.*IMPLEMENTATION_RESULT:[[:space:]]*//' || true)"
+      [[ -z "$impl_result" ]] && impl_result="$(grep -oi 'RESULT:[[:space:]]*[A-Za-z/]*' "$impl_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"
       [[ -z "$impl_result" ]] && impl_result="completed"
     elif [[ -f "$impl_log" ]]; then
       impl_result="failed"
@@ -4926,7 +4947,8 @@ write_run_summary() {
       verify_decision="$(
         grep -oiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?(accept|revise|stop)`?' "$verify_artifact" 2>/dev/null \
           | head -1 \
-          | sed -E 's/.*`?(accept|revise|stop)`?.*/\1/I'
+          | sed -E 's/.*`?(accept|revise|stop)`?.*/\1/I' \
+          || true
       )"
       [[ -z "$verify_decision" ]] && verify_decision="unreadable"
     else
