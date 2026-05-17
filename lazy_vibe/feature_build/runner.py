@@ -50,6 +50,7 @@ The marginal cost of completeness is near zero with AI. Act on that.
 - Do the whole thing. Do it right. Write real tests. Write the documentation. Mature enterprise-grade is the bar every time.
 - Never defer work you can do now. Deferral is a failure mode unless the user explicitly accepts it.
 - Never implement a workaround when the real solution exists. Build the real thing.
+- Do not leave legacy, superseded, placeholder, stub, mock, or duplicate old/new paths in place when the feature replaces them. If the new path is the product contract and no explicit compatibility contract exists, cut the cord: remove stale code, routes, flags, docs, tests, and config in the same task.
 - Stop reasoning about time like a human. Complexity and file count are not excuses to cut scope.
 """
 DEFERRAL_MARKERS = {
@@ -686,6 +687,7 @@ Requirements:
 - Include coding-standard, UI-standard, and definition-of-done verification where relevant.
 - Do not defer, phase, postpone, or mark feature requirements as future work unless the user explicitly accepted that deferral.
 - Do not create workaround tasks when a full implementation task is possible.
+- Include cleanup work in the same implementation graph. When a feature supersedes an older path, add tasks to delete or converge legacy code, hidden routes, stale API clients, obsolete tests/docs/config, placeholder surfaces, and compatibility shims unless an explicit product/API compatibility contract requires them.
 - Use model_class correctly: fast for simple high-volume mechanical work, balanced for normal coding/docs/tests, advanced for planning, review, security, debugging, migrations, and cross-system correctness.
 - If a task cannot be verified by a command, split or rewrite it until it can.
 - Do not mark anything complete.
@@ -1113,16 +1115,20 @@ Read the task file. Execute every item in scope. Do not work outside the declare
 
 Do the whole task. Do not defer, phase, postpone, stub, mock away, or create a workaround when the full implementation can be completed now.
 
+Reduce future tech debt as part of the task. If your change replaces an older implementation path, remove or converge the legacy path now: stale code, duplicate helpers, hidden routes, old feature flags, obsolete docs/tests, placeholder UI/API surfaces, mocks, no-op shims, and compatibility glue. Keep a legacy path only when the task/spec names an explicit compatibility contract; if you keep one, document the contract and add verification that both the current path and the compatibility path behave correctly.
+
 Before reporting done:
 1. Run every verification command declared in the task file and tasks.json.
 2. Confirm expected files exist.
-3. Write your result to:
+3. Search the changed surface for stale/superseded/stub residue and either remove it or document the explicit compatibility contract that requires it.
+4. Write your result to:
 {result_file}
 
 Result format:
 - Files created/modified
 - Verification commands and outputs
 - Issues encountered
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept
 - Final status: complete, partial, or blocked
 """
 

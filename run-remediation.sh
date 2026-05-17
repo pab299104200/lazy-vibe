@@ -3226,6 +3226,10 @@ Before editing, read the shared standards that apply to this unit:
 
 Treat standards violations as implementation defects, not cosmetic concerns. Fix coding-standard, UI-standard, and definition-of-done gaps that are in scope for the assigned packets. If a required standard file is unavailable, record that as a blocker or residual risk in the summary.
 
+## Legacy Cutover / Tech-Debt Rule
+
+Do not leave legacy, superseded, placeholder, stub, mock, no-op, or duplicate old/new paths in place when this remediation replaces them. If the current fix establishes the correct product contract and no explicit compatibility contract requires the old path, cut the cord in the same unit: remove stale code, routes, jobs, feature flags, config/env keys, docs, tests, scripts, and compatibility shims. If compatibility is genuinely required, document the contract and add focused verification for both the current path and the compatibility path.
+
 ## Assigned Packets
 
 \`\`\`text
@@ -3242,6 +3246,8 @@ Packets may originate from domain, cross-cutting, spec-addition, runtime, maturi
 
 For stale-code packets, start from deletion/convergence. Search production callers, routes, jobs, tests, docs, configs, migrations, and external compatibility notes. If the artifact is genuinely unused, stubbed, superseded, or preserving obsolete behavior, remove it and update callers/tests/docs. If it is still required, document the live contract and mark the packet complete with proof instead of adding another compatibility layer.
 
+For all other packets, still check whether the fix supersedes an older implementation. Do not close the packet while old and new behavior both remain active by accident. Delete or converge the legacy path unless the assigned packet, product profile, or docs name a real compatibility requirement.
+
 Own this implementation unit end to end:
 
 1. Implement the remediation for the assigned packets.
@@ -3254,7 +3260,8 @@ Own this implementation unit end to end:
 4. Apply the shared coding standard to changed backend, frontend, test, migration, script, and helper code.
 5. Apply the shared UI specification to changed UI surfaces and operator/customer workflows.
 6. Run the strongest relevant verification available in the repo for the changed surface.
-7. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, standards reviewed, remaining risks, and any packets left incomplete.
+7. Search the changed surface for legacy/superseded/stub residue and remove it or document the explicit compatibility contract that requires it.
+8. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, standards reviewed, legacy cleanup performed or compatibility retained, remaining risks, and any packets left incomplete.
 
 Keep the context window under 200k tokens. If these packets are too broad, complete the highest-severity coherent subset, mark completed packets \`Status: \`complete\`\`, and mark the rest \`Status: \`partial\`\` in the packet logs.
 
@@ -3265,6 +3272,7 @@ For revision passes, do not stop at restating verifier findings. Resolve them. T
 - Exact commands run and outcomes.
 - Exact docs updated, or a statement that no docs change was needed after checking the product-profile documentation locations.
 - Exact shared standards reviewed, including whether the coding standard, UI standard, and definition-of-done checklist were applicable and satisfied.
+- Legacy/superseded/stub cleanup performed, or the explicit compatibility contract that required keeping an old path.
 PROMPT
 }
 
@@ -3342,6 +3350,7 @@ This verifier is intentionally independent from the implementation workstream an
 9. Confirm success-path and failure-path tests exist and were run or honestly blocked.
 10. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
 10a. For stale-code packets, verify deletion/convergence explicitly: the stale artifact is removed or made unreachable only through a documented compatibility contract; stale tests/docs/config are removed or updated; replacement callers still pass focused tests; no new shim preserves the obsolete behavior without proof.
+10b. For every implementation packet, check whether the changed surface now has both old and new behavior active. If legacy code, hidden routes, old API clients, stale docs/tests/config, feature flags, placeholders, stubs, mocks, no-op shims, or compatibility glue remain without an explicit compatibility contract, block signoff with \`type=stale_code\`.
 11. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, missing standards review, material coding/UI/definition-of-done violations, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
 12. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
 13. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
@@ -3499,7 +3508,8 @@ Your job: understand the assigned packets and the relevant code deeply, then pro
 2. Identify what code, docs, and tests need to change.
 3. Read the relevant source files (skeleton first, then targeted reads).
 4. Verify the current state of each affected code section before specifying the fix. Do not speculate.
-5. Write the design document and stop.
+5. Identify legacy/superseded/stub paths touched by the change. If the fix replaces an old path, include deletion or caller convergence in the design unless an explicit compatibility contract requires keeping it.
+6. Write the design document and stop.
 
 **Design document structure** (write to \`$design_out\`):
 
@@ -3517,6 +3527,9 @@ For every file that must change:
 ### File: path/to/file.py (lines NNN–MMM)
 **Current behavior:** what the code does now.
 **Required change:** exactly what to add, remove, or replace. Precise enough that the implementer does not need to re-read the original finding.
+
+## Legacy Cutover / Tech-Debt Cleanup
+Old routes, services, flags, stubs, mocks, docs, tests, scripts, config, or compatibility shims to delete or converge as part of this unit. If anything old must remain, name the explicit compatibility contract and the test that proves it.
 
 ## Test Requirements
 For each change: what test to write, what to assert, what negative cases to cover, where in the test suite it belongs.
