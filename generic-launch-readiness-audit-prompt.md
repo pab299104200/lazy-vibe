@@ -111,6 +111,60 @@ Cross-cutting operability and recovery synthesis. Review logs, audit trails, met
 
 Cross-cutting test, docs, and maintainability synthesis. Compare launch claims to tests and docs. Identify missing integration/E2E coverage, stale tests, unsupported smoke paths, large/refactor-risk files, and violations of the shared coding, UI, and definition-of-done standards.
 
+## GENERIC 3D
+
+Cross-cutting stale-code, superseded-path, and stub audit. Treat replacement implementations as a presumption that the old implementation should be retired unless there is an explicit compatibility contract.
+
+Find and classify:
+
+- Old and new implementations coexisting for the same behavior after a design pivot.
+- Legacy routes, services, jobs, UI pages/components, API clients, feature flags, env/config keys, scripts, migrations, schemas, or tests that are no longer referenced by current workflows.
+- Compatibility shims, `v1`/`v2` duplicates, `old`/`new` pairs, `legacy`, `deprecated`, `temporary`, `compat`, `shim`, `fallback`, `todo`, `stub`, `placeholder`, `mock`, `not implemented`, `coming soon`, and `no-op` code that still ships.
+- Backend endpoints with no frontend, agent, job, CLI, documentation, or external caller.
+- Frontend routes/components hidden from navigation but still bundled.
+- Tests and docs that preserve obsolete behavior and prevent deletion.
+- Tables, columns, models, queue/job payloads, or event names no longer written/read except by legacy tests or stale scripts.
+
+Use deterministic repo evidence before making claims. At minimum inspect:
+
+- Text search for stale markers: `legacy|deprecated|superseded|stub|placeholder|mock|no-op|not implemented|coming soon|temporary|compat|shim|v1|v2|old|new|TODO|FIXME`.
+- Exported symbol references versus imports/callers where the language tooling makes that practical.
+- Route/API inventories versus frontend/API-client/job/docs references.
+- Frontend route/component inventory versus router/nav references.
+- Config/env keys versus runtime usage and docs.
+- Tests that reference symbols with no production callers.
+
+For each finding, provide:
+
+- Stale artifact path plus symbol/component/route/job/config name.
+- Replacement/current artifact if one exists.
+- Evidence that it is unreachable, duplicated, stubbed, or superseded, with line-aware citations.
+- Deletion or convergence plan.
+- Migration/data/customer-compatibility risk.
+- Exact tests required after removal.
+- Classification: `safe-delete`, `staged-removal`, `merge-with-current-path`, or `product-decision-required`.
+
+Write a machine-readable candidate list to `RUN_DIR/artifacts/stale-code-candidates.tsv` with this exact tab-separated header when findings exist:
+
+```text
+candidate_id	severity	classification	stale_artifact	replacement_artifact	evidence	required_remediation	tests_after_removal
+```
+
+Do not report generic large-file or style issues unless they are evidence of superseded/stubbed code. Prefer deletion and convergence over additional abstraction.
+
+## 9D
+
+Product-profile stale-code, superseded-path, and stub audit. Follow the same protocol as `GENERIC 3D`, but ground findings in this product's launch claims, architecture docs, critical journeys, and prior audit outputs under `RUN_DIR/01-domain/` and `RUN_DIR/02-cross-cutting/`.
+
+Focus especially on design-pivot residue:
+
+- Old implementation path left in place after a new path landed.
+- Feature stubs or placeholder UI/API surfaces that make launch claims look implemented.
+- Duplicate service/client/helper layers where one supersedes another.
+- Hidden pages, unused routes, stale API endpoints, dead jobs, abandoned migrations, old event payloads, stale docs/tests, and unused config/feature flags.
+
+For every finding, state whether remediation should delete code, merge callers onto the current path, remove/update stale tests/docs, or require a product decision because external compatibility is still plausible.
+
 ## GENERIC 4
 
 Market or alternative comparison. Use only product-profile competitors or repo-documented alternatives. Browse current public sources when needed. Do not invent market claims.

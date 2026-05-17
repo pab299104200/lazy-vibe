@@ -1252,6 +1252,7 @@ source_kind() {
   local source="$1"
   case "$source" in
     */docs/scorecard/*.md|*/docs/scorecards/*.md|docs/scorecard/*.md|docs/scorecards/*.md) printf 'scorecard\n' ;;
+    */artifacts/stale-code-candidates.tsv|artifacts/stale-code-candidates.tsv) printf 'stale-code\n' ;;
     */01-domain/*) printf 'domain\n' ;;
     */02-cross-cutting/*) printf 'cross-cutting\n' ;;
     */03-spec-additions/*) printf 'spec-addition\n' ;;
@@ -1281,6 +1282,7 @@ audit_source_files() {
     find "$AUDIT_RUN/logs" -maxdepth 1 -type f -name '16c-adversarial-product.log' 2>/dev/null || true
     # Runtime artifact reports: SAST, Lighthouse, accessibility, external-services, load-test
     find "$AUDIT_RUN/artifacts" -mindepth 2 -type f -name '*.md' 2>/dev/null || true
+    find "$AUDIT_RUN/artifacts" -maxdepth 1 -type f -name 'stale-code-candidates.tsv' 2>/dev/null || true
   } | sort -u
 }
 
@@ -1317,6 +1319,7 @@ classify_group() {
     *external\ service*|*external-service*|*oauth\ provider*|*smtp*|*saas\ api*|*webhook\ probe*|*cloud\ sdk*) printf 'product-integrations\n' ;;
     # Load test failures -> runtime-quality-gates
     *load\ test*|*load-test*|*p95\ *|*p99\ *|*error\ rate*|*baseline\ scenario*|*ramp\ scenario*|*spike\ scenario*|*k6*|*locust*|*artillery*) printf 'runtime-quality-gates\n' ;;
+    *stale-code-candidates*|*stale\ code*|*superseded*|*safe-delete*|*staged-removal*|*merge-with-current-path*|*dead\ code*|*stub*|*placeholder*|*deprecated*|*legacy*) printf 'tech-debt-cleanup\n' ;;
     *csrf*|*tenant-isolation*|*support-access*|*mfa-pending*|*rbac*|*auth-boundar*|*data-protection*|*guest-invite*|*guest-access*|*public*invite*|*tenants*|*roles-permissions*) printf 'security-auth\n' ;;
     *scim*|*lifecycle*|*provisioning*|*joiner*|*mover*|*leaver*) printf 'scim-lifecycle\n' ;;
     *saml*|*oidc*|*oauth*|*federation*|*jwks*|*authnrequest*|*replay*|*signing-key*) printf 'protocol-federation\n' ;;
@@ -1331,6 +1334,7 @@ classify_group() {
 model_class_for_group() {
   case "$1" in
     security-auth|scim-lifecycle|protocol-federation|iga-governance|runtime-quality-gates|spec-contract-gaps) printf 'high-risk\n' ;;
+    tech-debt-cleanup) printf 'complex\n' ;;
     *) printf 'standard\n' ;;
   esac
 }
@@ -1499,6 +1503,41 @@ extract_findings() {
     [[ -f "$file" ]] || continue
     local rel
     rel="$(normalize_source_path "$file")"
+    if [[ "$rel" == */artifacts/stale-code-candidates.tsv || "$rel" == artifacts/stale-code-candidates.tsv ]]; then
+      awk -F '\t' -v file="$rel" '
+        NR == 1 { next }
+        NF < 8 { next }
+        function clean(s) {
+          gsub(/\t/, " ", s)
+          gsub(/\r/, "", s)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+          return s
+        }
+        {
+          sev = clean($2)
+          classification = clean($3)
+          stale = clean($4)
+          replacement = clean($5)
+          evidence = clean($6)
+          required = clean($7)
+          tests = clean($8)
+          if (sev == "" || stale == "" || required == "") next
+          title = "Stale-code cleanup [" classification "]: " stale
+          if (replacement != "" && replacement != "_none_" && replacement != "none") {
+            title = title " superseded by " replacement
+          }
+          title = title " — " required
+          if (tests != "") {
+            title = title " Tests after removal: " tests
+          }
+          if (evidence != "") {
+            title = title " Evidence: " evidence
+          }
+          print sev "\t" file "\t" NR "\t" title
+        }
+      ' "$file" >> "$tmp"
+      continue
+    fi
     awk -v file="$rel" '
       BEGIN { }
       function clean(s) {
@@ -1618,6 +1657,9 @@ write_packet() {
     fi
     if [[ "$kind" == "scorecard" ]]; then
       printf 'Scorecard-origin rule: scorecard findings must be re-verified against current code before implementation. If the finding is already fixed, update this packet with evidence and mark it complete without code churn. If real, fix the root cause and update the scorecard evidence trail after verification.\n\n'
+    fi
+    if [[ "$kind" == "stale-code" ]]; then
+      printf 'Stale-code rule: this packet is not generic refactoring. Prove whether the named artifact is still active. If it is superseded, stubbed, unreachable, or preserving obsolete behavior, delete it or converge callers/tests/docs onto the current path. Keep compatibility only when an explicit product/API contract requires it, and document that contract in the packet.\n\n'
     fi
     printf '## Suggested Verification\n\n'
     printf -- '- Run the narrowest relevant unit/integration tests first.\n'
@@ -2658,6 +2700,7 @@ Use the generated seed inventory as a starting point, then inspect the audit rep
 - \`$AUDIT_RUN/logs/14*.log\`, \`$AUDIT_RUN/logs/15*.log\`, and \`$AUDIT_RUN/logs/16*.log\` when the markdown artifacts cite missing or incomplete evidence.
 - \`$AUDIT_RUN/logs/16c-adversarial-product.log\` if it exists, because the final decision says 16C was not fully merged.
 - \`$AUDIT_RUN/artifacts/load-test/load-test-report.md\` if it exists — contains load test scenario results, p95/p99 latencies, and error rates.
+- \`$AUDIT_RUN/artifacts/stale-code-candidates.tsv\` if it exists — contains stale/superseded/stub candidates from the tech-debt audit. Treat these as first-class deletion/convergence remediation sources, not optional cleanup notes.
 - Any \`*.md\` files under \`$AUDIT_RUN/artifacts/\` subdirectories (e.g., \`sast/\`, \`lighthouse/\`, \`accessibility/\`, \`external-services/\`, deep-dive job reports) — these contain SAST/CVE findings, Core Web Vitals results, WCAG violations, and external service probe results that must be cataloged as packets alongside the main audit reports.
 
 Rewrite these files with a deduplicated, implementation-ready catalog:
@@ -2677,6 +2720,7 @@ Catalog requirements:
 - When a deduplicated packet includes both completed and incomplete seed packets, keep the merged packet incomplete, but list the completed seed packet IDs and evidence in the work log so the implementer does not redo closed work.
 - Do not convert completed work back to \`not-started\` merely because packet IDs or implementation units are being deduplicated.
 - Treat spec inventory, product profile, and master-prompt deltas as first-class packet sources. If a required product capability appears in the profile/spec prompt but lacks implementation, docs, tests, or launch evidence, create or merge a packet for that missing contract.
+- Treat stale-code candidates as first-class remediation packets. Prefer deletion, caller convergence, stale test/doc removal, and config/flag cleanup. Do not preserve old and new paths side by side unless there is an explicit compatibility contract and a test proving that contract.
 - Do not collapse spec-origin requirements into "evidence pending" when code/docs/tests are missing. Split implementation work from launch-proof work when needed.
 - Keep severity as the highest severity found for the outcome.
 - Preserve source evidence with multiple audit references when merged.
@@ -3196,6 +3240,8 @@ Read only the assigned packets first (and the design document above if one was p
 
 Packets may originate from domain, cross-cutting, spec-addition, runtime, maturity/customer-proof, adversarial, or final-decision audit sources. Treat all source kinds as first-class implementation contracts. For spec-addition or product-profile packets, do not close the packet with docs-only evidence unless the packet explicitly says the missing work is documentation truth; implement the missing code path, validation, control, operator/customer workflow, protocol behavior, integration behavior, or test harness required by the spec/profile.
 
+For stale-code packets, start from deletion/convergence. Search production callers, routes, jobs, tests, docs, configs, migrations, and external compatibility notes. If the artifact is genuinely unused, stubbed, superseded, or preserving obsolete behavior, remove it and update callers/tests/docs. If it is still required, document the live contract and mark the packet complete with proof instead of adding another compatibility layer.
+
 Own this implementation unit end to end:
 
 1. Implement the remediation for the assigned packets.
@@ -3295,6 +3341,7 @@ This verifier is intentionally independent from the implementation workstream an
 8. Confirm the implementer reviewed and satisfied the shared definition-of-done checklist, including success paths, failure paths, controls, docs, and focused verification.
 9. Confirm success-path and failure-path tests exist and were run or honestly blocked.
 10. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
+10a. For stale-code packets, verify deletion/convergence explicitly: the stale artifact is removed or made unreachable only through a documented compatibility contract; stale tests/docs/config are removed or updated; replacement callers still pass focused tests; no new shim preserves the obsolete behavior without proof.
 11. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, missing standards review, material coding/UI/definition-of-done violations, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
 12. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
 13. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
@@ -3322,6 +3369,7 @@ unit_id	severity	type	file	line	finding	required_fix
 Use one row per unresolved verifier finding. Valid \`type\` values:
 
 - \`code\` — product/source implementation defect.
+- \`stale_code\` — stale, superseded, stubbed, placeholder, unreachable, or duplicate code/config/docs/tests remain after the implementation.
 - \`docs\` — stale or contradictory docs with clear intended behavior.
 - \`tests\` — missing or failing normal focused tests.
 - \`standards\` — coding-standard, UI-standard, or definition-of-done violation on the changed surface.

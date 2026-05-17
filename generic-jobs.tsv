@@ -9,6 +9,7 @@ group	job_id	kind	title	output	ref
 03	03a-security-boundaries	synthesis	Security auth authorization and data boundaries	02-cross-cutting/03a-security-boundaries.md	GENERIC 3A
 03	03b-operability-recovery	synthesis	Observability recovery migrations and operations	02-cross-cutting/03b-operability-recovery.md	GENERIC 3B
 03	03c-test-doc-quality	synthesis	Test coverage docs truth and maintainability	02-cross-cutting/03c-test-doc-quality.md	GENERIC 3C
+03	03d-tech-debt-superseded	synthesis	Stale code, superseded paths, and stubs	02-cross-cutting/03d-tech-debt-superseded.md	GENERIC 3D
 04	04-market-comparison	web	Market or alternative comparison from product profile	02-cross-cutting/04-market-comparison.md	GENERIC 4
 05	05-synthesis	synthesis	Launch readiness synthesis and registers	08-launch-readiness.md	GENERIC 5
 06	06-runtime	runtime	Runtime verification against repo-supported checks	10-runtime-verification.md	GENERIC 6
