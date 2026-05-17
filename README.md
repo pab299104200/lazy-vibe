@@ -495,8 +495,8 @@ The harness is state-driven:
 | `FEATURE_BUILD_POST_BUILD_ROUNDS` | `1` | Maximum post-build review/remediation rounds. |
 | `CODEX_MODEL` | — | Override Codex model for every feature-build task. |
 | `FEATURE_BUILD_CODEX_MODEL_FAST` | `gpt-5.3-codex-spark` | Codex model for fast tasks. |
-| `FEATURE_BUILD_CODEX_MODEL_BALANCED` | `gpt-5.3-codex` | Codex model for balanced tasks. |
-| `FEATURE_BUILD_CODEX_MODEL_ADVANCED` | `gpt-5.3-codex` | Codex model for advanced tasks. |
+| `FEATURE_BUILD_CODEX_MODEL_BALANCED` | `gpt-5.4-codex` | Codex model for balanced tasks. |
+| `FEATURE_BUILD_CODEX_MODEL_ADVANCED` | `gpt-5.5-codex` | Codex model for advanced tasks. |
 | `CODEX_EXTRA_ARGS` | — | Extra arguments appended to `codex exec`. |
 | `CLAUDE_MODEL` | — | Override Claude model for all feature-build phases. |
 | `FEATURE_BUILD_CLAUDE_MODEL_FAST` | `claude-haiku-4-5` | Claude model for fast tasks. |
