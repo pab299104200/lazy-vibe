@@ -379,7 +379,7 @@ if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && 
    ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 && \
    [[ "${REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL:-0}" != "1" ]]; then
   if [[ "$MAX_PARALLEL" != "1" ]]; then
-    printf '[workspace] REPO_ROOT is not a git root; forcing MAX_PARALLEL=1 so implementation units do not edit the live shared workspace concurrently\n'
+    printf '[workspace] REPO_ROOT is not a git root; using live split-root workspace and forcing MAX_PARALLEL=1 so implementation units do not edit backend/frontend concurrently\n'
     MAX_PARALLEL=1
   fi
   if [[ "${REMEDIATION_REVISION_MAX_PARALLEL:-2}" != "1" ]]; then
@@ -388,7 +388,7 @@ if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && 
   fi
 elif [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && \
      ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  printf '[workspace] REPO_ROOT is not a git root; REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL=1 set, preserving MAX_PARALLEL=%s and REMEDIATION_REVISION_MAX_PARALLEL=%s\n' \
+  printf '[workspace] REPO_ROOT is not a git root; REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL=1 set for live split-root workspace, preserving MAX_PARALLEL=%s and REMEDIATION_REVISION_MAX_PARALLEL=%s\n' \
     "$MAX_PARALLEL" "${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
 fi
 
@@ -3004,6 +3004,34 @@ mark_parent_split_decomposed() {
   done
 }
 
+workspace_prompt_block() {
+  local unit_id="${1:-}"
+  local roots
+  roots="$(workspace_git_roots | sed 's/^/- `/; s/$/`/' || true)"
+  if repo_root_is_git_root; then
+    cat <<EOF
+- Product root: \`$REPO_ROOT\`
+- Workspace mode: isolated git worktree when available.
+- Planned unit worktree: \`$REMEDIATION_DIR/worktrees/$unit_id\`
+EOF
+  elif [[ -n "$roots" ]]; then
+    cat <<EOF
+- Product root: \`$REPO_ROOT\`
+- Workspace mode: split-root live workspace. \`$REPO_ROOT\` is not a git repository, but child repositories are.
+- Child git roots:
+$roots
+- Edit files under the product root, normally under \`backend/\`, \`frontend/\`, and \`docs/\`.
+- Treat \`backend\` and \`frontend\` as the source-control roots for status, diffs, and commits. Do not assume the product root itself supports \`git status\`, \`git worktree\`, or repo-relative commits.
+EOF
+  else
+    cat <<EOF
+- Product root: \`$REPO_ROOT\`
+- Workspace mode: live non-git workspace.
+- Edit files under the product root. The orchestrator serializes units because no git root is available for isolated worktrees.
+EOF
+  fi
+}
+
 decompose_verifier_split_findings() {
   [[ -s "$UNITS_TSV" && -d "$REMEDIATION_DIR/artifacts" ]] || return 0
   local created_any=0
@@ -3067,6 +3095,8 @@ build_workstream_prompt() {
   packet_list="$(packet_paths_for_ids "$packets_csv")"
   local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
   local design_block=""
+  local workspace_block
+  workspace_block="$(workspace_prompt_block "$unit_id")"
   if [[ -f "$design_doc" ]]; then
     design_block=$(cat <<DESIGN
 
@@ -3124,7 +3154,7 @@ REVISION
 
 ## Metadata
 
-- Repo root: $REMEDIATION_DIR/worktrees/$unit_id
+$workspace_block
 - Audit run: $AUDIT_RUN
 - Remediation run: $REMEDIATION_DIR
 - Workstream: $group
@@ -3955,7 +3985,12 @@ prepare_unit_workspace() {
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
 
   if ! repo_root_is_git_root; then
-    printf '[workspace] %s: REPO_ROOT is not a git root; using %s directly\n' "$unit_id" "$REPO_ROOT" >&2
+    if workspace_has_git_roots; then
+      printf '[workspace] %s: split-root workspace; using %s directly with child git roots: %s\n' \
+        "$unit_id" "$REPO_ROOT" "$(workspace_git_roots | paste -sd, -)" >&2
+    else
+      printf '[workspace] %s: REPO_ROOT is not a git root; using %s directly\n' "$unit_id" "$REPO_ROOT" >&2
+    fi
     printf '%s\n' "$REPO_ROOT"
     return 0
   fi
