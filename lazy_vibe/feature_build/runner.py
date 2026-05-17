@@ -746,7 +746,7 @@ def default_verification_commands(root: Path, task: Task) -> list[str]:
     touches_contract = contract_gate_needed(task)
 
     if touches_backend:
-        commands.extend(backend_standard_commands(root))
+        commands.extend(backend_standard_commands(root, task))
     if touches_frontend:
         commands.extend(frontend_standard_commands(root))
     if touches_docs:
@@ -789,20 +789,40 @@ def contract_gate_commands(root: Path, task: Task) -> list[str]:
     return commands
 
 
-def backend_standard_commands(root: Path) -> list[str]:
+def backend_standard_commands(root: Path, task: Task) -> list[str]:
     backend = root / "backend"
     if not backend.is_dir():
         return []
     commands: list[str] = []
+    backend_py_files = [
+        path.removeprefix("backend/")
+        for path in task.files_expected
+        if path.startswith("backend/") and path.endswith(".py")
+    ]
+    backend_py_args = " ".join(shlex.quote(path) for path in backend_py_files)
     if (backend / "ruff.toml").exists() or (backend / "pyproject.toml").exists():
-        commands.extend(
-            [
-                "cd backend && python3 -m ruff check .",
-                "cd backend && python3 -m ruff format --check .",
-            ]
-        )
-    if (backend / "tests").is_dir():
-        commands.append("cd backend && python3 -m pytest")
+        if backend_py_args:
+            commands.extend(
+                [
+                    f"cd backend && python3 -m ruff check {backend_py_args}",
+                    f"cd backend && python3 -m ruff format --check {backend_py_args}",
+                ]
+            )
+        else:
+            commands.extend(
+                [
+                    "cd backend && python3 -m ruff check .",
+                    "cd backend && python3 -m ruff format --check .",
+                ]
+            )
+    backend_test_files = [
+        path.removeprefix("backend/")
+        for path in task.files_expected
+        if path.startswith("backend/tests/") and path.endswith(".py")
+    ]
+    if backend_test_files:
+        test_args = " ".join(shlex.quote(path) for path in backend_test_files)
+        commands.append(f"cd backend && python3 -m pytest {test_args}")
     return commands
 
 
