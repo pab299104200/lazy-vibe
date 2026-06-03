@@ -1640,6 +1640,8 @@ command_is_global_native_check() {
     "cd backend && python -m pytest tests/ -v"|\
     "cd backend && python3 -m pytest"|\
     "cd backend && python3 -m pytest tests/ -v"|\
+    "./scripts/backend-venv"|\
+    "./scripts/dev-postgres bootstrap"|\
     "cd backend && alembic upgrade head"*|\
     "cd frontend && npm run build"|\
     "cd frontend && npm run lint"|\
@@ -5086,13 +5088,13 @@ recover_planner_design_result() {
 implementation_summary_is_fixed() {
   local summary="$1"
   [[ -s "$summary" ]] || return 1
-  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]]|$)' "$summary" 2>/dev/null
+  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]`*_,.;:-]|$)' "$summary" 2>/dev/null
 }
 
 implementation_summary_is_terminal() {
   local summary="$1"
   [[ -s "$summary" ]] || return 1
-  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]]|$)' "$summary" 2>/dev/null
+  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]`*_,.;:-]|$)' "$summary" 2>/dev/null
 }
 
 log_final_response() {
@@ -5117,11 +5119,11 @@ recover_implementation_summary_from_log() {
   [[ ! -s "$summary" ]] || return 0
   [[ -s "$log_file" ]] || return 1
   final_response="$(log_final_response "$log_file")"
-  if printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:],.;]|$)'; then
+  if printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]`*_,.;:-]|$)'; then
     recovered_result="fixed"
-  elif printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?blocked`?([[:space:],.;]|$)'; then
+  elif printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?blocked`?([[:space:]`*_,.;:-]|$)'; then
     recovered_result="blocked"
-  elif printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?partial`?([[:space:],.;]|$)'; then
+  elif printf '%s\n' "$final_response" | grep -aqiE 'IMPLEMENTATION_RESULT:[[:space:]]*`?partial`?([[:space:]`*_,.;:-]|$)'; then
     recovered_result="partial"
   elif printf '%s\n' "$final_response" | grep -aqiE '(honest status is|unit is still|remains)[^[:cntrl:]]*`?partial`?'; then
     recovered_result="partial"

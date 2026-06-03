@@ -513,6 +513,8 @@ Verifier recovery is intentionally conservative. A verifier process may be auto-
 
 Native evidence commands are filtered before execution. The runner accepts real command prefixes from verifier artifacts and skips explanatory prose, so a verifier note such as "run the browser proof manually" is recorded as non-executable evidence rather than sent to the shell.
 
+Global setup and broad project checks are not treated as per-unit native evidence by default. Commands such as `./scripts/backend-venv`, `./scripts/dev-postgres bootstrap`, full backend test suites, frontend builds, and frontend lint/typecheck are skipped unless `REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS=1` is set, because those commands can fail for environment or repo-wide reasons after a unit has already produced valid targeted proof. Agents may write `IMPLEMENTATION_RESULT` markers as plain text, headings, code spans, or bold Markdown; the runner normalizes those forms before deciding whether a non-zero agent process can be recovered from an existing terminal summary.
+
 Existing ledgers that already contain child packets for the old native-test prose bug are closed deterministically. If a generated child packet only asks to repair a remediation-owned `*-native-test-*.sh` artifact whose failure was executing prose as shell, the runner writes a fixed summary and packet closeout instead of launching an agent against product code.
 
 ### Model overrides (Codex)
