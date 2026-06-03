@@ -183,8 +183,34 @@ IMPLEMENTER_AGENT=claude \
 REVIEWER_AGENT=codex \
 ./run-remediation.sh \
   --audit-run /path/to/repo/docs/audit/$(date +%Y-%m-%d)-launch-readiness-run \
+  --execute
+```
+
+`--execute` runs implementation, verifier, deterministic evidence collection, safe auto-revision, queue regeneration, and final review by default. Use `--no-verify-after-execute` only when intentionally producing implementation artifacts without verifier scoring.
+
+To resume an existing remediation ledger without rebuilding packets:
+
+```bash
+REPO_ROOT=/path/to/repo \
+PROFILE=your-product \
+REMEDIATION_DIR=/path/to/repo/docs/audit/<date>-remediation-run-ledger \
+REVIEWER_AGENT=codex \
+./run-remediation.sh \
+  --audit-run /path/to/repo/docs/audit/<date>-launch-readiness-run \
   --execute \
-  --verify
+  --no-catalog \
+  --verbose
+```
+
+For a verifier refresh after the product code changed or prior verifier artifacts are stale:
+
+```bash
+./run-remediation.sh \
+  --audit-run /path/to/repo/docs/audit/<date>-launch-readiness-run \
+  --rerun-verifiers \
+  --rerun-final-review \
+  --no-catalog \
+  --verbose
 ```
 
 ### Build a feature from a spec
@@ -364,6 +390,9 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_AUTO_REVISE` | `1` | Re-run units that verifier marks `revise` when findings are safe for targeted automatic revision. |
 | `REMEDIATION_MAX_REVISION_ROUNDS` | `1` | Maximum automatic revision loops before final review. |
 | `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` | `8` | Maximum verifier finding rows allowed for automatic revision; larger units are left for manual triage or splitting. |
+| `REMEDIATION_REVISE_NEXT_LIMIT` | `8` | Maximum safe queue rows selected by one `--revise-next` batch. Set `0` for all currently safe rows. |
+| `REMEDIATION_REVISE_NEXT_MAX_ROUNDS` | `10` | Maximum deterministic revise-next batches before stopping. Set `0` to continue until no safe candidates or no queue progress. |
+| `REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS` | `20` | Maximum deterministic queue-drain action rounds. Set `0` to continue until only manual buckets remain or progress stops. |
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
 | `REMEDIATION_COLLECT_EVIDENCE` | `1` | Automatically collect deterministic launch evidence after verification surfaces `launch_evidence` or `sandbox_blocked` findings. Set to `0` only to force a manual evidence pass. |
@@ -374,6 +403,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_AUTO_METADATA_CLOSEOUT` | `1` | Automatically repair remediation-owned packet/summary closeout metadata findings, then reverify those units. Does not edit product code or product docs. |
 | `REMEDIATION_SANDBOX_PYTEST_FALLBACK` | `1` | Retry pytest commands with `-p no:rerunfailures` when `pytest_rerunfailures` is blocked by sandbox socket permissions. |
 | `REMEDIATION_STATIC_PRECHECKS` | `1` | Run deterministic static hygiene prechecks and include their output in verifier prompts. Profiles may add an executable `prechecks.sh`; the built-in scan flags obvious frontend inline-English JSX literals. |
+| `REMEDIATION_AUTO_DRAIN_QUEUE` | `1` | On a resumed remediation directory with no explicit phase, drain safe queue actions by default. Set `0` or pass `--no-drain-queue` for bookkeeping-only resume. |
+| `REMEDIATION_VERIFY_AFTER_EXECUTE` | `1` | Run verifiers automatically after an implementation wave. Set `0` or pass `--no-verify-after-execute` only for implementation-only artifact generation. |
 | `REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS` | `0` | Set to `1` to run profile-wide native checks such as full lint/build/test after each implementation unit. By default the remediation runner skips those broad commands so unrelated repo drift does not fail focused unit remediation. |
 | `REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL` | `0` | Set to `1` to preserve `MAX_PARALLEL` when `REPO_ROOT` is not a git root. This deliberately allows parallel units to edit the same live workspace without git worktree isolation. Use only when the remediation runner is the only writer. |
 | `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing or auto-revising a large raw one-packet-per-PX manifest. |
@@ -395,12 +426,15 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `--scorecard FILE` | Seed remediation from an explicit scorecard file. When no audit run is supplied, the scorecard becomes the only packet source. |
 | `--execute` | Run coordinator and implementation agents. |
 | `--verify` | Run verifier agents after implementation. |
+| `--no-verify-after-execute` | Skip the default verifier/final-review drain after an implementation wave. |
 | `--verify-only` | Run only verifiers against an existing remediation directory. |
 | `--summary-only` | Regenerate aggregate findings, summary, and queue without running agents. |
 | `--finalize-only` | Run final review against existing verifier artifacts. With default settings, stale final-review inputs rerun automatically. |
 | `--rerun-verifiers` | Force verifier agents to rerun even when checkpoints exist. |
 | `--rerun-final-review` | Force final review to rerun even when its input fingerprint is unchanged. |
 | `--revise-next` | Select safe `needs_targeted_revision` rows from the current queue and run targeted implementation plus verification. |
+| `--drain-queue` | Keep deriving safe next actions from the current queue: verify missing/stale rows, revise safe rows, execute pending split children, repair metadata, collect deterministic evidence, refresh final review, and regenerate summaries. |
+| `--no-drain-queue` | Disable default queue drain for a reused remediation directory. |
 | `--revise-existing` | Skip cataloging and re-run implementation against existing packets. |
 | `--split-incomplete` | Detect and split oversized or incomplete units before re-running. |
 | `--no-catalog` | Skip the cataloger when `--execute` is set. |
@@ -433,6 +467,12 @@ The normal remediation lifecycle is deterministic: catalog, coordinate, implemen
 Browser evidence wrappers receive `PORTAL_AUDIT_RUN_DIR`, `PORTAL_AUDIT_JOB_ID`, `PORTAL_AUDIT_JOURNEY_SLUG`, `PORTAL_AUDIT_ARTIFACT_DIR`, and `PORTAL_AUDIT_EVIDENCE_MODE` during deterministic evidence collection. A PASS `summary.json` only counts as reusable evidence when every declared `proof_files[]` entry exists on disk; PASS without durable proof is classified as failed evidence. Queue generation also auto-resolves launch-evidence rows that explicitly depend on another `IU-*` once that target unit is accepted with no unresolved findings.
 
 `03-implementation-units.tsv` is normalized before prompts are rebuilt. Each `unit_id` is an artifact identity and must appear once; when a coordinator emits repeated rows for the same unit, the runner merges the packet lists into one row before planning, implementation, and verification so agents do not overwrite the same prompt, log, summary, verifier, and checkpoint files.
+
+Resume safety is strict by design. If an existing remediation directory has packet files or unit packet IDs missing from `00-master-px-list.tsv`, the runner refuses to continue because resuming would skip real packet work. Rebuild the catalog with `REMEDIATION_REWRITE_PACKETS=1 REMEDIATION_REWRITE_WORKSTREAMS=1 REMEDIATION_REWRITE_UNITS=1 --force-catalog`, or restore the matching master inventory.
+
+Verifier recovery is intentionally conservative. A verifier process may be auto-recovered only when the log contains a usable verifier artifact and no hard runner/API error. Short verifier logs that only contain transport failures, Codex configuration errors, shell syntax failures, or missing command helpers are treated as real failures instead of accepted verifier output.
+
+Native evidence commands are filtered before execution. The runner accepts real command prefixes from verifier artifacts and skips explanatory prose, so a verifier note such as "run the browser proof manually" is recorded as non-executable evidence rather than sent to the shell.
 
 ### Model overrides (Codex)
 
