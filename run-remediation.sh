@@ -4721,6 +4721,7 @@ execute_planners() {
       continue
     fi
     local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+    recover_planner_design_result "$unit_id" "$design_doc" "$REMEDIATION_DIR/logs/plan-$unit_id.log" 2>/dev/null || true
     if final_result_is_pass "$design_doc" && artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
       printf '[resume] recovered completed plan-%s from existing design artifact\n' "$unit_id"
       grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "plan-$unit_id" >> "$CHECKPOINT_FILE"
@@ -5936,6 +5937,7 @@ wave_job_completed_successfully() {
     plan-*)
       local unit_id="${name#plan-}"
       local design="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
+      recover_planner_design_result "$unit_id" "$design" "$log_file" 2>/dev/null || true
       final_result_is_pass "$design" && [[ -s "$design" ]]
       ;;
     implement-*)
