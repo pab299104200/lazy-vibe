@@ -507,6 +507,8 @@ Browser evidence wrappers receive `PORTAL_AUDIT_RUN_DIR`, `PORTAL_AUDIT_JOB_ID`,
 
 Resume safety is strict by design. If an existing remediation directory has packet files or unit packet IDs missing from `00-master-px-list.tsv`, the runner refuses to continue because resuming would skip real packet work. Rebuild the catalog with `REMEDIATION_REWRITE_PACKETS=1 REMEDIATION_REWRITE_WORKSTREAMS=1 REMEDIATION_REWRITE_UNITS=1 --force-catalog`, or restore the matching master inventory.
 
+Oversized verifier revisions are split deterministically. When a verifier returns more than `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` non-blocking findings for one parent unit, the runner creates bounded `IU-*-SNN` child packets from those verifier rows instead of revising the oversized parent directly or leaving it as manual-only. Blocking categories still stay manual: `contract_conflict`, true `test_harness`, `blocked`, and explicit `split_required` rows require contract/test-harness/split handling before automatic revision.
+
 Verifier recovery is intentionally conservative. A verifier process may be auto-recovered only when the log contains a usable verifier artifact and no hard runner/API error. Short verifier logs that only contain transport failures, Codex configuration errors, shell syntax failures, or missing command helpers are treated as real failures instead of accepted verifier output.
 
 Native evidence commands are filtered before execution. The runner accepts real command prefixes from verifier artifacts and skips explanatory prose, so a verifier note such as "run the browser proof manually" is recorded as non-executable evidence rather than sent to the shell.

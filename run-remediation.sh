@@ -643,6 +643,15 @@ verifier_findings_exceed_auto_revise_limit() {
   ' "$findings"
 }
 
+verifier_findings_count() {
+  local findings="$1"
+  [[ -s "$findings" ]] || {
+    printf '0\n'
+    return 0
+  }
+  awk -F '\t' 'NR > 1 && $1 != "" { count += 1 } END { printf "%d\n", count + 0 }' "$findings"
+}
+
 aggregate_verifier_findings() {
   local aggregate
   aggregate="$(aggregate_verifier_findings_tsv)"
@@ -4077,7 +4086,7 @@ mark_parent_split_decomposed() {
     {
       printf '\n- Status: `split-into-child-units`\n'
       printf -- '- Split child units: `%s`\n' "$child_units"
-      printf -- '- Split reason: deterministic verifier decomposition from `split_required` / sibling-owned `test_harness` findings.\n'
+      printf -- '- Split reason: deterministic verifier decomposition into bounded child units.\n'
     } >> "$packet_file"
   done
 }
@@ -4156,6 +4165,78 @@ decompose_verifier_split_findings() {
     if ((${#created_units[@]} > 0)); then
       local IFS=,
       printf '[split-verifier] parent=%s children=%s\n' "$unit_id" "${created_units[*]}"
+    fi
+  done < <(tail -n +2 "$UNITS_TSV")
+
+  if [[ "$created_any" == "1" ]]; then
+    normalize_units_tsv
+    rebuild_unit_prompts
+    build_final_review_prompt
+  fi
+}
+
+decompose_oversized_verifier_findings() {
+  [[ -s "$UNITS_TSV" && -d "$REMEDIATION_DIR/artifacts" ]] || return 0
+  local created_any=0
+  local unit_id packets_csv group model_class severity rationale
+
+  while IFS=$'\t' read -r unit_id packets_csv group model_class severity rationale; do
+    [[ -z "${unit_id:-}" ]] && continue
+    unit_selected "$unit_id" || continue
+    [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]] && continue
+    [[ "$unit_id" == *-S[0-9][0-9] ]] && continue
+    unit_has_split_children "$unit_id" && continue
+    unit_packets_marked_split_parent "$unit_id" && continue
+
+    local findings_file verifier finding_count
+    findings_file="$(verifier_findings_tsv_for_unit "$unit_id")"
+    verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    [[ -s "$findings_file" && -s "$verifier" ]] || continue
+    verifier_accepts_unit "$unit_id" && continue
+    verifier_has_only_launch_evidence_findings "$unit_id" && continue
+    verifier_has_only_coordinator_or_evidence_findings "$unit_id" && continue
+    verifier_finding_type_blocks_auto_revise "$findings_file" && continue
+    file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' "$verifier" && continue
+    verifier_findings_exceed_auto_revise_limit "$findings_file" || continue
+
+    finding_count="$(verifier_findings_count "$findings_file")"
+    local tmp_rows
+    tmp_rows="$(mktemp)"
+    awk -F '\t' '
+      NR > 1 && $1 != "" &&
+      $3 != "launch_evidence" &&
+      $3 != "sandbox_blocked" &&
+      $3 != "coordinator_cleanup" &&
+      $3 != "packet_metadata" &&
+      $3 != "process_metadata" {
+        print
+      }
+    ' "$findings_file" > "$tmp_rows"
+    [[ -s "$tmp_rows" ]] || {
+      rm -f "$tmp_rows"
+      continue
+    }
+
+    local created_units=()
+    local row_unit row_severity finding_type finding_file finding_line finding required_fix
+    while IFS=$'\t' read -r row_unit row_severity finding_type finding_file finding_line finding required_fix; do
+      [[ "$row_unit" == "$unit_id" ]] || continue
+      local child
+      child="$(append_split_child_unit "$unit_id" "$packets_csv" "$group" "$model_class" "${row_severity:-$severity}" "oversized_$finding_type" "$finding_file" "$finding" "$required_fix" || true)"
+      [[ -n "$child" ]] && created_units+=("$child")
+    done < "$tmp_rows"
+    rm -f "$tmp_rows"
+
+    local child_units
+    child_units="$(split_child_units_csv "$unit_id")"
+    if [[ -n "$child_units" ]]; then
+      mark_parent_split_decomposed "$unit_id" "$packets_csv" "$child_units"
+      append_scope_classification "$unit_id" "split" "oversized_verifier_findings:${finding_count}>${MAX_AUTO_REVISE_FINDINGS}" "$group" "$packets_csv" "$child_units"
+      created_any=1
+    fi
+    if ((${#created_units[@]} > 0)); then
+      local IFS=,
+      printf '[split-verifier] parent=%s reason=oversized-findings findings=%s children=%s\n' "$unit_id" "$finding_count" "${created_units[*]}"
     fi
   done < <(tail -n +2 "$UNITS_TSV")
 
@@ -6255,6 +6336,7 @@ execute_verifier_units() {
   fi
   aggregate_verifier_findings
   decompose_verifier_split_findings
+  decompose_oversized_verifier_findings
   aggregate_verifier_findings
 }
 
@@ -6452,6 +6534,9 @@ execute_queue_drain() {
   [[ "$max_rounds" =~ ^[0-9]+$ ]] || max_rounds=20
 
   run_static_prechecks
+  aggregate_verifier_findings
+  decompose_verifier_split_findings
+  decompose_oversized_verifier_findings
   write_remediation_queue_summary >/dev/null
 
   local round=1 evidence_attempted=0 stalled_action_keys=$'\n'
@@ -6777,6 +6862,9 @@ execute_revision_rounds() {
 
   local round=1
   while ((round <= MAX_REVISION_ROUNDS)); do
+    aggregate_verifier_findings
+    decompose_verifier_split_findings
+    decompose_oversized_verifier_findings
     aggregate_verifier_findings
     local revised_units
     revised_units="$(revised_units_from_verifiers)"
