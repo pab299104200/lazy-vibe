@@ -4829,8 +4829,8 @@ run_command_with_heartbeat() {
           prev_size="$size"
         elif [[ "$stall_threshold" -gt 0 && "$prev_size" -ge 0 ]]; then
           local stall_secs=$((now - last_change_ts))
-          if [[ "$stall_secs" -ge "$stall_threshold" ]] && final_result_is_terminal "$log_file"; then
-            printf '\r[!] %s: stalled after %ds with RESULT — terminating\033[K\n' \
+          if [[ "$stall_secs" -ge "$stall_threshold" ]] && stall_kill_is_safe "$workstream" "$log_file"; then
+            printf '\r[!] %s: stalled after %ds with terminal output/artifacts — terminating\033[K\n' \
               "$display_name" "$elapsed" >&2
             printf '[stall-kill] log stalled after %ds — terminating process\n' "$elapsed" >>"$log_file"
             kill "$cmd_pid" 2>/dev/null || true
@@ -5034,6 +5034,23 @@ final_result_is_terminal() {
   case "$(final_result_value "$1")" in
     PASS|FAIL|INCOMPLETE|BLOCKED) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+stall_kill_is_safe() {
+  local workstream="$1" log_file="$2"
+  final_result_is_terminal "$log_file" && return 0
+
+  case "$workstream" in
+    00-cataloger)
+      catalog_outputs_are_ready
+      ;;
+    plan-*|implement-*|verify-*)
+      wave_job_completed_successfully "$workstream" "$log_file"
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 
@@ -6051,7 +6068,7 @@ wait_for_wave() {
           job_prev_size[idx]="$size"
         elif [[ "$stall_threshold" -gt 0 ]]; then
           local stall_secs=$(( now2 - job_last_change[idx] ))
-          if [[ "$stall_secs" -ge "$stall_threshold" ]] && final_result_is_terminal "${job_log[$idx]}"; then
+          if [[ "$stall_secs" -ge "$stall_threshold" ]] && stall_kill_is_safe "${names_ref[$idx]}" "${job_log[$idx]}"; then
             local elapsed=$(( now2 - job_start[idx] ))
             printf '\r\033[K[!] %s: stalled after %ds - terminating\n' \
               "${names_ref[$idx]}" "$elapsed" >&2
