@@ -58,7 +58,15 @@ mkdir -p "$PROMPT_DIR" "$LOG_DIR"
 cd "$REPO_ROOT"
 case "$RUNNER" in
   claude)
-    claude -p --verbose --output-format stream-json --permission-mode bypassPermissions "$(cat "$PROMPT_FILE")" > "$LOG_FILE" 2>&1
+    if [[ "${CLAUDE_TRANSPORT:-prompt}" == "pty" ]]; then
+      python3 "$(dirname "$0")/claude_pty_runner.py" "$PROMPT_FILE" \
+        claude --permission-mode bypassPermissions > "$LOG_FILE" 2>&1
+    elif [[ "${CLAUDE_TRANSPORT:-prompt}" == "prompt" ]]; then
+      claude -p --verbose --output-format stream-json --permission-mode bypassPermissions "$(cat "$PROMPT_FILE")" > "$LOG_FILE" 2>&1
+    else
+      printf 'Unknown CLAUDE_TRANSPORT=%s; expected prompt or pty\n' "${CLAUDE_TRANSPORT:-}" >&2
+      exit 2
+    fi
     ;;
   codex)
     codex exec --ephemeral --full-auto --skip-git-repo-check -C "$REPO_ROOT" - < "$PROMPT_FILE" > "$LOG_FILE" 2>&1

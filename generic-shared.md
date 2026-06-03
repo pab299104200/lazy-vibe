@@ -19,6 +19,17 @@ Rules:
 9. Browser or E2E evidence must prove authenticated/product state, not just HTTP 200 or shell rendering.
 10. If the repo lacks a supported runtime harness for a critical launch journey, mark the journey unverified instead of inventing unsupported proof.
 
+## Lattice Cognitive Workspace Protocol
+
+Use Lattice memory and context tools when available. This is part of the harness contract, not optional polish.
+
+- At the start of any non-trivial audit, remediation, verification, review, or feature task, call `get_task_memory` for the current repo, job/unit/task id, and objective before broad source exploration. If the MCP client defers schemas, first load the Lattice tool schemas for `get_task_memory`, `inspect_working_memory`, `save_memory`, `consolidate_session`, `propose_memory_evolution`, `verify_explain_memory`, `list_memory_conflicts`, `get_event_trace`, and `get_memory_metrics`.
+- Use `get_context_capsule`, `prepare_change`, `diagnose_failure`, `summarize_subsystem`, `get_docs_capsule`, `find_relevant_tests`, and `impact_from_diff` instead of blind repo-wide reading when the tool is available and responsive.
+- If a Lattice context call returns partial results because indexing is still warming, use the returned cached/partial context immediately and continue with targeted reads. Do not stall waiting for a perfect graph unless the task depends on exact graph completeness.
+- Save durable, reusable outcomes with `save_memory` when you learn a repo-specific invariant, successful command, false lead, migration constraint, deployment detail, or recurring failure mode. Include validity conditions and invalidation triggers where the tool supports them.
+- At task closeout, call `consolidate_session` when available so successful fixes, verified commands, and unresolved risks are discoverable in later sessions.
+- Do not use memory as evidence by itself. Treat memory as a navigation and continuity aid, then verify claims against current code, docs, logs, tests, or artifacts.
+
 Severity scale:
 
 - **P0** - blocks launch: exploitable security issue, data loss, cross-boundary leak, broken core launch claim, regulatory/compliance blocker, or unrecoverable critical workflow.

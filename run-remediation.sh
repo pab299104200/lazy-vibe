@@ -2,7 +2,31 @@
 # shellcheck disable=SC2016
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${REMEDIATION_SCRIPT_SNAPSHOT:-0}" != "1" ]]; then
+  _remediation_script_source="${BASH_SOURCE[0]}"
+  _remediation_script_dir="$(cd "$(dirname "$_remediation_script_source")" && pwd)"
+  _remediation_script_snapshot="$(mktemp "${TMPDIR:-/tmp}/run-remediation.XXXXXX.sh")"
+  cp "$_remediation_script_source" "$_remediation_script_snapshot"
+  chmod 700 "$_remediation_script_snapshot"
+  if ! bash -n "$_remediation_script_snapshot"; then
+    printf '[fatal] run-remediation.sh has a shell syntax error; refusing to start a long remediation run\n' >&2
+    printf '[fatal] source=%s snapshot=%s\n' "$_remediation_script_source" "$_remediation_script_snapshot" >&2
+    exit 2
+  fi
+  export REMEDIATION_SCRIPT_SNAPSHOT=1
+  export REMEDIATION_SCRIPT_DIR="$_remediation_script_dir"
+  export REMEDIATION_SCRIPT_ORIGINAL="$_remediation_script_source"
+  exec bash "$_remediation_script_snapshot" "$@"
+fi
+
+SCRIPT_DIR="${REMEDIATION_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+
+# Harness runs must never block in an interactive git editor. These exports also
+# cover implementer/verifier child processes launched from this script.
+export GIT_EDITOR="${GIT_EDITOR:-true}"
+export GIT_SEQUENCE_EDITOR="${GIT_SEQUENCE_EDITOR:-true}"
+export GIT_MERGE_AUTOEDIT="${GIT_MERGE_AUTOEDIT:-no}"
+
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/generic-shared.md}"
 PRODUCT_PROFILE="${PRODUCT_PROFILE:-}"
@@ -16,9 +40,19 @@ CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-0}"
 AUTO_REVISE="${REMEDIATION_AUTO_REVISE:-1}"
 MAX_REVISION_ROUNDS="${REMEDIATION_MAX_REVISION_ROUNDS:-1}"
 MAX_AUTO_REVISE_FINDINGS="${REMEDIATION_MAX_AUTO_REVISE_FINDINGS:-8}"
+REVISE_NEXT_LIMIT="${REMEDIATION_REVISE_NEXT_LIMIT:-8}"
+REVISE_NEXT_MAX_ROUNDS="${REMEDIATION_REVISE_NEXT_MAX_ROUNDS:-10}"
+QUEUE_DRAIN_MAX_ROUNDS="${REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS:-20}"
 EXECUTE=0
 VERIFY=0
 VERIFY_ONLY=0
+FINALIZE_ONLY=0
+SUMMARY_ONLY=0
+STATE_RESUME=0
+FORCE_VERIFY=0
+FORCE_FINAL_REVIEW=0
+REVISE_NEXT=0
+DRAIN_QUEUE=0
 DRY_RUN=0
 VERBOSE="${VERBOSE:-0}"
 ONLY_GROUP=""
@@ -54,6 +88,14 @@ REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-0}"
 REMEDIATION_COMMIT_ROOTS="${REMEDIATION_COMMIT_ROOTS:-backend,frontend}"
 REMEDIATION_COLLECT_EVIDENCE="${REMEDIATION_COLLECT_EVIDENCE:-1}"
 REMEDIATION_EVIDENCE_MAX_ROUNDS="${REMEDIATION_EVIDENCE_MAX_ROUNDS:-1}"
+REMEDIATION_EVIDENCE_MODE="${REMEDIATION_EVIDENCE_MODE:-targeted}"
+REMEDIATION_AUTO_RERUN_FINAL_REVIEW="${REMEDIATION_AUTO_RERUN_FINAL_REVIEW:-1}"
+REMEDIATION_AUTO_VERIFY_MISSING="${REMEDIATION_AUTO_VERIFY_MISSING:-1}"
+REMEDIATION_AUTO_METADATA_CLOSEOUT="${REMEDIATION_AUTO_METADATA_CLOSEOUT:-1}"
+REMEDIATION_SANDBOX_PYTEST_FALLBACK="${REMEDIATION_SANDBOX_PYTEST_FALLBACK:-1}"
+REMEDIATION_STATIC_PRECHECKS="${REMEDIATION_STATIC_PRECHECKS:-1}"
+REMEDIATION_AUTO_DRAIN_QUEUE="${REMEDIATION_AUTO_DRAIN_QUEUE:-1}"
+REMEDIATION_VERIFY_AFTER_EXECUTE="${REMEDIATION_VERIFY_AFTER_EXECUTE:-1}"
 NO_CATALOG=0
 FEATURE=""
 SCORECARD=""
@@ -61,7 +103,7 @@ SCORECARD_ONLY_SOURCE=0
 
 usage() {
   cat <<'USAGE'
-Usage: run-remediation.sh --audit-run RUN_DIR [--feature SLUG] [--scorecard FILE] [--execute] [--verify] [--verify-only] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--force-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
+Usage: run-remediation.sh --audit-run RUN_DIR [--feature SLUG] [--scorecard FILE] [--execute] [--verify] [--no-verify-after-execute] [--verify-only] [--finalize-only] [--summary-only] [--rerun-verifiers] [--rerun-final-review] [--revise-next] [--drain-queue] [--no-drain-queue] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--force-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
 
 Environment:
   REMEDIATION_DIR             Output directory for remediation plan and logs.
@@ -80,6 +122,15 @@ Environment:
                               Max implement/verify revision rounds after first verification. Defaults to 1.
   REMEDIATION_MAX_AUTO_REVISE_FINDINGS
                               Max verifier finding rows allowed for automatic revision. Defaults to 8.
+  REMEDIATION_REVISE_NEXT_LIMIT
+                              Max safe queue units selected by --revise-next. Defaults to 8.
+                              Set to 0 for all currently safe candidates.
+  REMEDIATION_REVISE_NEXT_MAX_ROUNDS
+                              Max deterministic --revise-next batches before stopping. Defaults to 10.
+                              Set to 0 to continue until no safe candidates or no queue progress.
+  REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS
+                              Max deterministic --drain-queue action rounds. Defaults to 20.
+                              Set to 0 to continue until only manual buckets remain or progress stops.
   REMEDIATION_REVISION_MAX_PARALLEL
                               Parallelism during revision rounds. Defaults to 2.
   REMEDIATION_VERIFY_SCOPE    implementation or launch. Defaults to implementation.
@@ -109,8 +160,37 @@ Environment:
                               1 to automatically collect deterministic launch evidence after
                               verification finds only evidence/coordination gaps. Defaults to 1.
                               Set to 0 only to force a manual evidence pass.
+  REMEDIATION_EVIDENCE_MODE   targeted or full. Defaults to targeted. Targeted mode exports
+                              PORTAL_AUDIT_SKIP_RUNTIME_QUALITY=1 for browser evidence wrappers
+                              so proof-specific Playwright evidence is not failed by unrelated
+                              Lighthouse/runtime-quality gates.
   REMEDIATION_EVIDENCE_MAX_ROUNDS
                               Max collect-evidence then verify-only loops. Defaults to 1.
+  REMEDIATION_AUTO_RERUN_FINAL_REVIEW
+                              1 to rerun final review automatically when verifier inputs changed.
+                              Defaults to 1.
+  REMEDIATION_AUTO_VERIFY_MISSING
+                              1 to verify queue rows with missing/unreadable verifier artifacts
+                              during default state resume. Defaults to 1.
+  REMEDIATION_AUTO_METADATA_CLOSEOUT
+                              1 to auto-repair remediation-owned packet/summary closeout metadata
+                              findings and reverify them. Defaults to 1.
+  REMEDIATION_SANDBOX_PYTEST_FALLBACK
+                              1 to retry pytest commands with -p no:rerunfailures when the
+                              rerunfailures plugin is blocked by sandbox socket permissions.
+                              Defaults to 1.
+  REMEDIATION_STATIC_PRECHECKS
+                              1 to run deterministic static hygiene prechecks and feed their
+                              output into verifier prompts. Defaults to 1.
+  REMEDIATION_AUTO_DRAIN_QUEUE
+                              1 to drain the current remediation queue by default on resumed
+                              runs with no explicit phase. Defaults to 1. Use --no-drain-queue
+                              or set to 0 for summary/resume-only behavior.
+  REMEDIATION_VERIFY_AFTER_EXECUTE
+                              1 to run verifiers automatically after an implementation wave.
+                              Defaults to 1. Use --no-verify-after-execute or set to 0 only
+                              when intentionally generating implementation artifacts without
+                              verifier scoring.
   REMEDIATION_ALLOW_WORKTREE_FALLBACK
                               1 to fall back to the live REPO_ROOT when git worktree creation fails.
                               Defaults to 0 for git-root repos because live fallback can make
@@ -180,6 +260,11 @@ Claude agent (IMPLEMENTER_AGENT=claude or REVIEWER_AGENT=claude):
   CLAUDE_EFFORT_HIGH          Effort for high-effort classes. Defaults to high.
   CLAUDE_EFFORT_STANDARD      Effort for standard implementation classes. Defaults to medium.
   CLAUDE_EXTRA_ARGS           Optional extra args appended to claude. Split on shell words.
+  CLAUDE_TRANSPORT            prompt or pty. Defaults to prompt, which uses claude -p.
+                              pty avoids -p by driving interactive claude through a pseudo-terminal.
+  CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS
+                              Seconds of no terminal output after RESULT before PTY mode exits. Defaults to 20.
+  CLAUDE_PTY_STARTUP_SECONDS  Seconds to wait before pasting the prompt into interactive claude. Defaults to 3.
 
 Gemini agent (IMPLEMENTER_AGENT=gemini or REVIEWER_AGENT=gemini):
   Model is chosen automatically from the packet's model class:
@@ -196,14 +281,38 @@ Gemini agent (IMPLEMENTER_AGENT=gemini or REVIEWER_AGENT=gemini):
                               Defaults to 5 (5 minutes at 60s heartbeat). Set to 0 to disable stall detection.
 
 Default behavior builds the master Px list, work packets, grouping, and prompts only.
-Use --execute to run the coordinator and workstream agents. The cataloger runs automatically with --execute unless --no-catalog is set.
+Use --execute to run the coordinator and workstream agents, then verifier/final-review agents by default.
+Use --no-verify-after-execute only for an intentional implementation-only pass.
 Use --no-catalog to skip the cataloger when --execute is set (useful when packets were hand-edited or the cataloger already ran).
 Use --recoordinate to strip coordinate-* checkpoint entries and re-run workstream coordinators against incomplete packets only. Combine with --no-catalog --no-auto-split --execute to resume from open packets without touching the catalog or splitting logic.
 Use --no-normalize to skip workstream source-kind splitting on resume runs where normalization has already been done.
 Use --catalog-with-codex to run the cataloger explicitly without --execute (plan-only mode with catalog refinement).
 Use --verify to run read-only verifier agents after workstream implementation.
 Use --verify-only to run only verifier and final-review agents against an existing remediation directory.
+Use --finalize-only to skip implementation/verifier agents and regenerate aggregate findings,
+run or skip the final review based on its input fingerprint, and write summary/queue outputs.
+Use --summary-only to skip all agents and only regenerate aggregate findings, run summary,
+and remediation queue outputs.
+By default, a reused remediation directory drains deterministically from current state:
+missing/stale verifiers are refreshed, safe targeted revisions are implemented and verified,
+pending split children are executed, deterministic evidence is collected, final review is
+refreshed, and summaries/queues are regenerated. It stops when only manual buckets remain.
+Use --no-drain-queue to skip those automatic actions and only do resume bookkeeping.
+Use --rerun-verifiers to explicitly rerun completed/stale verifier sections.
+Use --rerun-final-review to explicitly rerun a completed/stale final review.
+Use --revise-next to implement and verify the next safe needs_targeted_revision units
+from the current remediation queue, leaving blocked/contract/test-harness/split work untouched.
+It selects at most REMEDIATION_REVISE_NEXT_LIMIT units per batch in queue order by default,
+then repeats deterministically until safe candidates are exhausted, the queue stops improving,
+or REMEDIATION_REVISE_NEXT_MAX_ROUNDS is reached.
+Use --drain-queue to keep deriving safe next actions from the current queue:
+refresh not_verified units, revise safe needs_targeted_revision units, execute pending split
+children, repair remediation metadata, collect deterministic evidence, and refresh final review.
+It stops when only manual buckets remain, such as blocked, contract_conflict, true test_harness,
+or launch evidence that cannot be collected deterministically.
+Use --no-drain-queue to disable the default queue drain on a reused remediation directory.
 Use --revise-existing with REMEDIATION_DIR to rerun implementation against existing packet/verifier artifacts instead of regenerating packets.
+When --revise-existing is combined with --execute, the selected verifier sections are rerun automatically so the queue cannot remain on stale verifier artifacts.
 Use --feature or --scorecard to seed remediation from a feature scorecard. When no --audit-run is supplied, the scorecard becomes the source of truth for packet extraction.
 Use --split-incomplete to detect oversized/incomplete/revise units, create child implementation units, and run those children when --execute is set.
 Oversized unit detection runs automatically before execution by default; use --no-auto-split to disable it.
@@ -234,9 +343,45 @@ while (($#)); do
       VERIFY=1
       shift
       ;;
+    --no-verify-after-execute)
+      REMEDIATION_VERIFY_AFTER_EXECUTE=0
+      shift
+      ;;
     --verify-only)
       VERIFY=1
       VERIFY_ONLY=1
+      shift
+      ;;
+    --finalize-only)
+      FINALIZE_ONLY=1
+      shift
+      ;;
+    --summary-only)
+      SUMMARY_ONLY=1
+      shift
+      ;;
+    --rerun-verifiers)
+      FORCE_VERIFY=1
+      VERIFY=1
+      VERIFY_ONLY=1
+      shift
+      ;;
+    --rerun-final-review)
+      FORCE_FINAL_REVIEW=1
+      FINALIZE_ONLY=1
+      shift
+      ;;
+    --revise-next)
+      REVISE_NEXT=1
+      shift
+      ;;
+    --drain-queue)
+      DRAIN_QUEUE=1
+      EXECUTE=1
+      shift
+      ;;
+    --no-drain-queue)
+      REMEDIATION_AUTO_DRAIN_QUEUE=0
       shift
       ;;
     --revise-existing)
@@ -405,13 +550,16 @@ fi
 # know independence is reduced.
 if [[ -z "$REVIEWER_AGENT" && -z "${REVIEWER_RUNNER:-}" && -z "${VERIFICATION_RUNNER:-}" && -z "${REVIEW_RUNNER:-}" ]]; then
   REVIEWER_AGENT="$IMPLEMENTER_AGENT"
-  if [[ "$VERIFY" == "1" || "$VERIFY_ONLY" == "1" ]]; then
+  if [[ "$VERIFY" == "1" || "$VERIFY_ONLY" == "1" || "$FINALIZE_ONLY" == "1" ]]; then
     printf '[warn] REVIEWER_AGENT not set; defaulting to IMPLEMENTER_AGENT=%s. Same-model verification reduces independence — set REVIEWER_AGENT to a different agent for stronger review.\n' "$IMPLEMENTER_AGENT" >&2
   fi
 fi
 
 PX_TSV="$REMEDIATION_DIR/00-master-px-list.tsv"
 PX_MD="$REMEDIATION_DIR/01-master-px-list.md"
+RAW_PX_TSV="$REMEDIATION_DIR/00-raw-px-list.tsv"
+BLOCKER_LEDGER_TSV="$REMEDIATION_DIR/00-blocker-ledger.tsv"
+BLOCKER_LEDGER_MD="$REMEDIATION_DIR/00-blocker-ledger.md"
 WORKSTREAMS_TSV="$REMEDIATION_DIR/02-workstreams.tsv"
 UNITS_TSV="$REMEDIATION_DIR/03-implementation-units.tsv"
 AUDIT_SOURCE_MANIFEST="$REMEDIATION_DIR/00-audit-source-manifest.tsv"
@@ -511,6 +659,114 @@ aggregate_verifier_findings() {
   mv "$tmp" "$aggregate"
 }
 
+
+hash_file_for_fingerprint() {
+  local label="$1" file="$2"
+  if [[ -s "$file" ]]; then
+    printf 'file\t%s\t' "$label"
+    sha256sum "$file"
+  else
+    printf 'missing\t%s\n' "$label"
+  fi
+}
+
+verifier_fingerprint_file() {
+  printf '%s/artifacts/verify-%s.inputs.sha256\n' "$REMEDIATION_DIR" "$1"
+}
+
+verifier_input_fingerprint() {
+  local unit_id="$1" packets_csv="$2"
+  {
+    printf 'kind\tverifier\n'
+    printf 'unit\t%s\n' "$unit_id"
+    printf 'packets\t%s\n' "$packets_csv"
+    hash_file_for_fingerprint "manifest:03-implementation-units.tsv" "$UNITS_TSV"
+
+    local packet_id packet_file
+    IFS=',' read -ra _fingerprint_packets <<< "$packets_csv"
+    for packet_id in "${_fingerprint_packets[@]}"; do
+      packet_id="${packet_id#"${packet_id%%[![:space:]]*}"}"
+      packet_id="${packet_id%"${packet_id##*[![:space:]]}"}"
+      [[ -n "$packet_id" ]] || continue
+      packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+      hash_file_for_fingerprint "packet:$packet_id" "$packet_file"
+    done
+
+    hash_file_for_fingerprint "implementation-summary:$unit_id" "$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+    hash_file_for_fingerprint "implementation-log:$unit_id" "$REMEDIATION_DIR/logs/implement-$unit_id.log"
+  } | sha256sum | awk '{print $1}'
+}
+
+write_verifier_input_fingerprint() {
+  local unit_id="$1" packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  [[ -n "$packets_csv" ]] || return 1
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  verifier_input_fingerprint "$unit_id" "$packets_csv" > "$(verifier_fingerprint_file "$unit_id")"
+}
+
+verifier_input_fingerprint_matches() {
+  local unit_id="$1" packets_csv="$2" fingerprint_file
+  fingerprint_file="$(verifier_fingerprint_file "$unit_id")"
+  [[ -s "$fingerprint_file" ]] || return 1
+  [[ "$(cat "$fingerprint_file")" == "$(verifier_input_fingerprint "$unit_id" "$packets_csv")" ]]
+}
+
+final_review_fingerprint_file() {
+  printf '%s/artifacts/99-final-review.inputs.sha256\n' "$REMEDIATION_DIR"
+}
+
+final_review_input_fingerprint() {
+  {
+    printf 'kind\tfinal-review\n'
+    printf 'audit_run\t%s\n' "$AUDIT_RUN"
+    printf 'verify_scope\t%s\n' "$VERIFY_SCOPE"
+    hash_file_for_fingerprint "manifest:01-px.tsv" "$PX_TSV"
+    hash_file_for_fingerprint "manifest:02-workstreams.tsv" "$WORKSTREAMS_TSV"
+    hash_file_for_fingerprint "manifest:03-implementation-units.tsv" "$UNITS_TSV"
+    hash_file_for_fingerprint "aggregate:05-verifier-findings.tsv" "$(aggregate_verifier_findings_tsv)"
+    hash_file_for_fingerprint "scope:05-scope-classification.tsv" "$REMEDIATION_DIR/05-scope-classification.tsv"
+
+    if [[ -d "$REMEDIATION_DIR/packets" ]]; then
+      find "$REMEDIATION_DIR/packets" -maxdepth 1 -type f -name 'PX-*.md' -print 2>/dev/null \
+        | sort \
+        | while IFS= read -r file; do
+            hash_file_for_fingerprint "packet:${file#"$REMEDIATION_DIR/packets/"}" "$file"
+          done
+    fi
+
+    if [[ -d "$REMEDIATION_DIR/artifacts" ]]; then
+      find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -type f \
+        \( -name 'verify-*.md' -o -name 'verify-*-findings.tsv' -o -name 'verify-*.inputs.sha256' \) -print 2>/dev/null \
+        | sort \
+        | while IFS= read -r file; do
+            hash_file_for_fingerprint "artifact:${file#"$REMEDIATION_DIR/artifacts/"}" "$file"
+          done
+    fi
+  } | sha256sum | awk '{print $1}'
+}
+
+write_final_review_input_fingerprint() {
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  final_review_input_fingerprint > "$(final_review_fingerprint_file)"
+}
+
+final_review_input_fingerprint_matches() {
+  local fingerprint_file
+  fingerprint_file="$(final_review_fingerprint_file)"
+  [[ -s "$fingerprint_file" ]] || return 1
+  [[ "$(cat "$fingerprint_file")" == "$(final_review_input_fingerprint)" ]]
+}
+
+remove_checkpoint_entry() {
+  local entry="$1"
+  [[ -f "$CHECKPOINT_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  grep -vxF "$entry" "$CHECKPOINT_FILE" > "$tmp" || true
+  mv "$tmp" "$CHECKPOINT_FILE"
+}
+
 combine_unit_lists() {
   printf '%s\n' "$@" |
     tr ',' '\n' |
@@ -548,6 +804,17 @@ append_scope_classification() {
     "$(tsv_escape "$child_units")" >> "$SCOPE_CLASSIFICATION_TSV"
 }
 
+verifier_finding_type_exists() {
+  local findings="$1" type="$2"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' -v type="$type" '
+    NR > 1 && $3 == type {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$findings"
+}
+
 pending_split_child_units() {
   local -a units=()
   local unit_id group model_class packets_csv
@@ -557,6 +824,16 @@ pending_split_child_units() {
     local parent_unit="$unit_id"
     parent_unit="${parent_unit%-S[0-9][0-9]}"
     if ! unit_selected "$unit_id" && ! unit_selected "$parent_unit"; then
+      continue
+    fi
+    verifier_accepts_unit "$unit_id" && continue
+    local child_findings child_verifier
+    child_findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+    child_verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    verifier_finding_type_exists "$child_findings" "contract_conflict" && continue
+    verifier_finding_type_exists "$child_findings" "test_harness" && continue
+    verifier_finding_type_exists "$child_findings" "blocked" && continue
+    if file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' "$child_verifier"; then
       continue
     fi
 
@@ -722,6 +999,13 @@ unit_split_children_pending() {
   while IFS=$'\t' read -r child_id packets_csv _group _model _severity _rationale; do
     [[ "$child_id" == "$unit_id"-S[0-9][0-9]* ]] || continue
     verifier_accepts_unit "$child_id" && continue
+    verifier_finding_type_exists "$(verifier_findings_tsv_for_unit "$child_id")" "contract_conflict" && continue
+    verifier_finding_type_exists "$(verifier_findings_tsv_for_unit "$child_id")" "test_harness" && continue
+    verifier_finding_type_exists "$(verifier_findings_tsv_for_unit "$child_id")" "blocked" && continue
+    if file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' \
+      "$REMEDIATION_DIR/artifacts/verify-$child_id.md"; then
+      continue
+    fi
     if ! unit_packets_have_terminal_status "$packets_csv"; then
       return 0
     fi
@@ -837,10 +1121,65 @@ verifier_has_only_coordinator_or_evidence_findings() {
   ' "$findings"
 }
 
+verifier_has_only_remediation_metadata_findings() {
+  local unit_id="$1"
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' -v rdir="$REMEDIATION_DIR" '
+    NR > 1 && $1 != "" {
+      count += 1
+      type = $3
+      file = $4
+      details = tolower($4 " " $6 " " $7)
+      if (type == "launch_evidence" || type == "sandbox_blocked") {
+        next
+      }
+      remediation_file = 0
+      if (index(file, rdir "/") == 1) {
+        remediation_file = 1
+      }
+      if (file ~ /^docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
+        remediation_file = 1
+      }
+      if (file ~ /\/docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
+        remediation_file = 1
+      }
+
+      metadata_type = 0
+      if (type == "docs/process" ||
+          type == "process" ||
+          type == "packet_status" ||
+          type == "packet-worklog" ||
+          type == "packet_worklog") {
+        metadata_type = 1
+      }
+      if (type == "docs" && remediation_file) {
+        metadata_type = 1
+      }
+      if (type == "blocked" &&
+          details ~ /(packet.*work.?log|implementation summary|summary.*partial|status: not-started|status: partial)/) {
+        metadata_type = 1
+      }
+
+      if (!metadata_type || (!remediation_file && type != "blocked")) {
+        code_work = 1
+      }
+    }
+    END { exit count > 0 && code_work != 1 ? 0 : 1 }
+  ' "$findings"
+}
+
 unit_evidence_has_failed_status() {
   local unit_id="$1"
   local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
   [[ -d "$unit_dir" ]] || return 1
+  if unit_summary_missing_proofs "$unit_id" >/dev/null; then
+    return 0
+  fi
+  if unit_has_passing_summary_artifact "$unit_id"; then
+    return 1
+  fi
   local status_file command status
   declare -A latest_status_by_command=()
   while IFS= read -r status_file; do
@@ -853,6 +1192,100 @@ unit_evidence_has_failed_status() {
   for status in "${latest_status_by_command[@]}"; do
     [[ "$status" == "fail" ]] && return 0
   done
+  return 1
+}
+
+unit_has_passing_summary_artifact() {
+  local unit_id="$1"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  [[ -d "$unit_dir" ]] || return 1
+  local summary_json
+  while IFS= read -r summary_json; do
+    [[ -f "$summary_json" ]] || continue
+    if python3 - "$summary_json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(1)
+status = str(payload.get("status", "")).strip().upper()
+proof_files = payload.get("proof_files") or []
+if status != "PASS" or not proof_files:
+    raise SystemExit(1)
+missing = []
+for proof in proof_files:
+    proof_path = pathlib.Path(str(proof))
+    if not proof_path.is_absolute():
+        proof_path = path.parent / proof_path
+    if not proof_path.is_file():
+        missing.append(str(proof))
+raise SystemExit(1 if missing else 0)
+PY
+    then
+      return 0
+    fi
+  done < <(find "$unit_dir" -mindepth 2 -maxdepth 3 -name 'summary.json' -print 2>/dev/null | sort)
+  return 1
+}
+
+unit_summary_missing_proofs() {
+  local unit_id="$1"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  [[ -d "$unit_dir" ]] || return 1
+  local summary_json found=1
+  while IFS= read -r summary_json; do
+    [[ -f "$summary_json" ]] || continue
+    if python3 - "$summary_json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(1)
+if str(payload.get("status", "")).strip().upper() != "PASS":
+    raise SystemExit(1)
+proof_files = payload.get("proof_files") or []
+if not proof_files:
+    raise SystemExit(1)
+missing = []
+for proof in proof_files:
+    proof_path = pathlib.Path(str(proof))
+    if not proof_path.is_absolute():
+        proof_path = path.parent / proof_path
+    if not proof_path.is_file():
+        missing.append(str(proof))
+if missing:
+    print(f"{path}: missing proof files: {', '.join(missing)}")
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      found=0
+    fi
+  done < <(find "$unit_dir" -mindepth 2 -maxdepth 3 -name 'summary.json' -print 2>/dev/null | sort)
+  return "$found"
+}
+
+unit_evidence_artifacts_newer_than_file() {
+  local unit_id="$1" baseline="$2"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  [[ -d "$unit_dir" && -s "$baseline" ]] || return 1
+
+  local evidence_file
+  while IFS= read -r evidence_file; do
+    [[ -n "$evidence_file" ]] || continue
+    if [[ "$evidence_file" -nt "$baseline" ]]; then
+      return 0
+    fi
+  done < <(find "$unit_dir" -type f \( -name '*.status' -o -name '*.log' -o -name 'summary.json' -o -name 'proof-summary.json' -o -name '*.har' -o -name '*.png' -o -name '*.json' \) -print 2>/dev/null)
+
   return 1
 }
 
@@ -873,6 +1306,14 @@ unit_packets_have_terminal_status() {
 split_candidate_has_durable_decision() {
   local unit_id="$1" packets_csv="$2"
   unit_has_split_children "$unit_id" && return 0
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  if [[ -s "$findings" ]] && \
+     verifier_findings_exceed_auto_revise_limit "$findings" && \
+     ! verifier_finding_type_blocks_auto_revise "$findings" && \
+     ! verifier_has_only_launch_evidence_findings "$unit_id"; then
+    return 1
+  fi
   unit_packets_have_terminal_status "$packets_csv" && return 0
   verifier_has_only_launch_evidence_findings "$unit_id" && return 0
   split_plan_marks_no_split "$unit_id" && return 0
@@ -1011,10 +1452,37 @@ shell_fragment_is_valid() {
   bash -n < <(printf '%s\n' "$fragment") >/dev/null 2>&1
 }
 
+command_looks_executable() {
+  local command="$1"
+  [[ -n "$command" ]] || return 1
+  case "$command" in
+    cd\ *\ \&\&\ *|\
+    npm\ *|\
+    npx\ *|\
+    pytest*|\
+    python\ *|\
+    python3\ *|\
+    bash\ *|\
+    ./scripts/*|\
+    make\ *|\
+    cargo\ *|\
+    go\ test*|\
+    ruff\ *|\
+    alembic\ *|\
+    pip-audit*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 evidence_command_is_allowed() {
   local command="$1"
   [[ -n "$command" ]] || return 1
   command_is_forbidden "$command" && return 1
+  command_looks_executable "$command" || return 1
   shell_fragment_is_valid "$command" || return 1
   case "$command" in
     "cd backend && python3 -m pytest "*|\
@@ -1217,6 +1685,7 @@ collect_verification_cmds() {
       raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
+      command_looks_executable "$raw" || continue
       command_is_path_reference "$raw" "$worktree" && continue
       if command_is_global_native_check "$raw" && ! native_global_checks_enabled; then
         continue
@@ -1230,6 +1699,7 @@ collect_verification_cmds() {
       raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
       command_is_forbidden "$raw" && continue
+      command_looks_executable "$raw" || continue
       command_is_path_reference "$raw" "$worktree" && continue
       append_unique_line "$raw" commands
     done < <(fallback_verification_cmds "$worktree")
@@ -1245,6 +1715,86 @@ native_test_results_block() {
     cat "$test_log"
   else
     printf 'No native test output available.\n'
+  fi
+  local precheck_log="$REMEDIATION_DIR/artifacts/static-prechecks.log"
+  if [[ -f "$precheck_log" ]]; then
+    printf '\n## Harness Static Prechecks\n'
+    cat "$precheck_log"
+  fi
+}
+
+native_test_placeholder_text() {
+  printf 'No supported verification commands were configured in the product profile or detected from repo defaults.\n'
+}
+
+native_test_log_is_placeholder() {
+  local test_log="$1"
+  [[ -s "$test_log" ]] || return 1
+  [[ "$(cat "$test_log")" == "$(native_test_placeholder_text)" ]]
+}
+
+pytest_rerunfailures_socket_blocked() {
+  local log_file="$1"
+  [[ -s "$log_file" ]] || return 1
+  grep -qiE 'pytest_rerunfailures|rerunfailures' "$log_file" || return 1
+  grep -qiE 'PermissionError: \[Errno 1\] Operation not permitted|socket|forbidden socket|Operation not permitted' "$log_file"
+}
+
+pytest_without_rerunfailures_cmd() {
+  local cmd="$1"
+  [[ "$cmd" == *pytest* ]] || return 1
+  [[ "$cmd" != *"-p no:rerunfailures"* ]] || return 1
+  python3 - "$cmd" <<'PY'
+import re
+import sys
+
+cmd = sys.argv[1]
+if re.search(r'(^|[;&|()\s])python3?\s+-m\s+pytest(\s|$)', cmd):
+    print(re.sub(r'python3?[ \t]+-m[ \t]+pytest', lambda m: m.group(0) + ' -p no:rerunfailures', cmd, count=1))
+elif re.search(r'(^|[;&|()\s])pytest(\s|$)', cmd):
+    print(re.sub(r'(^|[;&|() \t])pytest([ \t]|$)', lambda m: m.group(1) + 'pytest -p no:rerunfailures' + m.group(2), cmd, count=1))
+else:
+    sys.exit(1)
+PY
+}
+
+run_static_prechecks() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  [[ "$REMEDIATION_STATIC_PRECHECKS" == "1" ]] || return 0
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  local log="$REMEDIATION_DIR/artifacts/static-prechecks.log"
+  : > "$log"
+  printf '[static-precheck] repo=%s\n' "$REPO_ROOT" >> "$log"
+
+  local profile_dir=""
+  if [[ -n "$PROFILE" && -d "$PROFILE" ]]; then
+    profile_dir="$PROFILE"
+  elif [[ -n "$PROFILE" && -d "$PROFILES_DIR/$PROFILE" ]]; then
+    profile_dir="$PROFILES_DIR/$PROFILE"
+  fi
+  if [[ -n "$profile_dir" && -x "$profile_dir/prechecks.sh" ]]; then
+    printf '[static-precheck] running profile hook: %s\n' "$profile_dir/prechecks.sh" >> "$log"
+    if (cd "$REPO_ROOT" && "$profile_dir/prechecks.sh") >> "$log" 2>&1; then
+      printf '[static-precheck] profile hook passed\n' >> "$log"
+    else
+      printf '[static-precheck] profile hook reported findings\n' >> "$log"
+    fi
+  fi
+
+  if [[ -d "$REPO_ROOT/frontend/src" ]]; then
+    printf '[static-precheck] frontend inline-English JSX scan\n' >> "$log"
+    local inline_hits
+    inline_hits="$(
+      grep -RInE '>[[:space:]]*[A-Z][A-Za-z0-9 ,;:!?'\''"()/-]{3,}[[:space:]]*<' "$REPO_ROOT/frontend/src" \
+        --include='*.tsx' --include='*.jsx' 2>/dev/null \
+        | grep -Ev 'node_modules|__snapshots__|\.test\.|\.spec\.|aria-hidden|data-testid' \
+        | head -50 || true
+    )"
+    if [[ -n "$inline_hits" ]]; then
+      printf '%s\n' "$inline_hits" >> "$log"
+    else
+      printf '[static-precheck] no obvious inline-English JSX literals found\n' >> "$log"
+    fi
   fi
 }
 
@@ -1402,14 +1952,114 @@ select_gemini_model() {
   esac
 }
 
+write_lattice_mcp_config() {
+  local dest="$1" workspace="${2:-$REPO_ROOT}"
+  local command="${LATTICE_MCP_COMMAND:-/home/pete/cadres/lattice/daemon/target/release/lattice}"
+  if [[ -n "${MCP_CONFIG:-}" && -f "${MCP_CONFIG:-}" ]]; then
+    cp "$MCP_CONFIG" "$dest"
+    return
+  fi
+  if [[ -n "${CLAUDE_MCP_CONFIG:-}" && -f "${CLAUDE_MCP_CONFIG:-}" ]]; then
+    cp "$CLAUDE_MCP_CONFIG" "$dest"
+    return
+  fi
+  if [[ "${LATTICE_MCP_AUTO:-1}" != "1" ]]; then
+    if [[ -f "$workspace/.mcp.json" ]]; then
+      cp "$workspace/.mcp.json" "$dest"
+    elif [[ -f "$REPO_ROOT/.mcp.json" ]]; then
+      cp "$REPO_ROOT/.mcp.json" "$dest"
+    elif [[ -f "$workspace/.gemini/settings.json" ]]; then
+      cp "$workspace/.gemini/settings.json" "$dest"
+    elif [[ -f "$REPO_ROOT/.gemini/settings.json" ]]; then
+      cp "$REPO_ROOT/.gemini/settings.json" "$dest"
+    else
+      printf '{"mcpServers":{}}\n' > "$dest"
+    fi
+    return
+  fi
+  python3 - "$dest" "$workspace" "$command" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+dest = Path(sys.argv[1])
+workspace = sys.argv[2]
+command = sys.argv[3]
+config = {"mcpServers": {}}
+for candidate in (
+    Path(workspace) / ".mcp.json",
+    Path(workspace) / ".gemini" / "settings.json",
+    Path.cwd() / ".mcp.json",
+):
+    if candidate.exists():
+        try:
+            loaded = json.loads(candidate.read_text())
+            if isinstance(loaded, dict):
+                config = loaded
+                break
+        except json.JSONDecodeError:
+            pass
+servers = config.setdefault("mcpServers", {})
+focus_files = []
+for value in os.environ.get("LATTICE_MCP_FOCUS_FILES", "").replace(",", "\n").splitlines():
+    value = value.strip()
+    if value and value not in focus_files:
+        focus_files.append(value)
+focus_dirs = []
+for value in os.environ.get("LATTICE_MCP_FOCUS_DIRS", "").replace(",", "\n").splitlines():
+    value = value.strip()
+    if value and value not in focus_dirs:
+        focus_dirs.append(value)
+args = ["--stdio", "--workspace", workspace]
+for value in focus_files:
+    args.extend(["--focus-file", value])
+for value in focus_dirs:
+    args.extend(["--focus-dir", value])
+servers["lattice"] = {
+    "type": "stdio",
+    "command": command,
+    "args": args,
+}
+dest.write_text(json.dumps(config, indent=2) + "\n")
+PY
+}
+
+lattice_codex_args_json() {
+  local workspace="${1:-$REPO_ROOT}"
+  python3 - "$workspace" <<'PY'
+import json
+import os
+import sys
+
+workspace = sys.argv[1]
+def parse_env(name):
+    values = []
+    for value in os.environ.get(name, "").replace(",", "\n").splitlines():
+        value = value.strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+args = ["--stdio", "--workspace", workspace]
+for value in parse_env("LATTICE_MCP_FOCUS_FILES"):
+    args.extend(["--focus-file", value])
+for value in parse_env("LATTICE_MCP_FOCUS_DIRS"):
+    args.extend(["--focus-dir", value])
+print(json.dumps(args))
+PY
+}
+
 # Called via run_command_with_heartbeat so stdout/stderr are already redirected to the log.
-# claude has no -C flag; subshell into REPO_ROOT so its tools resolve paths correctly.
-# stream-json+verbose writes each conversation turn as a JSON event immediately rather than
-# buffering until task completion. The python3 filter converts events to human-readable text.
+# claude has no -C flag; subshell into the worktree so its tools resolve paths correctly.
 _exec_claude() {
   local prompt_file="$1" class="$2" worktree_dir="${3:-$REPO_ROOT}"
-  local cmd=(claude -p --verbose --output-format stream-json
-    --no-session-persistence --dangerously-skip-permissions)
+  local transport="${CLAUDE_TRANSPORT:-prompt}"
+  local cmd=(claude)
+  if [[ "$transport" == "prompt" ]]; then
+    cmd+=(-p --verbose --output-format stream-json --no-session-persistence)
+  fi
+  cmd+=(--dangerously-skip-permissions)
   local model effort mcp_cfg
   model="$(select_claude_model "$class")"
   effort="$(select_claude_effort "$class")"
@@ -1421,12 +2071,109 @@ _exec_claude() {
     cmd+=("${extra_args[@]}")
   fi
   mcp_cfg="$(mktemp --suffix=.json)"
-  if [[ -f "$REPO_ROOT/.gemini/settings.json" ]]; then
-    cp "$REPO_ROOT/.gemini/settings.json" "$mcp_cfg"
-  else
-    printf '{"mcpServers":{}}\n' > "$mcp_cfg"
-  fi
+  write_lattice_mcp_config "$mcp_cfg" "$REPO_ROOT"
   cmd+=(--strict-mcp-config --mcp-config "$mcp_cfg")
+
+  if [[ "$transport" == "pty" ]]; then
+    (
+      cd "$worktree_dir"
+      CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS="${CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS:-20}" \
+      CLAUDE_PTY_STARTUP_SECONDS="${CLAUDE_PTY_STARTUP_SECONDS:-3}" \
+      python3 -u - "$prompt_file" "${cmd[@]}" <<'PY'
+import os
+import re
+import shlex
+import sys
+import time
+
+try:
+    import pexpect
+except Exception as exc:
+    sys.stderr.write(f"[claude-pty] pexpect is required for CLAUDE_TRANSPORT=pty: {exc}\n")
+    raise SystemExit(2)
+
+prompt_file = sys.argv[1]
+cmd = sys.argv[2:]
+prompt = open(prompt_file, encoding="utf-8").read()
+startup_seconds = float(os.environ.get("CLAUDE_PTY_STARTUP_SECONDS", "3"))
+idle_after_result = float(os.environ.get("CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS", "20"))
+result_re = re.compile(r"RESULT:\s*(PASS|FAIL|INCOMPLETE|BLOCKED)", re.I)
+error_re = re.compile(r"(login required|not authenticated|rate limit|permission denied|error:)", re.I)
+
+sys.stdout.write("[claude-pty] spawning: " + " ".join(shlex.quote(part) for part in cmd) + "\n")
+sys.stdout.flush()
+child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", timeout=1, echo=False, dimensions=(40, 160))
+last_output = time.monotonic()
+result_seen = False
+output_tail = ""
+
+end_startup = time.monotonic() + startup_seconds
+while time.monotonic() < end_startup:
+    try:
+        chunk = child.read_nonblocking(size=4096, timeout=0.25)
+    except pexpect.TIMEOUT:
+        continue
+    except pexpect.EOF:
+        sys.stdout.write("\n[claude-pty] claude exited before prompt was sent\n")
+        sys.stdout.flush()
+        raise SystemExit(child.exitstatus if child.exitstatus is not None else 1)
+    if chunk:
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+        last_output = time.monotonic()
+        output_tail = (output_tail + chunk)[-8000:]
+
+child.send("\x1b[200~" + prompt + "\x1b[201~")
+child.send("\r")
+sys.stdout.write("\n[claude-pty] prompt pasted; monitoring terminal output\n")
+sys.stdout.flush()
+
+while True:
+    try:
+        chunk = child.read_nonblocking(size=4096, timeout=1)
+    except pexpect.TIMEOUT:
+        now = time.monotonic()
+        if result_seen and now - last_output >= idle_after_result:
+            sys.stdout.write(f"\n[claude-pty] RESULT observed and terminal idle for {idle_after_result:.0f}s; exiting session\n")
+            sys.stdout.flush()
+            child.sendcontrol("c")
+            time.sleep(0.5)
+            child.sendline("/exit")
+            try:
+                child.expect(pexpect.EOF, timeout=5)
+            except Exception:
+                child.terminate(force=True)
+            raise SystemExit(0)
+        continue
+    except pexpect.EOF:
+        sys.stdout.write("\n[claude-pty] claude exited\n")
+        sys.stdout.flush()
+        raise SystemExit(child.exitstatus if child.exitstatus is not None else 0)
+
+    if not chunk:
+        continue
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
+    last_output = time.monotonic()
+    output_tail = (output_tail + chunk)[-8000:]
+    if result_re.search(output_tail):
+        result_seen = True
+    if error_re.search(output_tail) and not result_seen:
+        pass
+PY
+      local s="$?"
+      rm -f "$mcp_cfg"
+      return "$s"
+    )
+    return "$?"
+  fi
+
+  if [[ "$transport" != "prompt" ]]; then
+    printf 'Unknown CLAUDE_TRANSPORT=%s; expected prompt or pty\n' "$transport" >&2
+    rm -f "$mcp_cfg"
+    return 2
+  fi
+
   (
     cd "$worktree_dir"
     "${cmd[@]}" < "$prompt_file" | python3 -u -c "
@@ -1476,11 +2223,20 @@ _exec_gemini() {
 _exec_codex() {
   local prompt_file="$1" class="$2" worktree_dir="${3:-$REPO_ROOT}"
   local cmd=(codex exec --ephemeral --full-auto --skip-git-repo-check -C "$worktree_dir")
+  if [[ "${REMEDIATION_CODEX_IGNORE_USER_CONFIG:-1}" == "1" ]]; then
+    cmd+=(--ignore-user-config)
+  fi
   local model reasoning
   model="$(select_model "$class")"
   reasoning="$(select_reasoning "$class")"
   [[ -n "$model" ]] && cmd+=(-m "$model")
   [[ -n "$reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$reasoning\"")
+  if [[ "${LATTICE_MCP_AUTO:-1}" == "1" ]]; then
+    local lattice_cmd="${LATTICE_MCP_COMMAND:-/home/pete/cadres/lattice/daemon/target/release/lattice}"
+    cmd+=(-c "mcp_servers.lattice.command=\"$lattice_cmd\"")
+    cmd+=(-c "mcp_servers.lattice.args=$(lattice_codex_args_json "$REPO_ROOT")")
+    cmd+=(-c "mcp_servers.lattice.cwd=\"$REPO_ROOT\"")
+  fi
   [[ -n "${CODEX_PROFILE:-}" ]] && cmd+=(-p "$CODEX_PROFILE")
   if [[ -n "${CODEX_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
@@ -1559,6 +2315,7 @@ extract_findings() {
         sub(/^\[[Pp][0-9]\][[:space:]]*/, "", title)
         sub(/^[Pp][0-9][[:space:]:—-]+/, "", title)
         if (title == "" || title ~ /^RESULT:/ || title ~ /^Result:/) return
+        if (tolower(title) ~ /^(i did not identify|no additional|other p[0-9]|additional p[0-9]|not repeated here|impact: this is not a direct launch blocker)/) return
         print sev "\t" file "\t" line_no "\t" title
       }
       /[Ss]everity:[[:space:]]*`?[Pp][0-9]/ {
@@ -1600,12 +2357,187 @@ extract_findings() {
   } > "$PX_TSV"
 }
 
+dedupe_findings_into_blocker_ledger() {
+  [[ -s "$PX_TSV" ]] || return 0
+
+  cp "$PX_TSV" "$RAW_PX_TSV"
+
+  local tmp_ledger tmp_px
+  tmp_ledger="$(mktemp)"
+  tmp_px="$(mktemp)"
+
+  awk -F '\t' -v OFS='\t' -v ledger="$tmp_ledger" '
+    function trim(s) {
+      gsub(/\r/, "", s)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function lower(s) {
+      return tolower(s)
+    }
+    function sev_rank(sev) {
+      sev = toupper(sev)
+      if (sev ~ /P0/) return 0
+      if (sev ~ /P1/) return 1
+      if (sev ~ /P2/) return 2
+      if (sev ~ /P3/) return 3
+      return 9
+    }
+    function choose_sev(old, new) {
+      if (old == "") return new
+      if (sev_rank(new) < sev_rank(old)) return new
+      return old
+    }
+    function compact_key(s) {
+      s = lower(s)
+      gsub(/`[^`]+`/, " ", s)
+      gsub(/[^a-z0-9]+/, " ", s)
+      gsub(/\<p[0-9]\>/, " ", s)
+      gsub(/\<(the|and|or|a|an|to|of|for|in|on|with|still|current|repo|supported|launch|readiness|workflow|route|routes|docs|doc|proof|evidence|missing|gap|gaps|contract|operator|browser|runtime|tests|test)\>/, " ", s)
+      gsub(/[[:space:]]+/, " ", s)
+      s = trim(s)
+      if (length(s) > 96) s = substr(s, 1, 96)
+      return s
+    }
+    function category(source, title, hay) {
+      if (hay ~ /(previous|prior|old|stale).*(no[ -]?launch|final decision|baseline)|no[ -]?launch.*(carried|baseline|prior)/) return "stale_prior_decision"
+      if (hay ~ /(runner unavailable|subprocess.*timed out|tool timed out|timeout|traceback|syntax error|command not found|unexpected eof)/) return "runtime_unavailable"
+      if (hay ~ /(harness|skippable|skip-based|can report success|missing.*artifact|no native.*artifact|no reliable.*evidence|discovery-only|synthesis job|no tests or servers were run|no tests, servers|browser evidence.*absent|unverified)/) return "harness_gap"
+      if (hay ~ /(browser proof|browser evidence|playwright|lighthouse|axe|e2e|authenticated browser|live proof|runtime proof|postgres.*proof|rls.*proof)/) return "evidence_gap"
+      return "product_gap"
+    }
+    function theme(source, title, hay, key) {
+      if (hay ~ /(msp.*benchmark|benchmark.*msp|tuple-scoped|tuple scoped).*client/) return "msp_benchmark_tuple_scope"
+      if (hay ~ /(msp.*raw get_db|raw get_db.*msp|msp.*route.*rls|route-layer.*rls|route layer.*rls|postgresql.*msp.*proof)/) return "msp_route_rls_proof"
+      if (hay ~ /(connector.*scheduler.*launch|scheduler.*connector.*launch|scheduled connector.*launch|scheduled connector.*bypass|connector automation.*bypass|launch_supported|launch-supported.*connector|unsupported connector.*schedul)/) return "connector_launch_supported_scheduler"
+      if (hay ~ /(redis.*abuse|abuse controls.*redis|abuse controls.*process-local|abuse controls.*process local|brute-force.*process-local|brute force.*process local|public-surface throttles.*process|auth.*throttles.*process)/) return "production_abuse_controls_redis_required"
+      if (hay ~ /(functional rls ssot|rls ssot.*stale|rls.*ssot.*misstates|row-level security.*ssot)/) return "rls_ssot_stale"
+      if (hay ~ /(terminated.*msp.*tuple|terminated relationships.*tuple|re-engag.*former client.*access|re engagement.*old client access|tuple grants.*re engagement)/) return "msp_tuple_grant_revocation"
+      if (hay ~ /(browser evidence|browser proof|skippable|skip-based|no native.*browser|no native.*ux|playwright|lighthouse|axe|launch claim 6)/) return "browser_evidence_missing_or_skippable"
+      if (hay ~ /(prior|previous|old|stale).*(no[ -]?launch|final decision|baseline)|no[ -]?launch.*(carried|baseline|prior)/) return "stale_prior_launch_decision"
+      if (hay ~ /(cookie-backed|cookie backed|auth audit|marketplace projection|auth session|auth refresh|stale projection)/) return "cookie_auth_session_contract"
+      if (hay ~ /(published role|role catalog|user directory|tenant user|rbac.*permission|permission.*rbac)/) return "rbac_role_user_contract"
+      if (hay ~ /(vendor questionnaire|questionnaire token|operator message|public questionnaire|resend|remind)/) return "vendor_questionnaire_public_link"
+      if (hay ~ /(audit pdf|reporting.*pdf|scheduled report|report builder|native pdf|pdf generation)/) return "reporting_pdf_scheduler"
+      if (hay ~ /(evidence package|presigned|pre-async|async.*package|storage.*download|share-token|share token)/) return "evidence_package_contract"
+      if (hay ~ /(program.*forbidden field|program.*status|program.*framework|kpi.*trend|dashboard.*trend)/) return "program_dashboard_contract"
+      if (hay ~ /(framework builder|control mapping|bulk mapping|oscal|framework maintenance|post-publish)/) return "control_framework_mapping_contract"
+      if (hay ~ /(sox|icfr|roll-forward|roll forward)/) return "sox_icfr_contract"
+      if (hay ~ /(platform-admin|platform admin|licensing|break-glass|break glass)/) return "platform_admin_licensing_contract"
+      if (hay ~ /(i18n|keyboard|clickable row|mouse-only|accessibility|literal-copy|copy discipline)/) return "frontend_accessibility_i18n_contract"
+      if (hay ~ /(rmm|cadres rmm|cloud.*saas|saas.*rmm)/) return "rmm_connector_launch_scope"
+      key = compact_key(title)
+      if (key == "") key = compact_key(source)
+      return "finding_" key
+    }
+    NR == 1 { next }
+    $1 == "" { next }
+    {
+      raw_id = $1
+      sev = trim($2)
+      group = trim($3)
+      model = trim($4)
+      source = trim($5)
+      line = trim($6)
+      title = trim($7)
+      hay = lower(source " " title)
+      cat = category(source, title, hay)
+      th = theme(source, title, hay)
+      root_key = cat "|" th
+
+      if (!(root_key in seen)) {
+        order[++order_count] = root_key
+        seen[root_key] = 1
+        first_id[root_key] = raw_id
+        best_sev[root_key] = sev
+        out_group[root_key] = group
+        out_model[root_key] = model
+        first_source[root_key] = source
+        first_line[root_key] = line
+        first_title[root_key] = title
+      } else {
+        best_sev[root_key] = choose_sev(best_sev[root_key], sev)
+        if (out_model[root_key] != "high-risk" && model == "high-risk") out_model[root_key] = model
+        if (out_group[root_key] == "core-platform" && group != "") out_group[root_key] = group
+      }
+
+      count[root_key] += 1
+      ref = raw_id ":" source ":" line
+      if (refs[root_key] == "") refs[root_key] = ref
+      else refs[root_key] = refs[root_key] "," ref
+      if (raw_ids[root_key] == "") raw_ids[root_key] = raw_id
+      else raw_ids[root_key] = raw_ids[root_key] "," raw_id
+    }
+    END {
+      print "blocker_id", "category", "theme", "severity", "group", "model_class", "finding_count", "representative_source", "representative_line", "representative_title", "raw_px_ids", "references" > ledger
+      print "id", "severity", "group", "model_class", "source", "line", "title", "packet"
+      for (i = 1; i <= order_count; i += 1) {
+        key = order[i]
+        blocker_id = sprintf("B-%04d", i)
+        split(key, parts, /\|/)
+        packet_id = sprintf("PX-%04d", i)
+        title = "[" blocker_id " " parts[1] " " parts[2] "] " first_title[key]
+        if (count[key] > 1) title = title " (deduped " count[key] " audit references)"
+        print blocker_id, parts[1], parts[2], best_sev[key], out_group[key], out_model[key], count[key], first_source[key], first_line[key], first_title[key], raw_ids[key], refs[key] > ledger
+        print packet_id, best_sev[key], out_group[key], out_model[key], first_source[key], first_line[key], title, "packets/" packet_id ".md"
+      }
+    }
+  ' "$PX_TSV" > "$tmp_px"
+
+  mv "$tmp_px" "$PX_TSV"
+  mv "$tmp_ledger" "$BLOCKER_LEDGER_TSV"
+  write_blocker_ledger_markdown
+  printf '[blocker-ledger] raw_findings=%s blockers=%s ledger=%s\n' \
+    "$(awk 'NR > 1 { count += 1 } END { print count + 0 }' "$RAW_PX_TSV")" \
+    "$(awk 'NR > 1 { count += 1 } END { print count + 0 }' "$BLOCKER_LEDGER_TSV")" \
+    "$BLOCKER_LEDGER_TSV"
+}
+
+write_blocker_ledger_markdown() {
+  [[ -s "$BLOCKER_LEDGER_TSV" ]] || return 0
+  {
+    printf '# Remediation Blocker Ledger\n\n'
+    printf -- '- Audit run: `%s`\n' "$AUDIT_RUN"
+    printf -- '- Generated: `%s`\n' "$(date -Iseconds)"
+    printf -- '- Raw finding inventory: `%s`\n' "$RAW_PX_TSV"
+    printf -- '- Canonical blocker inventory: `%s`\n\n' "$BLOCKER_LEDGER_TSV"
+    printf 'This ledger collapses repeated domain, synthesis, runtime, adversarial, and final-decision mentions into deterministic root-cause blockers. Repeated mentions stay in `references`; they should not become separate implementation units unless the verifier later proves they are different defects.\n\n'
+    printf '| Blocker | Category | Theme | Severity | Group | Findings | Representative finding |\n'
+    printf '| --- | --- | --- | --- | --- | ---: | --- |\n'
+    tail -n +2 "$BLOCKER_LEDGER_TSV" | while IFS=$'\t' read -r blocker_id category theme severity group _model finding_count source line title _raw _refs; do
+      printf '| `%s` | `%s` | `%s` | `%s` | `%s` | %s | `%s:%s` %s |\n' \
+        "$blocker_id" "$category" "$theme" "$severity" "$group" "$finding_count" "$source" "$line" "$title"
+    done
+  } > "$BLOCKER_LEDGER_MD"
+}
+
+blocker_ledger_context_for_px() {
+  local px_id="$1"
+  [[ -s "$BLOCKER_LEDGER_TSV" ]] || return 0
+  local blocker_id
+  blocker_id="$(awk -v px="$px_id" 'BEGIN { n = px; sub(/^PX-0*/, "", n); if (n == "") n = 0; printf "B-%04d", n + 0 }')"
+  awk -F '\t' -v blocker="$blocker_id" '
+    NR > 1 && $1 == blocker {
+      print "- Blocker: `" $1 "`"
+      print "- Category: `" $2 "`"
+      print "- Theme: `" $3 "`"
+      print "- Deduped finding count: `" $7 "`"
+      print "- Raw Px IDs: `" $11 "`"
+      print "- References: `" $12 "`"
+    }
+  ' "$BLOCKER_LEDGER_TSV"
+}
+
 write_master_markdown() {
   {
     printf '# Master Px Remediation List\n\n'
     printf -- '- Audit run: `%s`\n' "$AUDIT_RUN"
     printf -- '- Generated: `%s`\n' "$(date -Iseconds)"
     printf -- '- Source inventory: `%s`\n\n' "$PX_TSV"
+    if [[ -s "$BLOCKER_LEDGER_TSV" ]]; then
+      printf -- '- Blocker ledger: `%s`\n' "$BLOCKER_LEDGER_TSV"
+      printf -- '- Raw finding inventory: `%s`\n\n' "$RAW_PX_TSV"
+    fi
     printf '| ID | Severity | Group | Source | Finding |\n'
     printf '| --- | --- | --- | --- | --- |\n'
     tail -n +2 "$PX_TSV" | while IFS=$'\t' read -r id severity group _model_class source line title _packet; do
@@ -1637,6 +2569,13 @@ write_packet() {
     printf -- '- Source kind: `%s`\n' "$kind"
     printf -- '- Source: `%s:%s`\n' "$source" "$line"
     printf -- '- Finding: %s\n\n' "$title"
+    local blocker_context
+    blocker_context="$(blocker_ledger_context_for_px "$id")"
+    if [[ -n "$blocker_context" ]]; then
+      printf '## Blocker Ledger Context\n\n'
+      printf '%s\n\n' "$blocker_context"
+      printf 'Use the blocker as the remediation boundary. Fix the root cause once, then verify the referenced audit jobs as evidence; do not implement separate fixes for repeated synthesis mentions unless current code proves they are distinct defects.\n\n'
+    fi
     printf '## Source Excerpt\n\n'
     printf '```text\n'
     if [[ -f "$abs_source" ]]; then
@@ -1892,6 +2831,18 @@ guard_against_raw_unit_manifest() {
     return 0
   fi
 
+  if [[ "$DRY_RUN" == "1" ]]; then
+    cat >&2 <<EOF
+[raw-unit-guard] dry-run warning: raw one-packet implementation manifest detected.
+
+Manifest: $UNITS_TSV
+Rows: total=$total raw_px_unit_ids=$raw single_packet_rows=$single
+
+Execution would require catalog consolidation first; dry-run continues so the generated blocker ledger and packet inventory can be inspected.
+EOF
+    return 0
+  fi
+
   cat >&2 <<EOF
 [raw-unit-guard] refusing to execute a raw one-packet implementation manifest.
 
@@ -1912,6 +2863,49 @@ Override only when you intentionally want raw per-PX execution:
   REMEDIATION_ALLOW_RAW_UNITS=1
 EOF
   return 2
+}
+
+auto_recover_raw_unit_manifest() {
+  [[ -f "$UNITS_TSV" ]] || return 0
+  [[ "$REMEDIATION_ALLOW_RAW_UNITS" == "1" ]] && return 0
+  [[ -n "$ONLY_UNIT" ]] && return 0
+  [[ "$EXECUTE" == "1" ]] || return 0
+  [[ "$VERIFY_ONLY" != "1" ]] || return 0
+  [[ "$NO_CATALOG" != "1" ]] || return 0
+
+  local stats total raw single
+  stats="$(raw_incomplete_unit_manifest_stats)"
+  IFS=$'\t' read -r total raw single <<< "$stats"
+
+  if ! raw_incomplete_unit_manifest_is_unsafe "$total" "$raw" "$single"; then
+    return 0
+  fi
+
+  printf '[auto-recover] raw one-packet implementation manifest detected; forcing 00-cataloger rerun before execution\n'
+  FORCE_CATALOG=1
+  CATALOG_WITH_CODEX=1
+
+  if [[ -f "$CHECKPOINT_FILE" ]]; then
+    local _catalog_checkpoint_tmp
+    _catalog_checkpoint_tmp="$(mktemp)"
+    grep -vxF "00-cataloger" "$CHECKPOINT_FILE" > "$_catalog_checkpoint_tmp" || true
+    mv "$_catalog_checkpoint_tmp" "$CHECKPOINT_FILE"
+  fi
+
+  build_catalog_prompt
+  printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
+  if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
+    printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
+    purge_orphaned_packets
+    normalize_units_tsv
+    merge_duplicate_units_tsv
+    rebuild_workstream_coordinator_prompts
+    rebuild_unit_prompts
+    build_final_review_prompt
+  else
+    printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
+    exit 1
+  fi
 }
 
 guard_against_auto_revise_raw_unit_manifest() {
@@ -2294,9 +3288,33 @@ guard_existing_px_inventory_consistency() {
   [[ -f "$PX_TSV" ]] || return 0
   [[ -d "$REMEDIATION_DIR/packets" ]] || return 0
 
-  local packet_file_count px_row_count unit_unknown_count
+  local packet_file_count px_row_count packet_unknown_count unit_unknown_count
   packet_file_count="$(find "$REMEDIATION_DIR/packets" -maxdepth 1 -name 'PX-*.md' -printf '.' 2>/dev/null | wc -c | tr -d ' ')"
   px_row_count="$(awk 'NR > 1 && $1 ~ /^PX-/ { count += 1 } END { print count + 0 }' "$PX_TSV")"
+  packet_unknown_count="$(
+    {
+      awk -F '\t' 'NR > 1 && $1 ~ /^PX-/ { print "known\t" $1 }' "$PX_TSV"
+      find "$REMEDIATION_DIR/packets" -maxdepth 1 -name 'PX-*.md' -printf 'file\t%f\n' 2>/dev/null
+    } | awk -F '\t' '
+      $1 == "known" {
+        known[$2] = 1
+        next
+      }
+      $1 == "file" {
+        id = $2
+        sub(/\.md$/, "", id)
+        parent = id
+        sub(/-S[0-9]+$/, "", parent)
+        if (id in known) next
+        if (id ~ /^PX-[0-9]+-S[0-9]+$/ && parent in known) next
+        unknown[id] = 1
+      }
+      END {
+        for (id in unknown) count += 1
+        print count + 0
+      }
+    '
+  )"
   unit_unknown_count=0
   if [[ -f "$UNITS_TSV" ]]; then
     unit_unknown_count="$(
@@ -2316,7 +3334,9 @@ guard_existing_px_inventory_consistency() {
           split($packet_col, ids, ",")
           for (i in ids) {
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", ids[i])
-            if (ids[i] ~ /^PX-/ && !(ids[i] in known)) unknown[ids[i]] = 1
+            parent = ids[i]
+            sub(/-S[0-9]+$/, "", parent)
+            if (ids[i] ~ /^PX-/ && !(ids[i] in known) && !(ids[i] ~ /^PX-[0-9]+-S[0-9]+$/ && parent in known)) unknown[ids[i]] = 1
           }
         }
         END {
@@ -2327,7 +3347,7 @@ guard_existing_px_inventory_consistency() {
     )"
   fi
 
-  if (( packet_file_count > px_row_count || unit_unknown_count > 0 )); then
+  if (( packet_unknown_count > 0 || unit_unknown_count > 0 )); then
     cat >&2 <<EOF
 [manifest-guard] refusing to preserve an inconsistent remediation inventory.
 
@@ -2335,6 +3355,7 @@ Remediation dir: $REMEDIATION_DIR
 Master PX inventory: $PX_TSV
 Packet files: $packet_file_count
 Master PX rows: $px_row_count
+Packet files missing from master: $packet_unknown_count
 Unit packet IDs missing from master: $unit_unknown_count
 
 The run directory has cataloged packets or units that are not represented in
@@ -2665,6 +3686,9 @@ build_catalog_prompt() {
 - Remediation run: $REMEDIATION_DIR
 - Seed Px TSV: $PX_TSV
 - Seed Px markdown: $PX_MD
+- Seed blocker ledger TSV: $BLOCKER_LEDGER_TSV
+- Seed blocker ledger markdown: $BLOCKER_LEDGER_MD
+- Raw pre-dedup Px TSV: $RAW_PX_TSV
 - Audit source manifest: $AUDIT_SOURCE_MANIFEST
 - Seed workstreams: $WORKSTREAMS_TSV
 - Seed implementation units: $UNITS_TSV
@@ -2702,6 +3726,8 @@ Use the generated seed inventory as a starting point, then inspect the audit rep
 - \`$AUDIT_RUN/artifacts/load-test/load-test-report.md\` if it exists — contains load test scenario results, p95/p99 latencies, and error rates.
 - \`$AUDIT_RUN/artifacts/stale-code-candidates.tsv\` if it exists — contains stale/superseded/stub candidates from the tech-debt audit. Treat these as first-class deletion/convergence remediation sources, not optional cleanup notes.
 - Any \`*.md\` files under \`$AUDIT_RUN/artifacts/\` subdirectories (e.g., \`sast/\`, \`lighthouse/\`, \`accessibility/\`, \`external-services/\`, deep-dive job reports) — these contain SAST/CVE findings, Core Web Vitals results, WCAG violations, and external service probe results that must be cataloged as packets alongside the main audit reports.
+- \`$BLOCKER_LEDGER_MD\` and \`$BLOCKER_LEDGER_TSV\` — deterministic root-cause blocker grouping. Treat these as the first-pass source of truth for whether repeated domain/synthesis/runtime/final-decision mentions are one remediation outcome.
+- \`$RAW_PX_TSV\` — the pre-dedup raw finding list. Use it only to recover source references, not to recreate duplicate packets.
 
 Rewrite these files with a deduplicated, implementation-ready catalog:
 
@@ -2715,6 +3741,9 @@ Catalog requirements:
 
 - First read \`$COMPLETED_PACKETS_TSV\` and the seed packet work logs. Completed packet IDs represent already-fixed work recovered from current or prior same-audit remediation artifacts.
 - One packet should represent one coherent remediation outcome, not every repeated mention of the same defect.
+- Preserve blocker-ledger grouping by default. If \`B-0001\` appears in six audit reports, create one implementation unit for the root cause and list all six reports as verification targets.
+- Only split a blocker-ledger row when current-code inspection proves the row combines unrelated defects. If you split it, write the reason into packet work logs and keep the original blocker ID in each child packet.
+- Classify each blocker as one of: \`product_gap\`, \`evidence_gap\`, \`harness_gap\`, \`stale_prior_decision\`, or \`runtime_unavailable\`. Use that category to decide whether the implementation task is product code, test/evidence harness, audit harness behavior, stale artifact reconciliation, or environment recovery.
 - Merge duplicate mentions across domain, cross-cutting, spec-addition, runtime, maturity, customer-proof, adversarial, and final-decision reports.
 - When a deduplicated packet consists only of already-completed seed packets, preserve that completion in the merged packet work log and set \`Status: complete\`.
 - When a deduplicated packet includes both completed and incomplete seed packets, keep the merged packet incomplete, but list the completed seed packet IDs and evidence in the work log so the implementer does not redo closed work.
@@ -2793,6 +3822,11 @@ detect_split_candidates() {
       fi
       if file_matches 'too broad|monolith|split into|should split|needs splitting|exceed(ed|s)? .*context|context .*exceed|token budget|tokens used|over .*200000|above .*200000|decompose|decomposition|i18n remediation|audited-page|not satisfied.*monolith|not satisfied.*inline English' "$verifier"; then
         reasons+=("verifier-split-signal")
+      fi
+      if [[ -s "$(verifier_findings_tsv_for_unit "$unit_id")" ]] && \
+         verifier_findings_exceed_auto_revise_limit "$(verifier_findings_tsv_for_unit "$unit_id")" && \
+         ! verifier_finding_type_blocks_auto_revise "$(verifier_findings_tsv_for_unit "$unit_id")"; then
+        reasons+=("verifier-findings-over-auto-revise-limit")
       fi
       if file_matches 'tokens used.*([2-9][0-9]{5,}|[2-9][0-9]{2},[0-9]{3}|[0-9]{1,3},[0-9]{3},[0-9]{3})|exceed(ed|s)? .*200000|above .*200000|over .*200000' "$log"; then
         reasons+=("token-budget-risk")
@@ -3172,6 +4206,14 @@ Open these prior artifacts before editing:
 
 Your work contract is the unresolved implementation/code/docs/test revision list from the verifier findings TSV. Fix only those findings and the minimum directly required follow-on changes. Do not redesign, recatalog, broaden scope, or revisit accepted packet areas. If the TSV is missing or empty, use the verifier artifact's explicit required revisions and keep the same narrow scope.
 
+## Unresolved Verifier Findings
+
+These are the exact current TSV rows to resolve in this revision pass:
+
+\`\`\`tsv
+$(cat "$findings_tsv" 2>/dev/null || true)
+\`\`\`
+
 If the verifier finding type is \`contract_conflict\`, \`test_harness\`, or \`blocked\`, stop and write \`IMPLEMENTATION_RESULT: blocked\` with the exact human decision or targeted command required. Do not guess the product contract, and do not make broad test-harness rewrites from inside the auto-revise loop.
 
 In implementation scope, do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Record those as launch evidence pending or sandbox-blocked, but do not leave fixable code/docs/tests unresolved.
@@ -3332,6 +4374,13 @@ $packet_list
 Do not edit files. Use a review/evidence-verification stance.
 
 Verification scope is \`$VERIFY_SCOPE\`.
+
+### Active Checkout Boundary
+
+All implementation signoff must be verified against the active checkout rooted at \`$REPO_ROOT\` and its active child git roots such as \`$REPO_ROOT/backend\` and \`$REPO_ROOT/frontend\` when present. Remediation worktrees under \`$REMEDIATION_DIR/worktrees/\` are implementation scratch space only. You may read worktree logs/summaries as historical context, but you must not accept a unit based on files, tests, commits, or branch state that exist only under a worktree path. If a required file, test, doc, or config is present in \`$REMEDIATION_DIR/worktrees/$unit_id\` but absent from the active checkout, write \`Decision: revise\`, \`Implementation decision: revise\`, and a findings TSV row requiring the worktree change to be merged into the active checkout. In an accepted verifier artifact, do not cite worktree-local paths as proof of implementation completion.
+
+Before accepting, run or report active-checkout probes for the claimed changed surfaces, for example \`git -C $REPO_ROOT status --short --branch\`, \`git -C $REPO_ROOT/backend status --short --branch\` when backend is involved, and file existence/search commands from the active checkout. For nested git roots, the active branch/HEAD matters; a top-level gitlink or separate remediation worktree branch is not enough.
+
 
 When scope is \`implementation\`, answer the question: "Did the implementation fix the code/docs/tests for this packet, and do the implementation owner and verifier agree the packet is code-complete?" Do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Missing launch-readiness reruns, live VPS/browser proof, external IdP/relying-party proof, and PostgreSQL checks that cannot run in this sandbox must be recorded as \`launch-evidence-pending\` or \`sandbox-blocked\`, not as implementation failure. Still block implementation signoff for stale active tests, docs contradictions, unrun runnable local tests, failing runnable local tests, incomplete code, unsupported claims, or missing required success/failure test coverage.
 
@@ -3729,6 +4778,60 @@ run_command_with_heartbeat() {
   return "$status"
 }
 
+verifier_postcheck_invalid_file() {
+  local unit_id="$1"
+  printf '%s/artifacts/verify-%s.postcheck.invalid\n' "$REMEDIATION_DIR" "$unit_id"
+}
+
+verifier_postcheck_invalid() {
+  local unit_id="$1"
+  [[ -s "$(verifier_postcheck_invalid_file "$unit_id")" ]]
+}
+
+mark_verifier_postcheck_invalid() {
+  local unit_id="$1" reason="$2"
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  printf '%s\n' "$reason" > "$(verifier_postcheck_invalid_file "$unit_id")"
+}
+
+clear_verifier_postcheck_invalid() {
+  local unit_id="$1"
+  rm -f "$(verifier_postcheck_invalid_file "$unit_id")"
+}
+
+verifier_accepts_unit_raw() {
+  local unit_id="$1"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  [[ -s "$verifier" ]] || return 1
+  grep -qiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?accept`?' "$verifier" || return 1
+  grep -qiE '^[[:space:]-]*(\*\*)?Implementation decision[^[:alnum:]]+`?fixed`?' "$verifier" || return 1
+}
+
+verifier_acceptance_uses_worktree_evidence() {
+  local unit_id="$1" verifier="$2"
+  verifier_accepts_unit_raw "$unit_id" || return 1
+  [[ -s "$verifier" ]] || return 1
+
+  local filtered
+  filtered="$(
+    awk '
+      {
+        line = tolower($0)
+        if (line ~ /not used|were not used|was not used|did not use|did not rely|not rely|did not cite .*worktree|active checkout.*not .*worktree|not .*worktree.*evidence|not .*scratch .*worktree|scratch .*worktree.*not accepted|worktree.*not accepted|were not accepted as proof|was not accepted as proof|not accepted as proof|not worktree-only proof|does not depend on .*worktree|not only (in|under) .*worktree|instead of .*worktree|no worktree|no .*proof .*worktree.*accepted|no implementation proof|not accepted from|scratch space|historical|stale .*postcheck|postcheck note|postcheck\.invalid|prior verifier|prior concern|addressed by|superseded .*worktree|worktree.*superseded|replaced .*worktree|worktree.*replaced|inspected .*worktree|searched .*worktree|references opened|wider searches/) {
+          next
+        }
+        if (line ~ /find .*worktrees/) {
+          next
+        }
+      }
+      { print }
+    ' "$verifier"
+  )"
+
+  printf '%s\n' "$filtered" | grep -Eqi \
+    "((accepted|accepting|acceptance|signoff|signed off)[^[:cntrl:]]*(/worktrees/$unit_id|worktrees/$unit_id|worktree|worktree-local|implementation worktree|worktree/backend branch)|(/worktrees/$unit_id|worktrees/$unit_id|worktree|worktree-local|implementation worktree|worktree/backend branch)[^[:cntrl:]]*(accepted|accepting|acceptance|signoff|signed off))"
+}
+
 validate_prompt_outputs() {
   local workstream="$1" class="$2"
   local worktree_dir="${3:-$REPO_ROOT}"
@@ -3759,11 +4862,21 @@ validate_prompt_outputs() {
     local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
     local findings
     findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+    clear_verifier_postcheck_invalid "$unit_id"
     if [[ ! -s "$verifier" ]]; then
       printf '[postcheck] missing verifier artifact: %s\n' "$verifier" >&2
       return 1
     fi
     ensure_verifier_findings_header "$findings"
+    if verifier_acceptance_uses_worktree_evidence "$unit_id" "$verifier"; then
+      local reason
+      reason="verifier accepted $unit_id using worktree-only evidence; active checkout signoff is invalid: $verifier"
+      mark_verifier_postcheck_invalid "$unit_id" "$reason"
+      printf '[postcheck] %s\n' "$reason" >&2
+      return 1
+    fi
+    clear_verifier_postcheck_invalid "$unit_id"
+    write_verifier_input_fingerprint "$unit_id"
   elif [[ "$class" == "reviewer" ]]; then
     if [[ ! -s "$REMEDIATION_DIR/04-final-remediation-review.md" ]]; then
       printf '[postcheck] missing final remediation review: %s\n' "$REMEDIATION_DIR/04-final-remediation-review.md" >&2
@@ -3842,6 +4955,12 @@ final_result_is_terminal() {
   esac
 }
 
+runner_log_has_hard_error() {
+  local log_file="$1"
+  [[ -s "$log_file" ]] || return 1
+  grep -aqE '(^|[^[:alnum:]_])(ERROR|Error):|\"type\"[[:space:]]*:[[:space:]]*\"error\"|\"code\"[[:space:]]*:[[:space:]]*\"[^\"]+\"|invalid_value|model .* does not exist|rate_limit_exceeded|authentication_error|permission_error' "$log_file" 2>/dev/null
+}
+
 planner_design_looks_complete() {
   local design="$1"
   [[ -s "$design" ]] || return 1
@@ -3881,7 +5000,10 @@ log_final_response() {
     /^assistant$/ || /^codex$/ || /^claude$/ || /^gemini$/ { marker = NR }
     { lines[NR] = $0 }
     END {
-      start = marker ? marker + 1 : NR + 1
+      # Some runner logs do not preserve a clean final role marker. In that
+      # case, scan the tail instead of returning an empty response so artifact
+      # recovery can still see terminal markers such as IMPLEMENTATION_RESULT.
+      start = marker ? marker + 1 : (NR > 800 ? NR - 799 : 1)
       for (i = start; i <= NR; i += 1) print lines[i]
     }
   ' "$log_file" 2>/dev/null
@@ -3945,6 +5067,7 @@ recover_verifier_artifact_from_log() {
     printf 'RESULT: PASS\n'
   } > "$verifier"
   ensure_verifier_findings_header "$(verifier_findings_tsv_for_unit "$unit_id")"
+  write_verifier_input_fingerprint "$unit_id"
   printf '[auto-recover] verify-%s: recovered missing verifier artifact from RESULT: PASS log\n' "$unit_id" >>"$log_file"
 }
 
@@ -3986,6 +5109,16 @@ workspace_has_git_roots() {
   local root
   while IFS= read -r root; do
     [[ -n "$root" ]] && return 0
+  done < <(workspace_git_roots)
+  return 1
+}
+
+workspace_has_child_git_roots() {
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    [[ "$root" == "$REPO_ROOT" ]] && continue
+    return 0
   done < <(workspace_git_roots)
   return 1
 }
@@ -4056,10 +5189,19 @@ prepare_unit_workspace() {
     return 0
   fi
 
+  if [[ "$REVISE_EXISTING" == "1" ]] && workspace_has_child_git_roots; then
+    printf '[workspace] %s: revision in split-root checkout; using active workspace directly so nested git-root changes are verified in place\n' \
+      "$unit_id" >&2
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+
   if [[ ! -d "$worktree_dir" ]]; then
     mkdir -p "$REMEDIATION_DIR/worktrees"
-    local branch_name="remediation-$unit_id"
+    local branch_name
+    branch_name="$(unit_worktree_branch_name "$unit_id")"
     local -a add_cmd
+    git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
     if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
       add_cmd=(git -C "$REPO_ROOT" worktree add "$worktree_dir" "$branch_name")
     else
@@ -4088,6 +5230,49 @@ EOF
   fi
 
   printf '%s\n' "$worktree_dir"
+}
+
+unit_workspace_marker_file() {
+  printf '%s/artifacts/%s.workspace\n' "$REMEDIATION_DIR" "$1"
+}
+
+record_unit_workspace() {
+  local unit_id="$1" workspace="$2" marker
+  marker="$(unit_workspace_marker_file "$unit_id")"
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  {
+    printf 'unit_id\t%s\n' "$unit_id"
+    printf 'workspace\t%s\n' "$workspace"
+    if [[ "$workspace" == "$REPO_ROOT" ]]; then
+      printf 'mode\tactive\n'
+    else
+      printf 'mode\tworktree\n'
+    fi
+  } > "$marker"
+}
+
+recorded_unit_workspace() {
+  local unit_id="$1" marker
+  marker="$(unit_workspace_marker_file "$unit_id")"
+  [[ -s "$marker" ]] || return 1
+  awk -F '\t' '$1 == "workspace" { print $2; found = 1; exit } END { if (!found) exit 1 }' "$marker"
+}
+
+unit_worktree_changed_after_workspace_marker() {
+  local unit_id="$1" worktree_dir="$2" marker
+  marker="$(unit_workspace_marker_file "$unit_id")"
+  [[ -s "$marker" && -d "$worktree_dir" ]] || return 1
+  find "$worktree_dir" \
+    \( -path "$worktree_dir/.git" -o -path "$worktree_dir/node_modules" -o -path "$worktree_dir/.venv" \) -prune -o \
+    -type f -newer "$marker" -print -quit 2>/dev/null | grep -q .
+}
+
+unit_worktree_branch_name() {
+  local unit_id="$1"
+  local run_label
+  run_label="$(basename "$REMEDIATION_DIR")"
+  run_label="${run_label//[^[:alnum:]._-]/-}"
+  printf 'remediation-%s-%s\n' "$run_label" "$unit_id"
 }
 
 commit_root_path() {
@@ -4143,10 +5328,8 @@ record_commit_baseline_for_unit() {
 
 verifier_accepts_unit() {
   local unit_id="$1"
-  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
-  [[ -s "$verifier" ]] || return 1
-  grep -qiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?accept`?' "$verifier" || return 1
-  grep -qiE '^[[:space:]-]*(\*\*)?Implementation decision[^[:alnum:]]+`?fixed`?' "$verifier" || return 1
+  verifier_postcheck_invalid "$unit_id" && return 1
+  verifier_accepts_unit_raw "$unit_id"
 }
 
 verifier_has_terminal_decision() {
@@ -4162,12 +5345,17 @@ verifier_is_complete_for_packets() {
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
   local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
   local implement_log="$REMEDIATION_DIR/logs/implement-$unit_id.log"
+  verifier_postcheck_invalid "$unit_id" && return 1
   verifier_has_terminal_decision "$unit_id" || return 1
   artifact_mentions_all_packets "$verifier" "$packets_csv" || return 1
+  verifier_input_fingerprint_matches "$unit_id" "$packets_csv" || return 1
   if [[ -s "$summary" && "$summary" -nt "$verifier" ]]; then
     return 1
   fi
   if [[ -s "$implement_log" && "$implement_log" -nt "$verifier" ]]; then
+    return 1
+  fi
+  if verifier_has_only_launch_evidence_findings "$unit_id" && unit_evidence_artifacts_newer_than_file "$unit_id" "$verifier"; then
     return 1
   fi
   local packet_id packet_file
@@ -4183,6 +5371,132 @@ verifier_is_complete_for_packets() {
   done
 }
 
+git_root_merge_pathspec_args() {
+  local root="$1"
+  printf '.\n'
+  local rel_rdir
+  rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
+  if [[ -n "$rel_rdir" ]]; then
+    printf ':(exclude)%s\n' "$rel_rdir"
+  fi
+}
+
+git_root_is_clean_for_merge() {
+  local root="$1"
+  local -a pathspec=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && pathspec+=("$path")
+  done < <(git_root_merge_pathspec_args "$root")
+  git -C "$root" diff --quiet -- "${pathspec[@]}" || return 1
+  git -C "$root" diff --cached --quiet -- "${pathspec[@]}" || return 1
+}
+
+commit_dirty_git_root() {
+  local root="$1" message="$2"
+  local -a pathspec=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && pathspec+=("$path")
+  done < <(git_root_merge_pathspec_args "$root")
+  if ! git -C "$root" diff --quiet -- "${pathspec[@]}" || ! git -C "$root" diff --cached --quiet -- "${pathspec[@]}"; then
+    git -C "$root" add -A -- "${pathspec[@]}"
+    git -C "$root" commit -m "$message" >/dev/null
+  fi
+}
+
+merge_branch_or_head_into_root() {
+  local active_root="$1" source_root="$2" unit_id="$3" label="$4"
+  local source_ref
+  source_ref="$(git -C "$source_root" rev-parse --verify HEAD)" || return 1
+  local source_branch
+  source_branch="$(git -C "$source_root" branch --show-current 2>/dev/null || true)"
+  local merge_ref="$source_ref"
+  if [[ -n "$source_branch" ]] && git -C "$active_root" show-ref --verify --quiet "refs/heads/$source_branch"; then
+    merge_ref="$source_branch"
+  fi
+
+  if git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
+    printf '[worktree-merge] %s:%s already merged\n' "$unit_id" "$label"
+    return 0
+  fi
+
+  printf '[worktree-merge] %s:%s merging %s\n' "$unit_id" "$label" "$merge_ref"
+  if git -C "$active_root" merge --no-edit --no-ff "$merge_ref" -m "Merge remediation worktree for $unit_id ($label)"; then
+    return 0
+  fi
+  git -C "$active_root" merge --abort >/dev/null 2>&1 || true
+  printf '[worktree-merge] %s:%s merge failed; active root left unchanged\n' "$unit_id" "$label" >&2
+  return 1
+}
+
+integrate_unit_worktree_changes() {
+  local unit_id="$1"
+  local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+  [[ -d "$worktree_dir" ]] || return 0
+  if [[ "$worktree_dir" == "$REPO_ROOT" ]]; then
+    return 0
+  fi
+
+  local recorded_workspace
+  recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
+  if [[ -n "$recorded_workspace" && "$recorded_workspace" == "$REPO_ROOT" ]]; then
+    if unit_worktree_changed_after_workspace_marker "$unit_id" "$worktree_dir"; then
+      printf '[worktree-merge] %s: active workspace was selected, but unit worktree changed during implementation; attempting recovery merge before verification\n' "$unit_id"
+    else
+      printf '[worktree-merge] %s: active workspace revision; no worktree merge required before verification\n' "$unit_id"
+      return 0
+    fi
+  elif [[ -n "$recorded_workspace" && "$recorded_workspace" != "$worktree_dir" ]]; then
+    printf '[worktree-merge] %s: recorded implementation workspace is %s; skipping stale worktree %s\n' \
+      "$unit_id" "$recorded_workspace" "$worktree_dir"
+    return 0
+  fi
+
+  if repo_root_is_git_root; then
+    if ! git_root_is_clean_for_merge "$REPO_ROOT"; then
+      printf '[worktree-merge] %s: active repo root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" >&2
+      return 1
+    fi
+    commit_dirty_git_root "$worktree_dir" "fix(remediation): integrate $unit_id"
+    if ! merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"; then
+      return 1
+    fi
+  fi
+
+  local IFS=',' root active_root source_root label
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    active_root="$(commit_root_path "$root")"
+    source_root="$worktree_dir/$root"
+    [[ -d "$active_root" && -d "$source_root" ]] || continue
+    git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || continue
+    git -C "$source_root" rev-parse --git-dir >/dev/null 2>&1 || continue
+    label="$(commit_root_label "$active_root")"
+    if ! git_root_is_clean_for_merge "$active_root"; then
+      printf '[worktree-merge] %s:%s active git root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" "$label" >&2
+      return 1
+    fi
+    commit_dirty_git_root "$source_root" "fix(remediation): integrate $unit_id ($label)"
+    if ! merge_branch_or_head_into_root "$active_root" "$source_root" "$unit_id" "$label"; then
+      return 1
+    fi
+  done
+}
+
+integrate_units_before_verification() {
+  local units_csv="$1" unit_id failed=0
+  local IFS=,
+  for unit_id in $units_csv; do
+    [[ -n "$unit_id" ]] || continue
+    if ! integrate_unit_worktree_changes "$unit_id"; then
+      failed=1
+    fi
+  done
+  if [[ "$failed" != "0" ]]; then
+    printf '[worktree-merge] one or more unit worktrees could not be merged; refusing verifier rerun against stale active tree\n' >&2
+    return 1
+  fi
+}
+
 commit_verified_unit_changes() {
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
   local unit_id="$1"
@@ -4196,7 +5510,8 @@ commit_verified_unit_changes() {
     return 0
   fi
 
-  local branch_name="remediation-$unit_id"
+  local branch_name
+  branch_name="$(unit_worktree_branch_name "$unit_id")"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
 
   if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
@@ -4207,7 +5522,7 @@ commit_verified_unit_changes() {
     fi
 
     printf '[commit-on-verify] %s: merging branch %s\n' "$unit_id" "$branch_name"
-    if git -C "$REPO_ROOT" merge --no-ff "$branch_name" -m "Merge branch '$branch_name' into HEAD for $unit_id"; then
+    if git -C "$REPO_ROOT" merge --no-edit --no-ff "$branch_name" -m "Merge branch '$branch_name' into HEAD for $unit_id"; then
       printf '[commit-on-verify] %s: successfully merged\n' "$unit_id"
       # Cleanup
       git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || true
@@ -4249,6 +5564,11 @@ run_implementer_and_test() {
       local test_status=0
       local cmd_status=0
       for test_cmd in "${test_cmds[@]}"; do
+        if ! command_looks_executable "$test_cmd"; then
+          printf '\n[native-test] skipped non-command evidence instruction: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+          printf '\n$ %s\n[native-test] skipped non-command evidence instruction; not executed\n' "$test_cmd" >> "$test_log"
+          continue
+        fi
         printf '\n[native-test] running: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
         local test_script
         test_script="$REMEDIATION_DIR/artifacts/$unit_id-native-test-$(printf '%s' "$test_cmd" | sha256sum | awk '{print substr($1, 1, 10)}').sh"
@@ -4279,9 +5599,37 @@ run_implementer_and_test() {
         if [[ "$cmd_status" == "0" ]]; then
           printf '[native-test] passed: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
         else
-          printf '[native-test] failed (exit %d): %s\n' "$cmd_status" "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
-          test_status="$cmd_status"
-          break
+          local fallback_cmd=""
+          if [[ "$REMEDIATION_SANDBOX_PYTEST_FALLBACK" == "1" ]] && \
+             pytest_rerunfailures_socket_blocked "$test_log" && \
+             fallback_cmd="$(pytest_without_rerunfailures_cmd "$test_cmd" 2>/dev/null)"; then
+            printf '[native-test] pytest rerunfailures socket blocked; retrying sandbox fallback: %s\n' \
+              "$fallback_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            local fallback_script
+            fallback_script="$REMEDIATION_DIR/artifacts/$unit_id-native-test-fallback-$(printf '%s' "$fallback_cmd" | sha256sum | awk '{print substr($1, 1, 10)}').sh"
+            {
+              printf '#!/usr/bin/env bash\n'
+              printf 'set -euo pipefail\n'
+              printf '%s\n' "$fallback_cmd"
+            } > "$fallback_script"
+            chmod +x "$fallback_script"
+            if shell_fragment_is_valid "$fallback_cmd" && {
+              printf '\n$ %s\n' "$fallback_cmd"
+              printf '[native-test] fallback script: %s\n' "$fallback_script"
+              (cd "$worktree_dir" && bash "$fallback_script")
+            } >> "$test_log" 2>&1; then
+              cmd_status=0
+              printf '[native-test] sandbox fallback passed: %s\n' "$fallback_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            else
+              cmd_status=$?
+              printf '[native-test] sandbox fallback failed (exit %d): %s\n' "$cmd_status" "$fallback_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            fi
+          fi
+          if [[ "$cmd_status" != "0" ]]; then
+            printf '[native-test] failed (exit %d): %s\n' "$cmd_status" "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            test_status="$cmd_status"
+            break
+          fi
         fi
       done
       if [[ "$test_status" != "0" ]]; then
@@ -4289,7 +5637,11 @@ run_implementer_and_test() {
       fi
     else
       printf '\n[native-test] no supported verification commands detected\n' >> "$REMEDIATION_DIR/logs/$workstream.log"
-      echo "No supported verification commands were configured in the product profile or detected from repo defaults." > "$test_log"
+      if [[ -s "$test_log" ]] && ! native_test_log_is_placeholder "$test_log"; then
+        printf '[native-test] preserving existing unit-provided evidence artifact: %s\n' "$test_log" >> "$REMEDIATION_DIR/logs/$workstream.log"
+      else
+        native_test_placeholder_text > "$test_log"
+      fi
     fi
   fi
   return "$status"
@@ -4467,7 +5819,13 @@ run_prompt() {
   fi
   if [[ "$status" != "0" && "$workstream" == verify-* ]]; then
     local unit_id="${workstream#verify-}"
-    if recover_verifier_artifact_from_log "$unit_id" "$log_file"; then
+    if runner_log_has_hard_error "$log_file"; then
+      printf '\n[auto-recover] %s: suppressed because verifier log contains a runner/API error\n' \
+        "$workstream" >>"$log_file"
+    elif verifier_postcheck_invalid "$unit_id"; then
+      printf '\n[auto-recover] %s: suppressed because verifier postcheck invalidated the artifact\n' \
+        "$workstream" >>"$log_file"
+    elif recover_verifier_artifact_from_log "$unit_id" "$log_file"; then
       status=0
     elif verifier_has_terminal_decision "$unit_id"; then
       ensure_verifier_findings_header "$(verifier_findings_tsv_for_unit "$unit_id")"
@@ -4507,7 +5865,10 @@ wave_job_completed_successfully() {
     verify-*)
       local unit_id="${name#verify-}"
       local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+      runner_log_has_hard_error "$log_file" && return 1
+      verifier_postcheck_invalid "$unit_id" && return 1
       recover_verifier_artifact_from_log "$unit_id" "$log_file" || true
+      verifier_postcheck_invalid "$unit_id" && return 1
       if verifier_has_terminal_decision "$unit_id"; then
         ensure_verifier_findings_header "$(verifier_findings_tsv_for_unit "$unit_id")"
         return 0
@@ -4569,20 +5930,24 @@ wait_for_wave() {
         printf '\r%-*s\r' $(( _tw - 1 )) ''
         if [[ $s -eq 0 ]]; then
           printf '[ok] %s\n' "${names_ref[$idx]}"
-          printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
-          if [[ "${names_ref[$idx]}" == verify-* ]]; then
-            if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
-              failed=1
+          if [[ "$DRY_RUN" != "1" ]]; then
+            printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+            if [[ "${names_ref[$idx]}" == verify-* ]]; then
+              if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
+                failed=1
+              fi
             fi
           fi
         elif wave_job_completed_successfully "${names_ref[$idx]}" "${job_log[$idx]}"; then
           printf '[ok] %s (auto-recovered after non-zero wave exit)\n' "${names_ref[$idx]}"
           printf '\n[auto-recover] %s: non-zero wave exit but terminal RESULT with required artifact — treating as success\n' \
             "${names_ref[$idx]}" >>"${job_log[$idx]}"
-          printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
-          if [[ "${names_ref[$idx]}" == verify-* ]]; then
-            if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
-              failed=1
+          if [[ "$DRY_RUN" != "1" ]]; then
+            printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+            if [[ "${names_ref[$idx]}" == verify-* ]]; then
+              if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
+                failed=1
+              fi
             fi
           fi
         else
@@ -4703,6 +6068,7 @@ execute_workstreams() {
     done < <(tail -n +2 "$WORKSTREAMS_TSV")
   fi
 
+  auto_recover_raw_unit_manifest
   guard_against_raw_unit_manifest
   execute_planners
 
@@ -4782,6 +6148,7 @@ execute_workstreams() {
       fi
       continue
     fi
+    record_unit_workspace "$unit_id" "$worktree_dir"
 
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
@@ -4843,13 +6210,22 @@ execute_verifier_units() {
     fi
     if grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || [[ "$REVISE_EXISTING" == "1" ]]; then
       if verifier_is_complete_for_packets "$unit_id" "$packets_csv"; then
-        printf '[resume] skipping completed verify-%s\n' "$unit_id"
-        grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
-        continue
-      fi
-      if grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
-        printf '[resume] re-running verify-%s; checkpoint exists but verifier does not cover merged packets=%s\n' \
-          "$unit_id" "$packets_csv"
+        if [[ "$FORCE_VERIFY" == "1" ]]; then
+          printf '[rerun] verify-%s requested explicitly\n' "$unit_id"
+        else
+          printf '[resume] skipping completed verify-%s\n' "$unit_id"
+          grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
+          continue
+        fi
+      elif grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
+        if [[ "$FORCE_VERIFY" == "1" ]]; then
+          printf '[rerun] verify-%s requested; checkpoint verifier does not cover merged packets=%s\n' \
+            "$unit_id" "$packets_csv"
+        else
+          printf '[resume] not re-running verify-%s; checkpoint verifier is stale for packets=%s (use --rerun-verifiers to refresh)\n' \
+            "$unit_id" "$packets_csv"
+          continue
+        fi
       fi
     fi
     local prompt="$REMEDIATION_DIR/prompts/verify-$unit_id.md"
@@ -4882,22 +6258,511 @@ execute_verifier_units() {
   aggregate_verifier_findings
 }
 
+not_verified_units_from_queue() {
+  write_remediation_queue_summary >/dev/null
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || return 0
+  local -a units=()
+  local unit_id group _model _packets category _count _verifier _findings
+  while IFS=$'\t' read -r unit_id group _model _packets category _count _verifier _findings; do
+    [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+    unit_selected "$unit_id" || continue
+    if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
+      continue
+    fi
+    [[ "$category" == "not_verified" ]] || continue
+    units+=("$unit_id")
+  done < "$queue"
+  if ((${#units[@]} > 0)); then
+    local IFS=,
+    printf '%s' "${units[*]}"
+  fi
+}
+
+metadata_closeout_units_from_queue() {
+  write_remediation_queue_summary >/dev/null
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || return 0
+  local -a units=()
+  local unit_id _group _model _packets category _count _verifier _findings
+  while IFS=$'\t' read -r unit_id _group _model _packets category _count _verifier _findings; do
+    [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+    unit_selected "$unit_id" || continue
+    if [[ -n "$ONLY_GROUP" && "$_group" != "$ONLY_GROUP" ]]; then
+      continue
+    fi
+    [[ "$category" == "coordinator_cleanup" || "$category" == "needs_targeted_revision" ]] || continue
+    verifier_has_only_remediation_metadata_findings "$unit_id" || continue
+    units+=("$unit_id")
+  done < "$queue"
+  if ((${#units[@]} > 0)); then
+    local IFS=,
+    printf '%s' "${units[*]}"
+  fi
+}
+
+build_metadata_closeout_prompt() {
+  local unit_id="$1"
+  local prompt="$REMEDIATION_DIR/prompts/metadata-closeout-$unit_id.md"
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  cat > "$prompt" <<PROMPT
+# Remediation Metadata Closeout Repair: $unit_id
+
+## Metadata
+
+- Repo root: $REPO_ROOT
+- Remediation run: $REMEDIATION_DIR
+- Unit: $unit_id
+
+## Task
+
+Repair only remediation-owned closeout metadata for this unit. This is a narrow deterministic hygiene pass.
+
+Allowed edits:
+
+- \`$REMEDIATION_DIR/packets/*.md\`
+- \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\`
+- Other files under \`$REMEDIATION_DIR/artifacts/\` only when they are summaries or ledgers for this unit.
+
+Forbidden edits:
+
+- Product source, product docs, tests, migrations, configs, package manifests, lockfiles, or files outside \`$REMEDIATION_DIR\`.
+- Any attempt to change implementation behavior.
+
+Make the packet work logs and implementation summary truthful based on the existing verifier and implementation logs. Do not claim launch evidence is complete when findings say it is pending; record it as launch evidence pending.
+
+Verifier findings to resolve:
+
+\`\`\`text
+$(cat "$findings")
+\`\`\`
+
+Write a short closeout note to \`$REMEDIATION_DIR/artifacts/$unit_id-metadata-closeout.md\` describing the remediation-owned metadata files updated.
+PROMPT
+}
+
+execute_metadata_closeout_repairs() {
+  [[ "$REMEDIATION_AUTO_METADATA_CLOSEOUT" == "1" ]] || return 0
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  local units
+  units="$(metadata_closeout_units_from_queue)"
+  [[ -n "$units" ]] || return 0
+  printf '[metadata-closeout] units=%s\n' "$units"
+
+  local previous_only="$ONLY_UNIT"
+  local previous_force_verify="$FORCE_VERIFY"
+  local unit_id
+  local IFS=,
+  for unit_id in $units; do
+    [[ -n "$unit_id" ]] || continue
+    build_metadata_closeout_prompt "$unit_id"
+    if ! run_prompt "$REMEDIATION_DIR/prompts/metadata-closeout-$unit_id.md" "metadata-closeout-$unit_id" "standard" "$REPO_ROOT"; then
+      printf '[metadata-closeout] %s failed; leaving unit for normal revision\n' "$unit_id" >&2
+    fi
+  done
+  ONLY_UNIT="$units"
+  FORCE_VERIFY=1
+  execute_verifier_units
+  ONLY_UNIT="$previous_only"
+  FORCE_VERIFY="$previous_force_verify"
+}
+
+execute_missing_verifiers_from_queue() {
+  [[ "$REMEDIATION_AUTO_VERIFY_MISSING" == "1" ]] || return 0
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  local units
+  units="$(not_verified_units_from_queue)"
+  [[ -n "$units" ]] || return 0
+  printf '[missing-verifier] units=%s\n' "$units"
+  local previous_only="$ONLY_UNIT"
+  local previous_force_verify="$FORCE_VERIFY"
+  ONLY_UNIT="$units"
+  FORCE_VERIFY=1
+  execute_verifier_units
+  ONLY_UNIT="$previous_only"
+  FORCE_VERIFY="$previous_force_verify"
+}
+
 execute_final_review() {
   local final_review="$REMEDIATION_DIR/prompts/99-final-review.md"
+  aggregate_verifier_findings
   if grep -qxF "99-final-review" "$CHECKPOINT_FILE" 2>/dev/null; then
-    printf '[resume] skipping completed 99-final-review\n'
-    return 0
+    if final_review_input_fingerprint_matches; then
+      if [[ "$FORCE_FINAL_REVIEW" == "1" ]]; then
+        printf '[rerun] 99-final-review requested explicitly\n'
+      else
+        printf '[resume] skipping completed 99-final-review\n'
+        return 0
+      fi
+    elif [[ "$FORCE_FINAL_REVIEW" == "1" || "$REMEDIATION_AUTO_RERUN_FINAL_REVIEW" == "1" ]]; then
+      printf '[rerun] 99-final-review inputs changed since prior final review\n'
+    else
+      printf '[resume] not re-running 99-final-review; checkpoint inputs changed (use --rerun-final-review to refresh)\n'
+      return 0
+    fi
+    if [[ "$DRY_RUN" != "1" ]]; then
+      remove_checkpoint_entry "99-final-review"
+    fi
   fi
   printf '[final-review] %s\n' "$final_review"
   if run_prompt "$final_review" "99-final-review" "reviewer"; then
-    printf '%s\n' "99-final-review" >> "$CHECKPOINT_FILE"
+    if [[ "$DRY_RUN" != "1" ]]; then
+      write_final_review_input_fingerprint
+      printf '%s\n' "99-final-review" >> "$CHECKPOINT_FILE"
+    fi
   fi
 }
 
 execute_verifiers() {
+  run_static_prechecks
   execute_verifier_units
+  execute_metadata_closeout_repairs
+  execute_missing_verifiers_from_queue
   execute_evidence_collection_rounds
   execute_final_review
+}
+
+execute_state_resume() {
+  printf '[resume] deriving next action from existing remediation state\n'
+  run_static_prechecks
+  aggregate_verifier_findings
+
+  execute_missing_verifiers_from_queue
+  execute_metadata_closeout_repairs
+  execute_evidence_collection_rounds
+
+  if grep -qxF "99-final-review" "$CHECKPOINT_FILE" 2>/dev/null; then
+    execute_final_review
+    return 0
+  fi
+
+  if find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*.md' -print -quit 2>/dev/null | grep -q .; then
+    printf '[resume] final review checkpoint missing; verifier artifacts exist, so running final review only\n'
+    execute_final_review
+    return 0
+  fi
+
+  printf '[resume] no final-review checkpoint and no verifier artifacts; generated summary/queue only\n'
+  printf '[resume] use --execute, --verify-only, or --rerun-verifiers for an explicit agent section\n'
+}
+
+execute_queue_drain() {
+  local max_rounds="$QUEUE_DRAIN_MAX_ROUNDS"
+  [[ "$max_rounds" =~ ^[0-9]+$ ]] || max_rounds=20
+
+  run_static_prechecks
+  write_remediation_queue_summary >/dev/null
+
+  local round=1 evidence_attempted=0 stalled_action_keys=$'\n'
+  while :; do
+    if (( max_rounds > 0 && round > max_rounds )); then
+      printf '[drain-queue] max rounds reached: %s\n' "$max_rounds"
+      break
+    fi
+
+    local before_signature
+    before_signature="$(queue_action_signature)"
+
+    local units action="" action_key=""
+    units="$(not_verified_units_from_queue)"
+    action_key="not_verified:$units"
+    if [[ -n "$units" ]] && ! drain_action_was_stalled "$stalled_action_keys" "$action_key"; then
+      action="not_verified"
+      printf '[drain-queue] round=%s action=verify-missing units=%s\n' "$round" "$units"
+      if [[ "$DRY_RUN" == "1" ]]; then
+        break
+      fi
+      local previous_only="$ONLY_UNIT"
+      local previous_force_verify="$FORCE_VERIFY"
+      ONLY_UNIT="$units"
+      FORCE_VERIFY=1
+      execute_verifier_units
+      ONLY_UNIT="$previous_only"
+      FORCE_VERIFY="$previous_force_verify"
+    else
+      units="$(revise_next_units_from_queue)"
+      action_key="needs_targeted_revision:$units"
+      if [[ -n "$units" ]] && ! drain_action_was_stalled "$stalled_action_keys" "$action_key"; then
+        action="needs_targeted_revision"
+        printf '[drain-queue] round=%s action=revise units=%s\n' "$round" "$units"
+        if [[ "$DRY_RUN" == "1" ]]; then
+          break
+        fi
+        execute_revise_next_batch "$units"
+      else
+        units="$(pending_split_child_units)"
+        action_key="split_children_pending:$units"
+        if [[ -n "$units" ]] && ! drain_action_was_stalled "$stalled_action_keys" "$action_key"; then
+          action="split_children_pending"
+          printf '[drain-queue] round=%s action=split-children units=%s\n' "$round" "$units"
+          if [[ "$DRY_RUN" == "1" ]]; then
+            break
+          fi
+          execute_split_child_units_batch "$units"
+        elif [[ "$evidence_attempted" == "0" ]] && ! drain_action_was_stalled "$stalled_action_keys" "evidence:*"; then
+          action="evidence"
+          action_key="evidence:*"
+          evidence_attempted=1
+          printf '[drain-queue] round=%s action=evidence\n' "$round"
+          if [[ "$DRY_RUN" == "1" ]]; then
+            break
+          fi
+          execute_metadata_closeout_repairs
+          execute_evidence_collection_rounds
+        fi
+      fi
+    fi
+
+    if [[ -z "$action" ]]; then
+      printf '[drain-queue] no deterministic queue actions remain\n'
+      break
+    fi
+
+    write_remediation_queue_summary >/dev/null
+    local after_signature
+    after_signature="$(queue_action_signature)"
+    printf '[drain-queue] round=%s action=%s complete\n' "$round" "$action"
+    if [[ "$after_signature" == "$before_signature" ]]; then
+      stalled_action_keys+="$action_key"$'\n'
+      printf '[drain-queue] action=%s did not change queue signature; marking action stalled and checking lower-priority deterministic actions\n' "$action"
+    fi
+
+    round=$((round + 1))
+  done
+
+  execute_final_review
+}
+
+revise_next_units_from_queue() {
+  write_remediation_queue_summary >/dev/null
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || return 0
+
+  local -a units=()
+  local unit_id group _model _packets category finding_count _verifier _findings
+  while IFS=$'	' read -r unit_id group _model _packets category finding_count _verifier _findings; do
+    [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+    [[ "$category" == "needs_targeted_revision" ]] || continue
+    [[ "$finding_count" =~ ^[0-9]+$ ]] || continue
+    (( finding_count > 0 && finding_count <= MAX_AUTO_REVISE_FINDINGS )) || continue
+    if ! unit_selected "$unit_id"; then
+      continue
+    fi
+    if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
+      continue
+    fi
+    units+=("$unit_id")
+    if [[ "$REVISE_NEXT_LIMIT" =~ ^[0-9]+$ ]] && (( REVISE_NEXT_LIMIT > 0 && ${#units[@]} >= REVISE_NEXT_LIMIT )); then
+      break
+    fi
+  done < "$queue"
+
+  if ((${#units[@]} > 0)); then
+    local IFS=,
+    printf '%s' "${units[*]}"
+  fi
+}
+
+queue_category_count() {
+  local category="$1"
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || {
+    printf '0\n'
+    return 0
+  }
+  awk -F '\t' -v category="$category" 'NR > 1 && $5 == category { count += 1 } END { printf "%d\n", count + 0 }' "$queue"
+}
+
+queue_category_findings_sum() {
+  local category="$1"
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || {
+    printf '0\n'
+    return 0
+  }
+  awk -F '\t' -v category="$category" '
+    NR > 1 && $5 == category && $6 ~ /^[0-9]+$/ { count += $6 }
+    END { printf "%d\n", count + 0 }
+  ' "$queue"
+}
+
+queue_units_for_category() {
+  local category="$1"
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || return 0
+  awk -F '\t' -v category="$category" 'NR > 1 && $5 == category { print $1 }' "$queue" | paste -sd, -
+}
+
+queue_units_for_category_selected() {
+  local category="$1"
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || return 0
+
+  local -a units=()
+  local unit_id group _model _packets row_category _count _verifier _findings
+  while IFS=$'\t' read -r unit_id group _model _packets row_category _count _verifier _findings; do
+    [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+    [[ "$row_category" == "$category" ]] || continue
+    unit_selected "$unit_id" || continue
+    if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then
+      continue
+    fi
+    units+=("$unit_id")
+  done < "$queue"
+
+  if ((${#units[@]} > 0)); then
+    local IFS=,
+    printf '%s' "${units[*]}"
+  fi
+}
+
+queue_action_signature() {
+  local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || {
+    printf 'missing\n'
+    return 0
+  }
+  awk -F '\t' '
+    NR > 1 {
+      finding_count = ($6 ~ /^[0-9]+$/) ? $6 : 0
+      printf "%s:%s/%d\n", $5, $1, finding_count
+    }
+  ' "$queue" | sort | paste -sd ';' -
+}
+
+drain_action_was_stalled() {
+  local stalled_keys="$1" action_key="$2"
+  [[ "$stalled_keys" == *$'\n'"$action_key"$'\n'* ]]
+}
+
+execute_revise_next_batch() {
+  local revised_units="$1"
+  local previous_only="$ONLY_UNIT"
+  local previous_revise="$REVISE_EXISTING"
+  local previous_parallel="$MAX_PARALLEL"
+  local previous_force_verify="$FORCE_VERIFY"
+
+  ONLY_UNIT="$revised_units"
+  REVISE_EXISTING=1
+  FORCE_VERIFY=1
+  MAX_PARALLEL="${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
+  if workspace_has_child_git_roots; then
+    MAX_PARALLEL=1
+    printf '[revise-next] split-root workspace detected; forcing serialized active-workspace revision\n'
+  fi
+
+  execute_workstreams
+  integrate_units_before_verification "$revised_units"
+  run_static_prechecks
+  execute_verifier_units
+  execute_metadata_closeout_repairs
+  aggregate_verifier_findings
+
+  ONLY_UNIT="$previous_only"
+  REVISE_EXISTING="$previous_revise"
+  FORCE_VERIFY="$previous_force_verify"
+  MAX_PARALLEL="$previous_parallel"
+}
+
+execute_split_child_units_batch() {
+  local child_units="$1"
+  [[ -n "$child_units" ]] || return 0
+
+  local previous_only="$ONLY_UNIT"
+  local previous_revise="$REVISE_EXISTING"
+  local previous_parallel="$MAX_PARALLEL"
+  local previous_force_verify="$FORCE_VERIFY"
+  local batch_marker
+  batch_marker="$(mktemp)"
+  touch "$batch_marker"
+
+  ONLY_UNIT="$child_units"
+  REVISE_EXISTING=1
+  FORCE_VERIFY=1
+  MAX_PARALLEL="${SPLIT_CHILD_MAX_PARALLEL:-1}"
+
+  printf '[drain-queue] executing split child units=%s\n' "$child_units"
+  execute_workstreams
+
+  local implemented_units=""
+  local IFS=, unit_id marker
+  for unit_id in $child_units; do
+    [[ -n "$unit_id" ]] || continue
+    marker="$(unit_workspace_marker_file "$unit_id")"
+    if [[ -s "$marker" && "$marker" -nt "$batch_marker" ]]; then
+      implemented_units="$(combine_unit_lists "$implemented_units" "$unit_id")"
+    fi
+  done
+  rm -f "$batch_marker"
+
+  if [[ -n "$implemented_units" ]]; then
+    integrate_units_before_verification "$implemented_units"
+    ONLY_UNIT="$(combine_unit_lists "$implemented_units" "$(queue_units_for_category_selected "not_verified")")"
+  else
+    printf '[drain-queue] no split child units were implemented in this batch; skipping worktree merge\n'
+  fi
+
+  run_static_prechecks
+  execute_verifier_units
+  execute_metadata_closeout_repairs
+  aggregate_verifier_findings
+
+  ONLY_UNIT="$previous_only"
+  REVISE_EXISTING="$previous_revise"
+  FORCE_VERIFY="$previous_force_verify"
+  MAX_PARALLEL="$previous_parallel"
+}
+
+execute_revise_next() {
+  local max_rounds="$REVISE_NEXT_MAX_ROUNDS"
+  [[ "$max_rounds" =~ ^[0-9]+$ ]] || max_rounds=10
+
+  local round=1
+  while :; do
+    if (( max_rounds > 0 && round > max_rounds )); then
+      printf '[revise-next] max rounds reached: %s\n' "$max_rounds"
+      return 0
+    fi
+
+    local revised_units
+    revised_units="$(revise_next_units_from_queue)"
+    if [[ -z "$revised_units" ]]; then
+      printf '[revise-next] no safe needs_targeted_revision units found in current queue\n'
+      printf '[revise-next] blocked, contract_conflict, test_harness, split, evidence, and oversized finding sets were left untouched\n'
+      return 0
+    fi
+
+    local before_needs
+    before_needs="$(queue_category_count "needs_targeted_revision")"
+    local before_need_findings
+    before_need_findings="$(queue_category_findings_sum "needs_targeted_revision")"
+
+    printf '[revise-next] round=%s limit=%s needs_targeted_revision=%s units=%s\n' \
+      "$round" "$REVISE_NEXT_LIMIT" "$before_needs" "$revised_units"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf '[revise-next] dry-run: selected safe revision units only; no agents launched\n'
+      return 0
+    fi
+
+    execute_revise_next_batch "$revised_units"
+    write_remediation_queue_summary >/dev/null
+
+    local after_needs
+    after_needs="$(queue_category_count "needs_targeted_revision")"
+    local after_need_findings
+    after_need_findings="$(queue_category_findings_sum "needs_targeted_revision")"
+    printf '[revise-next] round=%s complete needs_targeted_revision=%s unresolved_findings=%s\n' \
+      "$round" "$after_needs" "$after_need_findings"
+    if (( after_needs >= before_needs && after_need_findings >= before_need_findings )); then
+      printf '[revise-next] stopping: needs_targeted_revision did not improve after batch (count before=%s after=%s, findings before=%s after=%s)\n' \
+        "$before_needs" "$after_needs" "$before_need_findings" "$after_need_findings"
+      printf '[revise-next] remaining needs_targeted_revision units=%s\n' \
+        "$(queue_units_for_category "needs_targeted_revision")"
+      return 0
+    fi
+    round=$((round + 1))
+  done
 }
 
 execute_revision_rounds() {
@@ -4927,9 +6792,15 @@ execute_revision_rounds() {
     ONLY_UNIT="$revised_units"
     REVISE_EXISTING=1
     MAX_PARALLEL="${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
+    if workspace_has_child_git_roots; then
+      MAX_PARALLEL=1
+      printf '[auto-revise] split-root workspace detected; forcing serialized active-workspace revision\n'
+    fi
 
     execute_workstreams
+    run_static_prechecks
     execute_verifier_units
+    execute_metadata_closeout_repairs
     aggregate_verifier_findings
 
     ONLY_UNIT="$previous_only"
@@ -4948,17 +6819,122 @@ execute_revision_rounds() {
 
 collect_evidence_units_from_findings() {
   [[ -d "$REMEDIATION_DIR/artifacts" ]] || return 0
-  local file unit_id
-  find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*-findings.tsv' -print 2>/dev/null |
-    sort |
-    while IFS= read -r file; do
-      unit_id="$(basename "$file")"
-      unit_id="${unit_id#verify-}"
-      unit_id="${unit_id%-findings.tsv}"
-      unit_selected "$unit_id" || continue
-      awk -F '\t' 'NR > 1 && ($3 == "launch_evidence" || $3 == "sandbox_blocked") && $1 != "" { print $1 }' "$file"
-    done |
-    awk '!seen[$0]++'
+  {
+    local file unit_id
+    find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*-findings.tsv' -print 2>/dev/null |
+      sort |
+      while IFS= read -r file; do
+        unit_id="$(basename "$file")"
+        unit_id="${unit_id#verify-}"
+        unit_id="${unit_id%-findings.tsv}"
+        unit_selected "$unit_id" || continue
+        awk -F '\t' 'NR > 1 && ($3 == "launch_evidence" || $3 == "sandbox_blocked") && $1 != "" { print $1 }' "$file"
+      done
+
+    local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+    if [[ -s "$queue" ]]; then
+      while IFS=$'\t' read -r unit_id _group _model _packets category _count _verifier _findings; do
+        [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+        [[ "$category" == "evidence_failed" ]] || continue
+        unit_selected "$unit_id" || continue
+        printf '%s\n' "$unit_id"
+      done < "$queue"
+    fi
+  } | awk '!seen[$0]++'
+}
+
+failed_evidence_commands_for_unit() {
+  local unit_id="$1"
+  local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
+  [[ -d "$unit_dir" ]] || return 0
+
+  local status_file status command
+  while IFS= read -r status_file; do
+    [[ -f "$status_file" ]] || continue
+    status="$(awk -F ': ' 'toupper($1) == "STATUS" { print tolower($2); exit }' "$status_file")"
+    [[ "$status" == "fail" ]] || continue
+    command="$(awk -F ': ' 'toupper($1) == "COMMAND" { sub(/^[^:]+: /, ""); print; exit }' "$status_file")"
+    [[ -n "$command" ]] && printf '%s\n' "$command"
+  done < <(find "$unit_dir" -type f -name '*.status' -print 2>/dev/null | sort)
+
+  local summary_json
+  while IFS= read -r summary_json; do
+    [[ -f "$summary_json" ]] || continue
+    python3 - "$summary_json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(0)
+
+command = str(payload.get("command") or "").strip()
+if not command:
+    raise SystemExit(0)
+
+status = str(payload.get("status", "")).strip().upper()
+proof_files = payload.get("proof_files") or []
+missing_proofs = []
+for proof in proof_files:
+    proof_path = pathlib.Path(str(proof))
+    if not proof_path.is_absolute():
+        proof_path = path.parent / proof_path
+    if not proof_path.is_file():
+        missing_proofs.append(str(proof))
+
+if status != "PASS" or missing_proofs:
+    print(command)
+PY
+  done < <(find "$unit_dir" -mindepth 2 -maxdepth 3 -name 'summary.json' -print 2>/dev/null | sort)
+}
+
+run_logged_evidence_script() {
+  local unit_id="$1" run_script="$2" log_file="$3"
+
+  (
+    cd "$REPO_ROOT"
+    bash "$run_script"
+  ) >> "$log_file" 2>&1 &
+
+  local pid="$!"
+  local start now elapsed spinner_index spinner_chars spinner_char log_bytes
+  start="$(date +%s)"
+  spinner_index=0
+  spinner_chars='-\|/'
+
+  while kill -0 "$pid" 2>/dev/null; do
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    spinner_char="${spinner_chars:spinner_index:1}"
+    spinner_index=$(((spinner_index + 1) % ${#spinner_chars}))
+    log_bytes="$(wc -c < "$log_file" 2>/dev/null || printf '0')"
+    if [[ -t 2 ]]; then
+      local columns line max_line
+      columns="$(tput cols 2>/dev/null || printf '120')"
+      [[ "$columns" =~ ^[0-9]+$ ]] || columns=120
+      ((columns < 40)) && columns=40
+      max_line=$((columns - 1))
+      line="$(printf '[%s] evidence:%s (%ss) log_bytes=%s log=%s' \
+        "$spinner_char" "$unit_id" "$elapsed" "$log_bytes" "$log_file")"
+      if ((${#line} > max_line)); then
+        line="${line:0:$((max_line - 3))}..."
+      fi
+      printf '\r\033[2K%s' "$line" >&2
+    elif (( elapsed > 0 && elapsed % 60 == 0 )); then
+      printf '[evidence] running:%s elapsed=%ss log_bytes=%s log=%s\n' \
+        "$unit_id" "$elapsed" "$log_bytes" "$log_file" >&2
+    fi
+    sleep 1
+  done
+
+  if [[ -t 2 ]]; then
+    printf '\r\033[2K' >&2
+  fi
+
+  wait "$pid"
 }
 
 run_evidence_command() {
@@ -4971,11 +6947,34 @@ run_evidence_command() {
   log_file="$unit_dir/${safe_label}.log"
   status_file="$unit_dir/${safe_label}.status"
   wrapped_command="$command"
+  if [[ "$wrapped_command" == "cd backend && pytest backend/tests"* ]]; then
+    wrapped_command="cd backend && pytest tests${wrapped_command#cd backend && pytest backend/tests}"
+  fi
+  if [[ "$wrapped_command" == "cd frontend && "*"/frontend/"* ]]; then
+    wrapped_command="${wrapped_command//\/frontend\//\/}"
+  fi
+  if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* || "$command" == *"browser-evidence"* || "$command" == *"lighthouse"* ]]; then
+    if unit_has_passing_summary_artifact "$unit_id"; then
+      {
+        printf 'STATUS: pass\n'
+        printf 'COMMAND: %s\n' "$command"
+        printf 'LOG: reused summary artifact under %s\n' "$unit_dir"
+        printf 'FINISHED_AT: %s\n' "$(date -Is)"
+      } > "$status_file"
+      printf '[evidence] %s: pass (reused summary artifact): %s\n' "$unit_id" "$command"
+      return 0
+    fi
+  fi
   if [[ "$command" == *" -m postgres"* && -z "${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-}" && -x "$REPO_ROOT/scripts/dev-postgres" ]]; then
     wrapped_command="./scripts/dev-postgres bootstrap && export MERIDIAN_TEST_ALEMBIC_POSTGRES_URL=\"\${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-postgresql://meridian:meridian@127.0.0.1:5432/meridian_test}\" && $command"
   fi
   if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* || "$command" == *"browser-evidence"* || "$command" == *"lighthouse"* ]]; then
-    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\"; if [[ -n \"\${E2E_BASE_URL:-}\" && \"\$E2E_BASE_URL\" != http://* && \"\$E2E_BASE_URL\" != https://* ]]; then export E2E_BASE_URL=\"https://\$E2E_BASE_URL\"; fi; if [[ -z \"\${E2E_API_BASE:-}\" && \"\$E2E_BASE_URL\" =~ ^https?://([^/:]+)(:[0-9]+)?/?$ && \"\${BASH_REMATCH[1]}\" != localhost && \"\${BASH_REMATCH[1]}\" != 127.* ]]; then export E2E_API_BASE=\"https://api-\${BASH_REMATCH[1]}\"; fi; $wrapped_command"
+    local journey_slug audit_artifact_dir skip_runtime_quality
+    journey_slug="$safe_label"
+    audit_artifact_dir="$unit_dir/$journey_slug"
+    skip_runtime_quality=0
+    [[ "$REMEDIATION_EVIDENCE_MODE" == "targeted" ]] && skip_runtime_quality=1
+    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\" PORTAL_AUDIT_RUN_DIR=\"$REMEDIATION_DIR\" PORTAL_AUDIT_JOB_ID=\"$unit_id\" PORTAL_AUDIT_JOURNEY_SLUG=\"$journey_slug\" PORTAL_AUDIT_ARTIFACT_DIR=\"$audit_artifact_dir\" PORTAL_AUDIT_EVIDENCE_MODE=\"$REMEDIATION_EVIDENCE_MODE\" PORTAL_AUDIT_SKIP_RUNTIME_QUALITY=\"\${PORTAL_AUDIT_SKIP_RUNTIME_QUALITY:-$skip_runtime_quality}\"; if [[ -n \"\${E2E_BASE_URL:-}\" && \"\$E2E_BASE_URL\" != http://* && \"\$E2E_BASE_URL\" != https://* ]]; then export E2E_BASE_URL=\"https://\$E2E_BASE_URL\"; fi; if [[ -z \"\${E2E_API_BASE:-}\" && \"\$E2E_BASE_URL\" =~ ^https?://([^/:]+)(:[0-9]+)?/?$ && \"\${BASH_REMATCH[1]}\" != localhost && \"\${BASH_REMATCH[1]}\" != 127.* ]]; then export E2E_API_BASE=\"https://api-\${BASH_REMATCH[1]}\"; fi; $wrapped_command"
   fi
 
   run_script="$(mktemp "$unit_dir/${safe_label}.XXXXXX.sh")"
@@ -5003,7 +7002,7 @@ run_evidence_command() {
     return 1
   fi
 
-  if (cd "$REPO_ROOT" && bash "$run_script") >> "$log_file" 2>&1; then
+  if run_logged_evidence_script "$unit_id" "$run_script" "$log_file"; then
     {
       printf 'STATUS: pass\n'
       printf 'COMMAND: %s\n' "$command"
@@ -5107,6 +7106,13 @@ collect_launch_evidence_once() {
 
     while IFS= read -r command; do
       [[ -n "$command" ]] || continue
+      if evidence_command_is_allowed "$command"; then
+        printf '%s\n' "$command" >> "$tmp_commands"
+      fi
+    done < <(failed_evidence_commands_for_unit "$unit_id")
+
+    while IFS= read -r command; do
+      [[ -n "$command" ]] || continue
       ran=1
       if ! run_evidence_command "$unit_id" "$command" "$(evidence_command_label "$unit_id" "$command")"; then
         failed=1
@@ -5157,7 +7163,15 @@ execute_evidence_collection_rounds() {
   done
 }
 
-if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
+if [[ "$EXECUTE" == "0" && "$VERIFY" == "0" && "$VERIFY_ONLY" == "0" && \
+      "$FINALIZE_ONLY" == "0" && "$SUMMARY_ONLY" == "0" && \
+      "$REVISE_EXISTING" == "0" && "$REVISE_NEXT" == "0" && "$DRAIN_QUEUE" == "0" && "$SPLIT_INCOMPLETE" == "0" && \
+      "$CATALOG_WITH_CODEX" == "0" && "$FORCE_CATALOG" == "0" && \
+      "$RECOORDINATE" == "0" ]] && remediation_state_exists; then
+  STATE_RESUME=1
+fi
+
+if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1" && "$SUMMARY_ONLY" != "1" && "$REVISE_EXISTING" != "1" && "$REVISE_NEXT" != "1" && "$DRAIN_QUEUE" != "1" ]]; then
   _previous_px_tsv=""
   _preserve_existing_inventory=0
   if [[ -f "$PX_TSV" && "$REMEDIATION_REWRITE_PACKETS" != "1" ]] && remediation_state_exists; then
@@ -5173,6 +7187,7 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
       cp "$PX_TSV" "$_previous_px_tsv"
     fi
     extract_findings
+    dedupe_findings_into_blocker_ledger
     guard_reused_px_inventory "$_previous_px_tsv"
     [[ -n "$_previous_px_tsv" ]] && rm -f "$_previous_px_tsv"
     write_master_markdown
@@ -5247,13 +7262,13 @@ if [[ "$VERIFY_ONLY" != "1" && "$REVISE_EXISTING" != "1" ]]; then
     printf '[resume] existing catalog detected; not auto-running 00-cataloger (use --force-catalog to rewrite)\n'
   fi
 elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
-  echo "--verify-only/--revise-existing requires an existing REMEDIATION_DIR with $PX_TSV, $WORKSTREAMS_TSV, and $UNITS_TSV" >&2
+  echo "--verify-only/--finalize-only/--summary-only/--revise-existing requires an existing REMEDIATION_DIR with $PX_TSV, $WORKSTREAMS_TSV, and $UNITS_TSV" >&2
   exit 2
 fi
 
 normalize_units_tsv
 build_implemented_packet_set 0
-if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+if [[ "$REVISE_NEXT" != "1" && "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
   guard_against_incomplete_unit_coverage
   guard_against_raw_unit_manifest
 fi
@@ -5267,7 +7282,7 @@ build_final_review_prompt
 SHOULD_RUN_SPLIT_PREFLIGHT=0
 if [[ "$SPLIT_INCOMPLETE" == "1" ]]; then
   SHOULD_RUN_SPLIT_PREFLIGHT=1
-elif [[ "$AUTO_SPLIT_BEFORE_EXECUTE" == "1" && "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
+elif [[ "$REVISE_EXISTING" != "1" && "$REVISE_NEXT" != "1" && "$AUTO_SPLIT_BEFORE_EXECUTE" == "1" && "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" || "$VERIFY" == "1" ) ]]; then
   SHOULD_RUN_SPLIT_PREFLIGHT=1
 fi
 
@@ -5319,6 +7334,8 @@ fi
 write_run_summary() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   [[ ! -f "$UNITS_TSV" ]] && return 0
+  reconcile_verifier_postcheck_markers
+  aggregate_verifier_findings
   local summary="$REMEDIATION_DIR/06-run-summary.tsv"
   local total=0 fixed=0 partial=0 blocked=0
 
@@ -5330,9 +7347,20 @@ write_run_summary() {
     local verify_artifact="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
     local impl_log="$REMEDIATION_DIR/logs/implement-$unit_id.log"
 
+    local queue_category
+    queue_category="$(verifier_queue_category "$unit_id")"
+
     local impl_result
     if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
-      impl_result="split"
+      if [[ "$queue_category" == "accept-via-named-children" ]]; then
+        impl_result="accepted_via_named_children"
+      elif [[ "$queue_category" == "accepted_evidence_pending" || "$queue_category" == "accepted_with_carry_over" ]]; then
+        impl_result="fixed"
+      elif [[ "$queue_category" == "split_decomposed" ]]; then
+        impl_result="split"
+      else
+        impl_result="split"
+      fi
     elif [[ -s "$impl_artifact" ]]; then
       impl_result="$(grep -oi 'IMPLEMENTATION_RESULT:[[:space:]]*[a-z]*' "$impl_artifact" 2>/dev/null | head -1 | sed 's/.*IMPLEMENTATION_RESULT:[[:space:]]*//' || true)"
       [[ -z "$impl_result" ]] && impl_result="$(grep -oi 'RESULT:[[:space:]]*[A-Za-z/]*' "$impl_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"
@@ -5345,7 +7373,17 @@ write_run_summary() {
 
     local verify_decision
     if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
-      verify_decision="decomposed"
+      if [[ "$queue_category" == "accept-via-named-children" ]]; then
+        verify_decision="accept-via-named-children"
+      elif [[ "$queue_category" == "accepted_evidence_pending" ]]; then
+        verify_decision="accept-with-pending-evidence"
+      elif [[ "$queue_category" == "accepted_with_carry_over" ]]; then
+        verify_decision="accepted_with_carry_over"
+      elif [[ "$queue_category" == "split_decomposed" ]]; then
+        verify_decision="decomposed"
+      else
+        verify_decision="split_children_pending"
+      fi
     elif [[ -s "$verify_artifact" ]]; then
       verify_decision="$(
         grep -oiE '^[[:space:]-]*(\*\*)?Decision[^[:alnum:]]+`?(accept|revise|stop)`?' "$verify_artifact" 2>/dev/null \
@@ -5357,13 +7395,22 @@ write_run_summary() {
     else
       verify_decision="not-verified"
     fi
+    case "$queue_category" in
+      accept-via-named-children) verify_decision="accept-via-named-children" ;;
+      accepted_with_carry_over) verify_decision="accepted_with_carry_over" ;;
+    esac
+
+    case "$impl_result" in
+      PASS|pass|completed) impl_result="fixed" ;;
+      INCOMPLETE|incomplete) impl_result="partial" ;;
+      BLOCKED) impl_result="blocked" ;;
+    esac
 
     printf '%s\t%s\t%s\t%s\t%s\n' "$unit_id" "$group" "$model_class" "$impl_result" "$verify_decision" >> "$summary"
     total=$((total + 1))
-    case "$impl_result:$verify_decision" in
-      *:accept) fixed=$((fixed + 1)) ;;
-      fixed:*|pass:*|PASS:*|completed:*) fixed=$((fixed + 1)) ;;
-      split:*|*:decomposed|partial:*|incomplete:*|INCOMPLETE:*) partial=$((partial + 1)) ;;
+    case "$queue_category" in
+      accepted|accepted_evidence_pending|accepted_with_carry_over|accept-via-named-children) fixed=$((fixed + 1)) ;;
+      split_children_pending|needs_targeted_revision|coordinator_cleanup|not_verified|needs_review|evidence_failed) partial=$((partial + 1)) ;;
       *) blocked=$((blocked + 1)) ;;
     esac
   done < <(tail -n +2 "$UNITS_TSV")
@@ -5372,21 +7419,16 @@ write_run_summary() {
   printf 'fixed/completed: %d  partial: %d  failed/not-run: %d\n' "$fixed" "$partial" "$blocked"
   if ((partial > 0 || blocked > 0)); then
     printf 'Non-fixed units:\n'
-    awk -F'\t' 'NR>1 && $5 != "accept" && $4 !~ /^(fixed|pass|PASS|completed)$/ { printf "  %s (%s): impl=%s verify=%s\n", $1, $2, $4, $5 }' "$summary"
+    awk -F'\t' '
+      NR > 1 &&
+      $5 !~ /^(accept|accept-via-named-children|accepted_with_carry_over|accept-with-pending-evidence)$/ &&
+      $4 != "fixed" {
+        printf "  %s (%s): impl=%s verify=%s\n", $1, $2, $4, $5
+      }
+    ' "$summary"
   fi
   printf 'Summary: %s\n' "$summary"
   printf '==========================================\n'
-}
-
-verifier_finding_type_exists() {
-  local findings="$1" type="$2"
-  [[ -s "$findings" ]] || return 1
-  awk -F '\t' -v type="$type" '
-    NR > 1 && $3 == type {
-      found = 1
-    }
-    END { exit found ? 0 : 1 }
-  ' "$findings"
 }
 
 verifier_findings_count() {
@@ -5398,20 +7440,206 @@ verifier_findings_count() {
   awk -F '\t' 'NR > 1 && $1 != "" { count += 1 } END { printf "%d\n", count }' "$findings"
 }
 
+unit_is_plain_accepted() {
+  local unit_id="$1"
+  local findings
+  verifier_accepts_unit "$unit_id" || return 1
+  unit_evidence_has_failed_status "$unit_id" && return 1
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  [[ "$(verifier_findings_count "$findings")" == "0" ]]
+}
+
+finding_resolved_by_accepted_dependency() {
+  local unit_id="$1" text="$2"
+  local mentioned=0 dep
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] || continue
+    [[ "$dep" == "$unit_id" ]] && continue
+    mentioned=1
+    unit_is_plain_accepted "$dep" || return 1
+  done < <(printf '%s\n' "$text" | grep -Eo 'IU-[0-9]{4}(-S[0-9]{2})?' | awk '!seen[$0]++')
+  [[ "$mentioned" == "1" ]]
+}
+
+verifier_unresolved_findings_count() {
+  local unit_id="$1" findings="$2"
+  [[ -s "$findings" ]] || {
+    printf '0\n'
+    return 0
+  }
+
+  local count=0 type file finding required_fix text
+  while IFS=$'\t' read -r _row_unit _severity type file _line finding required_fix _rest; do
+    [[ -n "${_row_unit:-}" ]] || continue
+    text="$file $finding $required_fix"
+    if [[ "$type" == "launch_evidence" || "$type" == "sandbox_blocked" ]]; then
+      if finding_resolved_by_accepted_dependency "$unit_id" "$text"; then
+        continue
+      fi
+    fi
+    count=$((count + 1))
+  done < <(tail -n +2 "$findings")
+  if unit_evidence_has_failed_status "$unit_id"; then
+    count=$((count + 1))
+  fi
+  printf '%d\n' "$count"
+}
+
+verifier_has_unresolved_evidence_findings() {
+  local unit_id="$1" findings="$2"
+  [[ -s "$findings" ]] || return 1
+  local type file finding required_fix text
+  while IFS=$'\t' read -r _row_unit _severity type file _line finding required_fix _rest; do
+    [[ -n "${_row_unit:-}" ]] || continue
+    [[ "$type" == "launch_evidence" || "$type" == "sandbox_blocked" ]] || continue
+    text="$file $finding $required_fix"
+    finding_resolved_by_accepted_dependency "$unit_id" "$text" && continue
+    return 0
+  done < <(tail -n +2 "$findings")
+  return 1
+}
+
+verifier_has_non_evidence_findings() {
+  local findings="$1"
+  [[ -s "$findings" ]] || return 1
+  awk -F '\t' '
+    NR > 1 && $1 != "" && $3 != "launch_evidence" && $3 != "sandbox_blocked" {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$findings"
+}
+
+unit_implementation_newer_than_verifier() {
+  local unit_id="$1"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  [[ -s "$verifier" ]] || return 1
+
+  local candidate
+  for candidate in \
+    "$REMEDIATION_DIR/artifacts/$unit_id-summary.md" \
+    "$REMEDIATION_DIR/artifacts/$unit_id-native-test.log" \
+    "$REMEDIATION_DIR/artifacts/$unit_id-metadata-closeout.md" \
+    "$REMEDIATION_DIR/logs/implement-$unit_id.log"; do
+    if [[ -s "$candidate" && "$candidate" -nt "$verifier" ]]; then
+      return 0
+    fi
+  done
+
+  local packets_csv packet_id packet_file
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  IFS=',' read -ra _stale_packets <<< "$packets_csv"
+  for packet_id in "${_stale_packets[@]}"; do
+    packet_id="${packet_id#"${packet_id%%[![:space:]]*}"}"
+    packet_id="${packet_id%"${packet_id##*[![:space:]]}"}"
+    [[ -n "$packet_id" ]] || continue
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    if [[ -s "$packet_file" && "$packet_file" -nt "$verifier" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+reconcile_verifier_postcheck_markers() {
+  [[ -d "$REMEDIATION_DIR/artifacts" ]] || return 0
+  local marker unit_id verifier packets_csv
+  shopt -s nullglob
+  for marker in "$REMEDIATION_DIR"/artifacts/verify-*.postcheck.invalid; do
+    [[ -s "$marker" ]] || continue
+    unit_id="$(basename "$marker")"
+    unit_id="${unit_id#verify-}"
+    unit_id="${unit_id%.postcheck.invalid}"
+    verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+    [[ -s "$verifier" ]] || continue
+    verifier_accepts_unit_raw "$unit_id" || continue
+    if verifier_acceptance_uses_worktree_evidence "$unit_id" "$verifier"; then
+      continue
+    fi
+    clear_verifier_postcheck_invalid "$unit_id"
+    packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+    if [[ -n "$packets_csv" ]] && artifact_mentions_all_packets "$verifier" "$packets_csv"; then
+      write_verifier_input_fingerprint "$unit_id" 2>/dev/null || true
+    fi
+    printf '[postcheck-recover] cleared stale verifier postcheck marker for %s\n' "$unit_id" >&2
+  done
+  shopt -u nullglob
+}
+
+normalize_reconciliation_category() {
+  local category="$1"
+  if [[ "$category" =~ [Vv]ia[[:space:]-]+named[[:space:]-]+children ]]; then
+    printf 'accept-via-named-children\n'
+    return 0
+  fi
+  category="$(printf '%s\n' "$category" | sed -E 's/`//g; s/\*\*//g; s/[[:space:]]*\(.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+  category="${category//_/-}"
+  case "$category" in
+    accepted|accept) printf 'accepted\n' ;;
+    accepted-evidence-pending|accept-evidence-pending|accept-with-pending-child) printf 'accepted_evidence_pending\n' ;;
+    accepted-with-carry-over|accept-with-carry-over) printf 'accepted_with_carry_over\n' ;;
+    accept-via-named-children|accepted-via-named-children|accept-via-named-child) printf 'accept-via-named-children\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+unit_reconciliation_category() {
+  local unit_id="$1"
+  local review="$REMEDIATION_DIR/04-final-remediation-review.md"
+  [[ -s "$review" ]] || return 1
+
+  local category
+  category="$(
+    awk -F '|' -v unit="$unit_id" '
+      function trim(v) {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+        return v
+      }
+      /^[[:space:]]*\|/ {
+        col1 = trim($2)
+        if (col1 != unit) next
+        col3 = trim($4)
+        col4 = trim($5)
+        if (col4 ~ /^(accepted|accept)/) {
+          category = col4
+        } else if (col3 ~ /^(accepted|accept)/) {
+          category = col3
+        }
+      }
+      END {
+        if (category != "") print category
+      }
+    ' "$review"
+  )"
+  if [[ -n "$category" ]]; then
+    normalize_reconciliation_category "$category"
+    return 0
+  fi
+
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  if [[ -s "$verifier" ]] && file_matches 'Decision[^[:alnum:]]+`?accept-via-named-children`?' "$verifier"; then
+    printf 'accept-via-named-children\n'
+    return 0
+  fi
+
+  return 1
+}
+
 verifier_queue_category() {
   local unit_id="$1"
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
   local findings
   findings="$(verifier_findings_tsv_for_unit "$unit_id")"
 
-  if verifier_accepts_unit "$unit_id"; then
-    if unit_evidence_has_failed_status "$unit_id"; then
-      printf 'evidence_failed\n'
-    elif verifier_finding_type_exists "$findings" "launch_evidence" || verifier_finding_type_exists "$findings" "sandbox_blocked"; then
-      printf 'accepted_evidence_pending\n'
-    else
-      printf 'accepted\n'
-    fi
+  local reconciliation_category
+  if reconciliation_category="$(unit_reconciliation_category "$unit_id")"; then
+    printf '%s\n' "$reconciliation_category"
+    return 0
+  fi
+
+  if verifier_postcheck_invalid "$unit_id"; then
+    printf 'needs_targeted_revision\n'
     return 0
   fi
 
@@ -5421,7 +7649,28 @@ verifier_queue_category() {
     else
       printf 'split_decomposed\n'
     fi
-  elif verifier_finding_type_exists "$findings" "contract_conflict"; then
+    return 0
+  fi
+
+  if unit_implementation_newer_than_verifier "$unit_id"; then
+    printf 'not_verified\n'
+    return 0
+  fi
+
+  if verifier_accepts_unit "$unit_id"; then
+    if verifier_has_non_evidence_findings "$findings"; then
+      printf 'needs_targeted_revision\n'
+    elif verifier_has_unresolved_evidence_findings "$unit_id" "$findings"; then
+      printf 'accepted_evidence_pending\n'
+    elif unit_evidence_has_failed_status "$unit_id"; then
+      printf 'evidence_failed\n'
+    else
+      printf 'accepted\n'
+    fi
+    return 0
+  fi
+
+  if verifier_finding_type_exists "$findings" "contract_conflict"; then
     printf 'contract_conflict\n'
   elif verifier_has_only_coordinator_or_evidence_findings "$unit_id"; then
     printf 'coordinator_cleanup\n'
@@ -5445,6 +7694,7 @@ verifier_queue_category() {
 write_remediation_queue_summary() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   [[ ! -f "$UNITS_TSV" ]] && return 0
+  reconcile_verifier_postcheck_markers
   aggregate_verifier_findings
 
   local queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
@@ -5453,15 +7703,21 @@ write_remediation_queue_summary() {
   while IFS=$'\t' read -r unit_id packets_csv group model_class _severity _unit_rationale; do
     [[ -z "${unit_id:-}" ]] && continue
     local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
-    local findings
+    local findings category finding_count
     findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+    category="$(verifier_queue_category "$unit_id")"
+    if [[ "$category" == "not_verified" ]]; then
+      finding_count=0
+    else
+      finding_count="$(verifier_unresolved_findings_count "$unit_id" "$findings")"
+    fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$unit_id" \
       "$group" \
       "$model_class" \
       "$packets_csv" \
-      "$(verifier_queue_category "$unit_id")" \
-      "$(verifier_findings_count "$findings")" \
+      "$category" \
+      "$finding_count" \
       "$verifier" \
       "$findings" >> "$queue"
   done < <(tail -n +2 "$UNITS_TSV")
@@ -5472,6 +7728,7 @@ write_remediation_queue_summary() {
 
 printf 'Remediation run directory: %s\n' "$REMEDIATION_DIR"
 printf 'Master Px list: %s\n' "$PX_MD"
+printf 'Blocker ledger: %s\n' "$BLOCKER_LEDGER_MD"
 printf 'Workstreams: %s\n' "$WORKSTREAMS_TSV"
 printf 'Implementation units: %s\n' "$UNITS_TSV"
 printf 'Packets: %s/packets\n' "$REMEDIATION_DIR"
@@ -5480,19 +7737,52 @@ if [[ "$RECOORDINATE" == "1" && -f "$CHECKPOINT_FILE" ]]; then
   _rc_before=$(grep -c "^coordinate-" "$CHECKPOINT_FILE" 2>/dev/null || true)
   grep -v "^coordinate-" "$CHECKPOINT_FILE" > "${CHECKPOINT_FILE}.tmp" && mv "${CHECKPOINT_FILE}.tmp" "$CHECKPOINT_FILE"
   _rc_after=$(grep -c "^coordinate-" "$CHECKPOINT_FILE" 2>/dev/null || true)
+  [[ "$_rc_before" =~ ^[0-9]+$ ]] || _rc_before=0
+  [[ "$_rc_after" =~ ^[0-9]+$ ]] || _rc_after=0
   printf '[recoordinate] cleared %d coordinate-* checkpoint entries; workstream coordinators will re-run against incomplete packets\n' \
     "$(( _rc_before - _rc_after ))"
 fi
 
-if [[ "$VERIFY_ONLY" == "1" ]]; then
+if [[ "$STATE_RESUME" == "1" ]]; then
+  if [[ "$REMEDIATION_AUTO_DRAIN_QUEUE" == "1" ]]; then
+    printf '[resume] deriving and executing deterministic queue actions from existing remediation state\n'
+    execute_queue_drain
+  else
+    execute_state_resume
+  fi
+elif [[ "$REVISE_NEXT" == "1" ]]; then
+  execute_revise_next
+elif [[ "$DRAIN_QUEUE" == "1" ]]; then
+  execute_queue_drain
+elif [[ "$SUMMARY_ONLY" == "1" ]]; then
+  aggregate_verifier_findings
+elif [[ "$VERIFY_ONLY" == "1" ]]; then
   execute_verifiers
+elif [[ "$FINALIZE_ONLY" == "1" ]]; then
+  execute_final_review
 elif [[ "$SPLIT_SKIP_EXECUTION" == "1" ]]; then
   printf 'No split candidates or child units to execute.\n'
 elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" ]]; then
   execute_workstreams
+  if [[ "$EXECUTE" == "1" && "$DRY_RUN" != "1" && "$REMEDIATION_VERIFY_AFTER_EXECUTE" == "1" ]]; then
+    VERIFY=1
+  fi
+  if [[ "$REVISE_EXISTING" == "1" && "$EXECUTE" == "1" && "$DRY_RUN" != "1" ]]; then
+    VERIFY=1
+    FORCE_VERIFY=1
+    printf '[revise-existing] implementation pass complete; forcing verifier rerun for selected units\n'
+  elif [[ "$VERIFY" == "1" && "$EXECUTE" == "1" && "$DRY_RUN" != "1" && "$REMEDIATION_VERIFY_AFTER_EXECUTE" == "1" ]]; then
+    printf '[execute] implementation pass complete; running verifier/final-review drain by default\n'
+  fi
   if [[ "$VERIFY" == "1" ]]; then
+    if [[ "$REVISE_EXISTING" == "1" && -n "${ONLY_UNIT:-}" ]]; then
+      integrate_units_before_verification "$ONLY_UNIT"
+    fi
+    run_static_prechecks
     execute_verifier_units
     execute_revision_rounds
+    execute_metadata_closeout_repairs
+    execute_missing_verifiers_from_queue
     execute_evidence_collection_rounds
     execute_final_review
   fi

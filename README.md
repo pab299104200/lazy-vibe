@@ -50,6 +50,15 @@ The audit runs 10 sequential groups. Within each group, jobs execute in parallel
 
 The remediation phase reads the audit output, extracts findings into packets, and runs an implementer–verifier loop that fixes code, tests, and docs.
 
+Before packet generation, remediation now builds a deterministic blocker ledger:
+
+- `00-raw-px-list.tsv` keeps every raw P0/P1/P2 finding mention extracted from domain, synthesis, runtime, simulation, adversarial, final-decision, logs, and artifact reports.
+- `00-blocker-ledger.tsv` and `00-blocker-ledger.md` collapse repeated mentions into root-cause blockers such as `product_gap`, `evidence_gap`, `harness_gap`, `stale_prior_decision`, and `runtime_unavailable`.
+- `00-master-px-list.tsv` and packet files are generated from the blocker ledger, not from every repeated module mention.
+- Packet files include the blocker ID, category, theme, raw Px IDs, and all source references so implementers fix the root cause once and then rerun the referenced audit jobs for proof.
+
+This is intentionally deterministic. The cataloger may merge or split blocker-ledger rows, but it must preserve the original blocker ID and explain any split with current-code evidence. A broad audit with 40 failed jobs should not automatically become 40 unrelated implementation units when several jobs are repeating the same MSP, browser-evidence, RLS, connector, or stale-baseline defect.
+
 The feature-build phase reads an approved `docs/new-feature/<slug>.md` spec, asks a planner agent to decompose it into machine-readable tasks, executes those tasks with isolated prompts, verifies declared exit commands, and can commit, push, and deploy when all gates pass.
 
 Feature-specific UX audit and feature remediation are not separate control planes. UX, accessibility, and browser proof belong in `run-audit.sh`; scorecard and finding remediation belongs in `run-remediation.sh`. Thin feature-scoped wrappers are acceptable, but the audit and remediation scripts own state, retries, model routing, evidence, and final verdicts.
@@ -91,6 +100,12 @@ npm install -g @openai/codex   # Codex (default)
 npm install -g @anthropic-ai/claude-code  # Claude
 pip install gemini-cli         # Gemini
 ```
+
+### Lattice MCP
+
+Audit, remediation, and feature-build runs auto-register the Lattice MCP server for Codex and Claude agents when `LATTICE_MCP_AUTO=1` (the default). The harness keeps the MCP workspace at `REPO_ROOT` and optionally narrows context with `LATTICE_MCP_FOCUS_FILES` and `LATTICE_MCP_FOCUS_DIRS`, each accepting comma- or newline-separated paths. Set `LATTICE_MCP_COMMAND` to override the server binary. Set `LATTICE_MCP_AUTO=0` or pass `MCP_CONFIG` / `CLAUDE_MCP_CONFIG` to use an explicit config instead.
+
+Feature-build progress refreshes on the same terminal line by default when stdout is a TTY. Use `FEATURE_BUILD_STATUS_INTERVAL_SECONDS` to tune the interval and `FEATURE_BUILD_PROGRESS=0` to force old line-by-line status output.
 
 ### Product profile
 
@@ -352,7 +367,13 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
 | `REMEDIATION_COLLECT_EVIDENCE` | `1` | Automatically collect deterministic launch evidence after verification surfaces `launch_evidence` or `sandbox_blocked` findings. Set to `0` only to force a manual evidence pass. |
+| `REMEDIATION_EVIDENCE_MODE` | `targeted` | Evidence collection mode for browser/live proof. `targeted` exports `PORTAL_AUDIT_SKIP_RUNTIME_QUALITY=1` so proof-specific Playwright evidence is not failed by unrelated Lighthouse/runtime-quality gates. Use `full` when the evidence item is itself runtime quality. |
 | `REMEDIATION_EVIDENCE_MAX_ROUNDS` | `1` | Maximum collect-evidence then verify-only loops. |
+| `REMEDIATION_AUTO_RERUN_FINAL_REVIEW` | `1` | Rerun final review automatically when verifier inputs changed. |
+| `REMEDIATION_AUTO_VERIFY_MISSING` | `1` | During deterministic resume, run verifier agents for queue rows with missing or unreadable verifier artifacts. |
+| `REMEDIATION_AUTO_METADATA_CLOSEOUT` | `1` | Automatically repair remediation-owned packet/summary closeout metadata findings, then reverify those units. Does not edit product code or product docs. |
+| `REMEDIATION_SANDBOX_PYTEST_FALLBACK` | `1` | Retry pytest commands with `-p no:rerunfailures` when `pytest_rerunfailures` is blocked by sandbox socket permissions. |
+| `REMEDIATION_STATIC_PRECHECKS` | `1` | Run deterministic static hygiene prechecks and include their output in verifier prompts. Profiles may add an executable `prechecks.sh`; the built-in scan flags obvious frontend inline-English JSX literals. |
 | `REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS` | `0` | Set to `1` to run profile-wide native checks such as full lint/build/test after each implementation unit. By default the remediation runner skips those broad commands so unrelated repo drift does not fail focused unit remediation. |
 | `REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL` | `0` | Set to `1` to preserve `MAX_PARALLEL` when `REPO_ROOT` is not a git root. This deliberately allows parallel units to edit the same live workspace without git worktree isolation. Use only when the remediation runner is the only writer. |
 | `REMEDIATION_ALLOW_RAW_UNITS` | `0` | Set to `1` only when intentionally executing or auto-revising a large raw one-packet-per-PX manifest. |
@@ -375,6 +396,11 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `--execute` | Run coordinator and implementation agents. |
 | `--verify` | Run verifier agents after implementation. |
 | `--verify-only` | Run only verifiers against an existing remediation directory. |
+| `--summary-only` | Regenerate aggregate findings, summary, and queue without running agents. |
+| `--finalize-only` | Run final review against existing verifier artifacts. With default settings, stale final-review inputs rerun automatically. |
+| `--rerun-verifiers` | Force verifier agents to rerun even when checkpoints exist. |
+| `--rerun-final-review` | Force final review to rerun even when its input fingerprint is unchanged. |
+| `--revise-next` | Select safe `needs_targeted_revision` rows from the current queue and run targeted implementation plus verification. |
 | `--revise-existing` | Skip cataloging and re-run implementation against existing packets. |
 | `--split-incomplete` | Detect and split oversized or incomplete units before re-running. |
 | `--no-catalog` | Skip the cataloger when `--execute` is set. |
@@ -403,6 +429,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `04-final-remediation-review.md` | Final read-only signoff. |
 
 The normal remediation lifecycle is deterministic: catalog, coordinate, implement, verify, auto-revise safe implementation findings, collect deterministic launch evidence, rerun affected verifiers, then write the final queue. Operators should not need to copy commands out of verifier reports. Environment variables are force/escape hatches, not required steps for the standard path.
+
+Browser evidence wrappers receive `PORTAL_AUDIT_RUN_DIR`, `PORTAL_AUDIT_JOB_ID`, `PORTAL_AUDIT_JOURNEY_SLUG`, `PORTAL_AUDIT_ARTIFACT_DIR`, and `PORTAL_AUDIT_EVIDENCE_MODE` during deterministic evidence collection. A PASS `summary.json` only counts as reusable evidence when every declared `proof_files[]` entry exists on disk; PASS without durable proof is classified as failed evidence. Queue generation also auto-resolves launch-evidence rows that explicitly depend on another `IU-*` once that target unit is accepted with no unresolved findings.
 
 `03-implementation-units.tsv` is normalized before prompts are rebuilt. Each `unit_id` is an artifact identity and must appear once; when a coordinator emits repeated rows for the same unit, the runner merges the packet lists into one row before planning, implementation, and verification so agents do not overwrite the same prompt, log, summary, verifier, and checkpoint files.
 
@@ -503,6 +531,9 @@ The harness is state-driven:
 | `FEATURE_BUILD_CLAUDE_MODEL_BALANCED` | `claude-sonnet-4-6` | Claude model for balanced tasks. |
 | `FEATURE_BUILD_CLAUDE_MODEL_ADVANCED` | `claude-opus-4-7` | Claude model for advanced tasks. |
 | `CLAUDE_EXTRA_ARGS` | — | Extra arguments appended to `claude`. |
+| `CLAUDE_TRANSPORT` | `prompt` | `prompt` uses `claude -p`; `pty` drives interactive Claude through a pseudo-terminal and avoids `-p`. Supported by audit, remediation, feature-build, and fixed-domain audit harnesses. |
+| `CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS` | `20` | PTY mode exits after this many idle seconds once a `RESULT:` marker is observed. |
+| `CLAUDE_PTY_STARTUP_SECONDS` | `3` | PTY mode waits this long before pasting the prompt into interactive Claude. |
 | `GEMINI_MODEL` | — | Override Gemini model. |
 | `FEATURE_BUILD_GEMINI_MODEL_FAST` | `gemini-2.5-flash` | Gemini model for fast tasks. |
 | `FEATURE_BUILD_GEMINI_MODEL_BALANCED` | `gemini-3.1-pro` | Gemini model for balanced tasks. |

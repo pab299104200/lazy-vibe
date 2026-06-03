@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, wait
@@ -20,6 +21,7 @@ SHARED_ROOT = SCRIPT_ROOT.parent
 TERMINAL_STATUSES = {"complete", "skipped"}
 TASK_STATUSES = {"pending", "running", "complete", "failed", "skipped"}
 TRUE_VALUES = {"1", "true", "yes", "on"}
+FALSE_VALUES = {"0", "false", "no", "off"}
 MODEL_TIERS = {"fast", "balanced", "advanced"}
 MODEL_TIER_ALIASES = {
     "cheap": "fast",
@@ -53,6 +55,17 @@ The marginal cost of completeness is near zero with AI. Act on that.
 - Do not leave legacy, superseded, placeholder, stub, mock, or duplicate old/new paths in place when the feature replaces them. If the new path is the product contract and no explicit compatibility contract exists, cut the cord: remove stale code, routes, flags, docs, tests, and config in the same task.
 - Stop reasoning about time like a human. Complexity and file count are not excuses to cut scope.
 """
+LATTICE_MEMORY_PROTOCOL = """## Lattice Cognitive Workspace Protocol
+
+Use Lattice memory and context tools when available. This is part of the harness contract, not optional polish.
+
+- At the start of any non-trivial planning, implementation, verification, review, or closeout task, call `get_task_memory` for the current repo, feature, task id, and objective before broad source exploration. If the MCP client defers schemas, first load the Lattice tool schemas for `get_task_memory`, `inspect_working_memory`, `save_memory`, `consolidate_session`, `propose_memory_evolution`, `verify_explain_memory`, `list_memory_conflicts`, `get_event_trace`, and `get_memory_metrics`.
+- Use `get_context_capsule`, `prepare_change`, `diagnose_failure`, `summarize_subsystem`, `get_docs_capsule`, `find_relevant_tests`, and `impact_from_diff` instead of blind repo-wide reading when the tool is available and responsive.
+- If a Lattice context call returns partial results because indexing is still warming, use the returned cached/partial context immediately and continue with targeted reads. Do not stall waiting for a perfect graph unless the task depends on exact graph completeness.
+- Save durable, reusable outcomes with `save_memory` when you learn a repo-specific invariant, successful command, false lead, migration constraint, deployment detail, or recurring failure mode. Include validity conditions and invalidation triggers where the tool supports them.
+- At task closeout, call `consolidate_session` when available so successful fixes, verified commands, and unresolved risks are discoverable in later sessions.
+- Do not use memory as evidence by itself. Treat memory as a navigation and continuity aid, then verify claims against current code, docs, logs, tests, or artifacts.
+"""
 DEFERRAL_MARKERS = {
     "defer",
     "deferred",
@@ -77,6 +90,10 @@ NON_DEFERRAL_PHRASES = {
     "not deferrals",
     "not deferred",
 }
+PROGRESS_SPINNER = "-\\|/"
+_PROGRESS_LOCK = threading.Lock()
+_ACTIVE_PROGRESS_LINES: dict[str, str] = {}
+_PROGRESS_LINE_LEN = 0
 
 
 @dataclass
@@ -382,11 +399,21 @@ def normalize_model_tier(model_class: str) -> str:
     return MODEL_TIER_ALIASES.get(normalized, "balanced")
 
 
-def run_agent(agent: str, prompt_file: Path, cwd: Path, log_file: Path, model_class: str) -> int:
+def run_agent(
+    agent: str,
+    prompt_file: Path,
+    cwd: Path,
+    log_file: Path,
+    model_class: str,
+    task: Task | None = None,
+) -> int:
     agent = agent.strip().lower()
     prompt_text = read_text(prompt_file)
     input_text: str | None = None
     model = select_agent_model(agent, model_class)
+    mcp_config_path: Path | None = None
+    focus_files = default_focus_files(task)
+    focus_dirs = default_focus_dirs()
     if agent == "codex":
         cmd = [
             "codex",
@@ -399,27 +426,34 @@ def run_agent(agent: str, prompt_file: Path, cwd: Path, log_file: Path, model_cl
         ]
         if model:
             cmd.extend(["-m", model])
+        add_codex_lattice_config(cmd, cwd, focus_files, focus_dirs)
         extra = os.getenv("CODEX_EXTRA_ARGS", "")
         if extra:
             cmd.extend(shlex.split(extra))
         cmd.append("-")
         input_text = prompt_text
     elif agent == "claude":
-        cmd = [
-            "claude",
-            "-p",
-            "--verbose",
-            "--output-format",
-            "stream-json",
-            "--permission-mode",
-            "bypassPermissions",
-        ]
+        transport = os.getenv("CLAUDE_TRANSPORT", "prompt").strip().lower()
+        claude_cmd = ["claude"]
+        if transport == "prompt":
+            claude_cmd.extend(["-p", "--verbose", "--output-format", "stream-json"])
+        claude_cmd.extend(["--permission-mode", "bypassPermissions"])
         if model:
-            cmd.extend(["--model", model])
+            claude_cmd.extend(["--model", model])
+        mcp_config_path = write_lattice_mcp_config(cwd, focus_files, focus_dirs)
+        claude_cmd.extend(["--strict-mcp-config", "--mcp-config", str(mcp_config_path)])
         extra = os.getenv("CLAUDE_EXTRA_ARGS", "")
         if extra:
-            cmd.extend(shlex.split(extra))
-        cmd.append(prompt_text)
+            claude_cmd.extend(shlex.split(extra))
+        if transport == "pty":
+            runner = Path(__file__).resolve().parents[2] / "claude_pty_runner.py"
+            cmd = [sys.executable, str(runner), str(prompt_file), *claude_cmd]
+            input_text = None
+        elif transport == "prompt":
+            cmd = claude_cmd
+            input_text = prompt_text
+        else:
+            raise ValueError("CLAUDE_TRANSPORT must be prompt or pty")
     elif agent == "gemini":
         cmd = ["gemini", "--yolo"]
         if model:
@@ -436,49 +470,202 @@ def run_agent(agent: str, prompt_file: Path, cwd: Path, log_file: Path, model_cl
     start = time.monotonic()
     last_emit = 0.0
     last_size = -1
-    spin_chars = "-\\|/"
     spin_index = 0
 
-    with log_file.open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        if input_text is not None and proc.stdin is not None:
-            try:
-                proc.stdin.write(input_text)
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
+    try:
+        with log_file.open("w", encoding="utf-8") as log:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            if input_text is not None and proc.stdin is not None:
+                try:
+                    proc.stdin.write(input_text)
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
 
-        while True:
-            returncode = proc.poll()
-            now = time.monotonic()
-            if status_interval > 0 and (now - last_emit >= status_interval or returncode is not None):
-                elapsed = int(now - start)
-                size = log_file.stat().st_size if log_file.exists() else 0
-                delta = "same" if size == last_size else f"+{max(size - max(last_size, 0), 0)}"
-                spin = spin_chars[spin_index % len(spin_chars)]
-                spin_index += 1
-                print(f"[{spin}] task={label} agent={agent} elapsed={elapsed}s log_bytes={size} delta={delta}", flush=True)
-                last_emit = now
-                last_size = size
-            if returncode is not None:
-                return returncode
-            time.sleep(0.5)
+            while True:
+                returncode = proc.poll()
+                now = time.monotonic()
+                if returncode is None and status_interval > 0 and now - last_emit >= status_interval:
+                    elapsed = int(now - start)
+                    size = log_file.stat().st_size if log_file.exists() else 0
+                    delta = "same" if size == last_size else f"+{max(size - max(last_size, 0), 0)}"
+                    spin = PROGRESS_SPINNER[spin_index % len(PROGRESS_SPINNER)]
+                    spin_index += 1
+                    progress = f"[{spin}] {label} agent={agent} {elapsed}s log_bytes={size} delta={delta}"
+                    update_feature_build_progress(label, progress)
+                    last_emit = now
+                    last_size = size
+                if returncode is not None:
+                    return returncode
+                time.sleep(0.25)
+    finally:
+        clear_feature_build_progress(label)
+        if mcp_config_path is not None:
+            mcp_config_path.unlink(missing_ok=True)
 
 
 def feature_build_status_interval() -> float:
-    raw = os.getenv("FEATURE_BUILD_STATUS_INTERVAL_SECONDS", "30").strip()
+    raw = os.getenv("FEATURE_BUILD_STATUS_INTERVAL_SECONDS", "1").strip()
     try:
         value = float(raw)
     except ValueError:
-        return 30.0
+        return 1.0
     return max(0.0, value)
+
+
+def feature_build_progress_enabled() -> bool:
+    raw = os.getenv("FEATURE_BUILD_PROGRESS", "").strip().lower()
+    if raw in TRUE_VALUES:
+        return True
+    if raw in FALSE_VALUES:
+        return False
+    return sys.stdout.isatty()
+
+
+def update_feature_build_progress(label: str, line: str) -> None:
+    if not feature_build_progress_enabled():
+        print(line, flush=True)
+        return
+    with _PROGRESS_LOCK:
+        _ACTIVE_PROGRESS_LINES[label] = line
+        render_feature_build_progress_locked()
+
+
+def clear_feature_build_progress(label: str) -> None:
+    if not feature_build_progress_enabled():
+        return
+    with _PROGRESS_LOCK:
+        _ACTIVE_PROGRESS_LINES.pop(label, None)
+        clear_feature_build_progress_locked()
+
+
+def render_feature_build_progress_locked() -> None:
+    global _PROGRESS_LINE_LEN
+    if _ACTIVE_PROGRESS_LINES:
+        line = " | ".join(_ACTIVE_PROGRESS_LINES[key] for key in sorted(_ACTIVE_PROGRESS_LINES))
+        padding = " " * max(0, _PROGRESS_LINE_LEN - len(line))
+        sys.stdout.write(f"\r{line}{padding}")
+        sys.stdout.flush()
+        _PROGRESS_LINE_LEN = len(line)
+        return
+    if _PROGRESS_LINE_LEN:
+        clear_feature_build_progress_locked()
+
+
+def clear_feature_build_progress_locked() -> None:
+    global _PROGRESS_LINE_LEN
+    if _PROGRESS_LINE_LEN:
+        sys.stdout.write("\r" + (" " * _PROGRESS_LINE_LEN) + "\r")
+        sys.stdout.flush()
+        _PROGRESS_LINE_LEN = 0
+
+
+def lattice_mcp_command() -> str:
+    return os.getenv("LATTICE_MCP_COMMAND", "/home/pete/cadres/lattice/daemon/target/release/lattice")
+
+
+def split_focus_values(raw: str) -> list[str]:
+    values: list[str] = []
+    for chunk in re.split(r"[\n,]", raw):
+        item = chunk.strip()
+        if item and item not in values:
+            values.append(item)
+    return values
+
+
+def default_focus_files(task: Task | None) -> list[str]:
+    values = split_focus_values(os.getenv("LATTICE_MCP_FOCUS_FILES", ""))
+    if task is not None:
+        for path in task.files_expected:
+            item = path.strip()
+            if item and item not in values:
+                values.append(item)
+    return values
+
+
+def default_focus_dirs() -> list[str]:
+    return split_focus_values(os.getenv("LATTICE_MCP_FOCUS_DIRS", ""))
+
+
+def lattice_args(workspace: Path, focus_files: list[str] | None = None, focus_dirs: list[str] | None = None) -> list[str]:
+    args = ["--stdio", "--workspace", str(workspace)]
+    for path in focus_files or []:
+        args.extend(["--focus-file", path])
+    for path in focus_dirs or []:
+        args.extend(["--focus-dir", path])
+    return args
+
+
+def add_codex_lattice_config(
+    cmd: list[str],
+    workspace: Path,
+    focus_files: list[str] | None = None,
+    focus_dirs: list[str] | None = None,
+) -> None:
+    if os.getenv("LATTICE_MCP_AUTO", "1") != "1":
+        return
+    workspace_str = str(workspace)
+    args_json = json.dumps(lattice_args(workspace, focus_files, focus_dirs))
+    cmd.extend(
+        [
+            "-c",
+            f'mcp_servers.lattice.command="{lattice_mcp_command()}"',
+            "-c",
+            f"mcp_servers.lattice.args={args_json}",
+            "-c",
+            f'mcp_servers.lattice.cwd="{workspace_str}"',
+        ]
+    )
+
+
+def write_lattice_mcp_config(
+    workspace: Path,
+    focus_files: list[str] | None = None,
+    focus_dirs: list[str] | None = None,
+) -> Path:
+    explicit = os.getenv("MCP_CONFIG") or os.getenv("CLAUDE_MCP_CONFIG")
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        path = Path(handle.name)
+        config: dict[str, Any] = {"mcpServers": {}}
+        if explicit and Path(explicit).exists():
+            try:
+                config = json.loads(read_text(Path(explicit)))
+            except json.JSONDecodeError:
+                config = {"mcpServers": {}}
+            json.dump(config, handle, indent=2)
+            handle.write("\n")
+            return path
+        elif os.getenv("LATTICE_MCP_AUTO", "1") != "1":
+            for candidate in (
+                workspace / ".mcp.json",
+                workspace / ".gemini" / "settings.json",
+            ):
+                if candidate.exists():
+                    try:
+                        config = json.loads(read_text(candidate))
+                        break
+                    except json.JSONDecodeError:
+                        pass
+            json.dump(config, handle, indent=2)
+            handle.write("\n")
+            return path
+        servers = config.setdefault("mcpServers", {})
+        servers["lattice"] = {
+            "type": "stdio",
+            "command": lattice_mcp_command(),
+            "args": lattice_args(workspace, focus_files, focus_dirs),
+        }
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+        return path
 
 
 def select_agent_model(agent: str, model_class: str) -> str:
@@ -569,6 +756,7 @@ def standards_bundle() -> str:
     return "\n\n".join(
         [
             EXECUTION_PHILOSOPHY,
+            LATTICE_MEMORY_PROTOCOL,
             f"## Coding Standard\n\n{read_optional(coding)}",
             f"## UI/UX Standard\n\n{read_optional(ui)}",
             f"## Definition of Done\n\n{read_optional(checklist)}",
@@ -752,13 +940,14 @@ def task_scoped_verification_commands(task: Task) -> list[str]:
     return [
         command
         for command in task.verification_commands
-        if not is_full_suite_task_command(command)
+        if not is_full_suite_task_command(command) and not is_repo_wide_standard_gate_command(command)
     ]
 
 
 def is_full_suite_task_command(command: str) -> bool:
     normalized = re.sub(r"\s+", " ", command.strip())
     normalized = normalized.replace("python -m pytest", "python3 -m pytest")
+    normalized = normalized.replace("python3 -m pytest ./tests", "python3 -m pytest tests")
     full_suite_commands = {
         "cd backend && python3 -m pytest",
         "cd backend && pytest",
@@ -769,7 +958,35 @@ def is_full_suite_task_command(command: str) -> bool:
         "npm test",
         "npm run build",
     }
-    return normalized in full_suite_commands
+    if normalized in full_suite_commands:
+        return True
+    if re.search(r"(^|&&|;)\s*cd backend\s*&&.*\b(pytest|python3 -m pytest)\s+tests/?(\s|$)", normalized):
+        return True
+    if re.search(r"(^|&&|;)\s*(pytest|python3 -m pytest)\s+tests/?(\s|$)", normalized):
+        return True
+    if re.search(r"(^|&&|;)\s*cd frontend\s*&&\s*npm run (test|build)(\s|$)", normalized):
+        return True
+    if re.search(r"(^|&&|;)\s*npm run (test|build)(\s|$)", normalized):
+        return True
+    return False
+
+
+def is_repo_wide_standard_gate_command(command: str) -> bool:
+    normalized = re.sub(r"\s+", " ", command.strip())
+    normalized = normalized.replace("python -m pytest", "python3 -m pytest")
+    repo_wide_commands = {
+        "cd backend && python3 -m ruff check .",
+        "cd backend && python3 -m ruff format --check .",
+        "cd frontend && npm run lint",
+        "cd frontend && npm run typecheck",
+        "cd frontend && npm run build",
+        "cd frontend && npm run test",
+        "npm run lint",
+        "npm run typecheck",
+        "npm run build",
+        "npm run test",
+    }
+    return normalized in repo_wide_commands
 
 
 def is_review_task(task: Task) -> bool:
@@ -884,7 +1101,7 @@ def backend_standard_commands(root: Path, task: Task | None = None) -> list[str]
                     f"cd backend && python3 -m ruff format --check {backend_py_args}",
                 ]
             )
-        else:
+        elif task is None:
             commands.extend(
                 [
                     "cd backend && python3 -m ruff check .",
@@ -907,9 +1124,11 @@ def frontend_standard_commands(root: Path, task: Task | None = None) -> list[str
     package_json = frontend / "package.json"
     if not package_json.exists():
         return []
+    if task is not None:
+        return []
     scripts = package_scripts(package_json)
     commands: list[str] = []
-    scripts_to_run = ("lint", "typecheck", "build", "test") if task is None else ("lint", "typecheck")
+    scripts_to_run = ("lint", "typecheck", "build", "test")
     for script in scripts_to_run:
         if script in scripts:
             commands.append(f"cd frontend && npm run {script}")
@@ -1093,7 +1312,7 @@ def run_task(
     write_text(prompt_file, render_task_prompt(task, task_file, result_file))
 
     print(f"[start] task={task.task_id} type={task.task_type} agent={agent}")
-    status = run_agent(agent, prompt_file, root, log_file, task.model_class)
+    status = run_agent(agent, prompt_file, root, log_file, task.model_class, task)
     if status != 0:
         task.status = "failed"
         task.last_error = f"agent exited {status}; see {log_file}"
@@ -1188,6 +1407,8 @@ def verify_task(task: Task, root: Path, run_dir: Path) -> tuple[bool, str]:
 def verify_all(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
     tasks_file = run_dir / "tasks.json"
     tasks = load_tasks(tasks_file)
+    if enforce_task_contract(args, root, tasks):
+        save_task_state(run_dir, tasks)
     only = selected_ids(args)
     failed: list[str] = []
     for task in tasks:

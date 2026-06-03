@@ -156,6 +156,12 @@ Claude runner (RUNNER=claude):
   CLAUDE_EFFORT_ADVERSARIAL Defaults to high.
   CLAUDE_EFFORT_FINAL      Defaults to high.
   CLAUDE_EXTRA_ARGS      Optional extra args appended to claude. Split on shell words.
+  CLAUDE_TRANSPORT       prompt or pty. Defaults to prompt, which uses claude -p.
+                         pty avoids -p by driving interactive claude through a pseudo-terminal.
+  CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS
+                         Seconds of no terminal output after RESULT before PTY mode exits. Defaults to 20.
+  CLAUDE_PTY_STARTUP_SECONDS
+                         Seconds to wait before pasting the prompt into interactive claude. Defaults to 3.
 
 Gemini runner (RUNNER=gemini):
   GEMINI_MODEL           Override model for all jobs.
@@ -937,6 +943,96 @@ _model_for_kind() {
   esac
 }
 
+write_lattice_mcp_config() {
+  local dest="$1" workspace="${2:-$REPO_ROOT}"
+  local command="${LATTICE_MCP_COMMAND:-/home/pete/cadres/lattice/daemon/target/release/lattice}"
+  if [[ -n "${MCP_CONFIG:-}" && -f "${MCP_CONFIG:-}" ]]; then
+    cp "$MCP_CONFIG" "$dest"
+    return
+  fi
+  if [[ -n "${CLAUDE_MCP_CONFIG:-}" && -f "${CLAUDE_MCP_CONFIG:-}" ]]; then
+    cp "$CLAUDE_MCP_CONFIG" "$dest"
+    return
+  fi
+  if [[ "${LATTICE_MCP_AUTO:-1}" != "1" ]]; then
+    if [[ -f "$REPO_ROOT/.mcp.json" ]]; then
+      cp "$REPO_ROOT/.mcp.json" "$dest"
+    elif [[ -f "$REPO_ROOT/.gemini/settings.json" ]]; then
+      cp "$REPO_ROOT/.gemini/settings.json" "$dest"
+    else
+      printf '{"mcpServers":{}}\n' > "$dest"
+    fi
+    return
+  fi
+  python3 - "$dest" "$workspace" "$command" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+dest = Path(sys.argv[1])
+workspace = sys.argv[2]
+command = sys.argv[3]
+config = {"mcpServers": {}}
+for candidate in (Path(workspace) / ".mcp.json", Path(workspace) / ".gemini" / "settings.json"):
+    if candidate.exists():
+        try:
+            loaded = json.loads(candidate.read_text())
+            if isinstance(loaded, dict):
+                config = loaded
+                break
+        except json.JSONDecodeError:
+            pass
+servers = config.setdefault("mcpServers", {})
+focus_files = []
+for value in os.environ.get("LATTICE_MCP_FOCUS_FILES", "").replace(",", "\n").splitlines():
+    value = value.strip()
+    if value and value not in focus_files:
+        focus_files.append(value)
+focus_dirs = []
+for value in os.environ.get("LATTICE_MCP_FOCUS_DIRS", "").replace(",", "\n").splitlines():
+    value = value.strip()
+    if value and value not in focus_dirs:
+        focus_dirs.append(value)
+args = ["--stdio", "--workspace", workspace]
+for value in focus_files:
+    args.extend(["--focus-file", value])
+for value in focus_dirs:
+    args.extend(["--focus-dir", value])
+servers["lattice"] = {
+    "type": "stdio",
+    "command": command,
+    "args": args,
+}
+dest.write_text(json.dumps(config, indent=2) + "\n")
+PY
+}
+
+lattice_codex_args_json() {
+  local workspace="${1:-$REPO_ROOT}"
+  python3 - "$workspace" <<'PY'
+import json
+import os
+import sys
+
+workspace = sys.argv[1]
+def parse_env(name):
+    values = []
+    for value in os.environ.get(name, "").replace(",", "\n").splitlines():
+        value = value.strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+args = ["--stdio", "--workspace", workspace]
+for value in parse_env("LATTICE_MCP_FOCUS_FILES"):
+    args.extend(["--focus-file", value])
+for value in parse_env("LATTICE_MCP_FOCUS_DIRS"):
+    args.extend(["--focus-dir", value])
+print(json.dumps(args))
+PY
+}
+
 _run_codex() {
   local prompt_file="$1" job_id="$2" kind="$3" log_file="$4"
   local cmd=(codex)
@@ -956,6 +1052,12 @@ _run_codex() {
     "${CODEX_REASONING_RUNTIME:-medium}"  "${CODEX_REASONING_SIMULATION:-medium}" \
     "${CODEX_REASONING_ADVERSARIAL:-high}" "${CODEX_REASONING_FINAL:-high}")"
   [[ -n "$selected_reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$selected_reasoning\"")
+  if [[ "${LATTICE_MCP_AUTO:-1}" == "1" ]]; then
+    local lattice_cmd="${LATTICE_MCP_COMMAND:-/home/pete/cadres/lattice/daemon/target/release/lattice}"
+    cmd+=(-c "mcp_servers.lattice.command=\"$lattice_cmd\"")
+    cmd+=(-c "mcp_servers.lattice.args=$(lattice_codex_args_json "$REPO_ROOT")")
+    cmd+=(-c "mcp_servers.lattice.cwd=\"$REPO_ROOT\"")
+  fi
   [[ -n "${CODEX_PROFILE:-}" ]] && cmd+=(-p "$CODEX_PROFILE")
   if [[ -n "${CODEX_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
@@ -967,8 +1069,12 @@ _run_codex() {
 
 _run_claude() {
   local prompt_file="$1" job_id="$2" kind="$3" log_file="$4"
-  local cmd=(claude -p --verbose --output-format stream-json
-    --no-session-persistence --dangerously-skip-permissions)
+  local transport="${CLAUDE_TRANSPORT:-prompt}"
+  local cmd=(claude)
+  if [[ "$transport" == "prompt" ]]; then
+    cmd+=(-p --verbose --output-format stream-json --no-session-persistence)
+  fi
+  cmd+=(--dangerously-skip-permissions)
   local selected_model
   selected_model="$(_model_for_kind "$kind" "${CLAUDE_MODEL:-}" \
     "${CLAUDE_MODEL_DISCOVERY:-claude-sonnet-4-6}" "${CLAUDE_MODEL_SYNTHESIS:-claude-opus-4-7}" \
@@ -988,12 +1094,22 @@ _run_claude() {
   fi
   local mcp_cfg
   mcp_cfg="$(mktemp --suffix=.json)"
-  if [[ -f "$REPO_ROOT/.gemini/settings.json" ]]; then
-    cp "$REPO_ROOT/.gemini/settings.json" "$mcp_cfg"
-  else
-    printf '{"mcpServers":{}}\n' > "$mcp_cfg"
-  fi
+  write_lattice_mcp_config "$mcp_cfg" "$REPO_ROOT"
   cmd+=(--strict-mcp-config --mcp-config "$mcp_cfg")
+
+  if [[ "$transport" == "pty" ]]; then
+    (cd "$REPO_ROOT" && python3 "$SCRIPT_DIR/claude_pty_runner.py" "$prompt_file" "${cmd[@]}") >"$log_file" 2>&1
+    local s="$?"
+    rm -f "$mcp_cfg"
+    return "$s"
+  fi
+
+  if [[ "$transport" != "prompt" ]]; then
+    printf 'Unknown CLAUDE_TRANSPORT=%s; expected prompt or pty\n' "$transport" >"$log_file"
+    rm -f "$mcp_cfg"
+    return 2
+  fi
+
   (
     cd "$REPO_ROOT"
     "${cmd[@]}" < "$prompt_file" | python3 -u -c "
