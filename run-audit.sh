@@ -682,6 +682,12 @@ mkdir -p "$RUN_DIR"/{prompts,logs,artifacts,01-domain,02-cross-cutting,03-spec-a
 CHECKPOINT_FILE="$RUN_DIR/completed-jobs.txt"
 RUNNER_UNAVAILABLE_FILE="$RUN_DIR/runner-unavailable.txt"
 
+if [[ -f "$RUNNER_UNAVAILABLE_FILE" && ( -n "$ONLY_JOB" || -n "$FROM_GROUP" || -n "$TO_GROUP" ) ]]; then
+  prior_runner_unavailable_file="$RUN_DIR/runner-unavailable.$(date +%Y%m%d-%H%M%S).txt"
+  mv "$RUNNER_UNAVAILABLE_FILE" "$prior_runner_unavailable_file"
+  printf '[resume] archived prior runner outage marker: %s\n' "$prior_runner_unavailable_file"
+fi
+
 group_selected() {
   local group="$1"
   if [[ -n "$FROM_GROUP" && "$group" < "$FROM_GROUP" ]]; then
