@@ -3717,6 +3717,8 @@ $(product_profile_block)
 
 You are not implementing remediation. You are creating the best possible remediation catalog from the completed audit.
 
+Execution constraint: do not use background workflow/delegation tools, sub-agents, or async job launchers. Complete the catalog in this single runner session by reading files directly and writing the required artifacts directly. Do not tell the operator to watch `/workflows`. Do not emit `RESULT: PASS` until every required catalog file and packet file has been written and re-read for schema consistency.
+
 Use the generated seed inventory as a starting point, then inspect the audit reports under:
 
 - \`$AUDIT_RUN/*.md\`
