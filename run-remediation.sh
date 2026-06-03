@@ -6906,14 +6906,13 @@ execute_split_child_units_batch() {
   if [[ -n "$implemented_units" ]]; then
     integrate_units_before_verification "$implemented_units"
     ONLY_UNIT="$(combine_unit_lists "$implemented_units" "$(queue_units_for_category_selected "not_verified")")"
+    run_static_prechecks
+    execute_verifier_units
+    execute_metadata_closeout_repairs
+    aggregate_verifier_findings
   else
-    printf '[drain-queue] no split child units were implemented in this batch; skipping worktree merge\n'
+    printf '[drain-queue] no split child units were implemented in this batch; skipping worktree merge and child verification\n'
   fi
-
-  run_static_prechecks
-  execute_verifier_units
-  execute_metadata_closeout_repairs
-  aggregate_verifier_findings
 
   ONLY_UNIT="$previous_only"
   REVISE_EXISTING="$previous_revise"
