@@ -513,6 +513,8 @@ Verifier recovery is intentionally conservative. A verifier process may be auto-
 
 Native evidence commands are filtered before execution. The runner accepts real command prefixes from verifier artifacts and skips explanatory prose, so a verifier note such as "run the browser proof manually" is recorded as non-executable evidence rather than sent to the shell.
 
+Existing ledgers that already contain child packets for the old native-test prose bug are closed deterministically. If a generated child packet only asks to repair a remediation-owned `*-native-test-*.sh` artifact whose failure was executing prose as shell, the runner writes a fixed summary and packet closeout instead of launching an agent against product code.
+
 ### Model overrides (Codex)
 
 | Variable | Default |

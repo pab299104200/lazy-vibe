@@ -6089,6 +6089,7 @@ wait_for_wave() {
 
 execute_workstreams() {
   local coordinator="$REMEDIATION_DIR/prompts/00-coordinator.md"
+  execute_native_test_script_repairs
   if [[ "$REVISE_EXISTING" != "1" ]]; then
     if grep -qxF "00-coordinator" "$CHECKPOINT_FILE" 2>/dev/null; then
       printf '[resume] skipping completed 00-coordinator\n'
@@ -6383,6 +6384,101 @@ metadata_closeout_units_from_queue() {
   fi
 }
 
+packet_is_native_test_script_repair() {
+  local packet_file="$1"
+  [[ -s "$packet_file" ]] || return 1
+  file_matches 'Primary file or subsystem:[[:space:]]*`?[^`[:space:]]*/artifacts/[^`[:space:]]+-native-test-[^`[:space:]]+\.sh`?' "$packet_file" || return 1
+  file_matches 'Regenerate the native-test script|first executable line is the literal sentence|skipped non-command evidence instruction|non-command evidence instruction' "$packet_file"
+}
+
+unit_is_native_test_script_repair() {
+  local unit_id="$1" packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  [[ -n "$packets_csv" ]] || return 1
+
+  local packet_id packet_file matched=0
+  local IFS=,
+  for packet_id in $packets_csv; do
+    [[ -n "${packet_id:-}" ]] || continue
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    packet_is_native_test_script_repair "$packet_file" || return 1
+    matched=1
+  done
+  [[ "$matched" == "1" ]]
+}
+
+complete_native_test_script_repair_unit() {
+  local unit_id="$1" packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  [[ -n "$packets_csv" ]] || return 1
+  unit_is_native_test_script_repair "$unit_id" || return 1
+
+  local packet_id packet_file
+  local IFS=,
+  for packet_id in $packets_csv; do
+    [[ -n "${packet_id:-}" ]] || continue
+    packet_file="$REMEDIATION_DIR/packets/$packet_id.md"
+    [[ -f "$packet_file" ]] || continue
+    file_matches 'Status:[[:space:]]*`?complete`?' "$packet_file" && continue
+    {
+      printf '\n- Status: `complete`\n'
+      printf -- '- Deterministic harness repair: current run-remediation native-test collection filters non-command prose and writes executable shell scripts only for supported verification commands.\n'
+      printf -- '- Product code change: none; this packet describes remediation-owned stale native-test artifact generation.\n'
+    } >> "$packet_file"
+  done
+
+  local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  cat > "$summary" <<EOF
+# Implementation Summary: $unit_id
+
+IMPLEMENTATION_RESULT: fixed
+
+## Packet Disposition
+
+- Packets: \`$packets_csv\`
+- Result: deterministic harness closeout.
+
+## Changed Files
+
+- Remediation packet metadata under \`$REMEDIATION_DIR/packets/\`.
+
+## Tests / Verification
+
+- Product tests were not run for this closeout because the packet describes a remediation-owned stale native-test script artifact.
+- Current \`run-remediation.sh\` filters non-command verifier instructions before writing native-test shell scripts and skips prose instead of executing it.
+
+## Docs / Standards
+
+- Product docs: not applicable.
+- Shared standards: not applicable to product code; no product code changed.
+
+## Legacy Cleanup
+
+- Closed the obsolete generated child packet so the runner does not launch an agent to repair a harness artifact that current harness code already prevents.
+EOF
+
+  grep -qxF "implement-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "implement-$unit_id" >> "$CHECKPOINT_FILE"
+  printf '[metadata-closeout] %s: deterministically closed native-test script repair packet\n' "$unit_id"
+}
+
+execute_native_test_script_repairs() {
+  [[ "$REMEDIATION_AUTO_METADATA_CLOSEOUT" == "1" ]] || return 0
+  [[ -s "$UNITS_TSV" ]] || return 0
+
+  local unit_id packets_csv _group _model _severity _rationale
+  while IFS=$'\t' read -r unit_id packets_csv _group _model _severity _rationale; do
+    [[ -z "${unit_id:-}" ]] && continue
+    unit_selected "$unit_id" || continue
+    if [[ -n "$ONLY_GROUP" && "$_group" != "$ONLY_GROUP" ]]; then
+      continue
+    fi
+    verifier_accepts_unit "$unit_id" && continue
+    unit_is_native_test_script_repair "$unit_id" || continue
+    complete_native_test_script_repair_unit "$unit_id" || true
+  done < <(tail -n +2 "$UNITS_TSV")
+}
+
 build_metadata_closeout_prompt() {
   local unit_id="$1"
   local prompt="$REMEDIATION_DIR/prompts/metadata-closeout-$unit_id.md"
@@ -6499,6 +6595,7 @@ execute_final_review() {
 execute_verifiers() {
   run_static_prechecks
   execute_verifier_units
+  execute_native_test_script_repairs
   execute_metadata_closeout_repairs
   execute_missing_verifiers_from_queue
   execute_evidence_collection_rounds
@@ -6510,6 +6607,7 @@ execute_state_resume() {
   run_static_prechecks
   aggregate_verifier_findings
 
+  execute_native_test_script_repairs
   execute_missing_verifiers_from_queue
   execute_metadata_closeout_repairs
   execute_evidence_collection_rounds
@@ -6537,6 +6635,7 @@ execute_queue_drain() {
   aggregate_verifier_findings
   decompose_verifier_split_findings
   decompose_oversized_verifier_findings
+  execute_native_test_script_repairs
   write_remediation_queue_summary >/dev/null
 
   local round=1 evidence_attempted=0 stalled_action_keys=$'\n'
@@ -6859,6 +6958,8 @@ execute_revision_rounds() {
   if [[ -z "$user_selected_units" ]]; then
     guard_against_auto_revise_raw_unit_manifest
   fi
+
+  execute_native_test_script_repairs
 
   local round=1
   while ((round <= MAX_REVISION_ROUNDS)); do
@@ -7376,6 +7477,7 @@ fi
 
 if [[ "$SHOULD_RUN_SPLIT_PREFLIGHT" == "1" ]]; then
   split_incomplete_units
+  execute_native_test_script_repairs
   if [[ "$SPLIT_CANDIDATE_COUNT" == "0" && "$SPLIT_INCOMPLETE" != "1" ]]; then
     printf '[split-auto-run] no split candidates; continuing with normal execution schedule\n'
   else
