@@ -15,7 +15,18 @@ lazy-vibe/
 ├── run-feature-build.sh                # one-shot feature build orchestrator
 ├── run-keystone-accounting-audit.sh     # fixed-domain GAAP/IFRS audit harness
 ├── run-rmm-ops-automation-audit.sh      # fixed-domain RMM automation-chain audit harness
-├── lazy_vibe/                          # Python workflow engines used by new harnesses
+├── claude_pty_runner.py                 # interactive Claude PTY transport used when claude -p is not viable
+├── lazy_vibe/                          # Python workflow engines used by the shell entrypoints
+│   ├── audit/
+│   │   └── summary.py                  # audit summary helpers used by launch-readiness runs
+│   └── feature_build/
+│       ├── __main__.py                 # python -m lazy_vibe.feature_build entrypoint
+│       └── runner.py                   # feature-build planner/implementer/verifier engine
+├── commitee/                           # experimental committee-style multi-agent harness
+│   ├── agent_loop.py
+│   ├── config.json
+│   ├── prompts/
+│   └── schemas/
 ├── generic-shared.md                   # shared rules injected into every audit job
 ├── generic-jobs.tsv                    # default job manifest (used when no profile sets one)
 ├── generic-launch-readiness-audit-prompt.md
@@ -28,6 +39,32 @@ lazy-vibe/
 ```
 
 ---
+
+## Harness Architecture
+
+`lazy-vibe` is a deterministic harness around agent CLIs, not a prompt collection. The shell entrypoints own job ordering, state files, checkpoints, worktree behavior, retries, native command execution, evidence collection, and final summaries. Agents receive bounded prompts and return artifacts; they do not decide the global control flow.
+
+The major harnesses are:
+
+| Harness | Entry point | Engine | Purpose |
+|---|---|---|---|
+| Launch-readiness audit | `run-audit.sh` | shell + native probes | Runs discovery, runtime, browser, adversarial, and final-decision jobs against a product profile. |
+| Remediation | `run-remediation.sh` | shell state machine | Converts audit findings into blocker-ledger packets, plans implementation units, runs implementers/verifiers, drains safe queue actions, and writes summary/queue artifacts. |
+| Feature build | `run-feature-build.sh` | `lazy_vibe/feature_build/runner.py` | Decomposes an approved feature spec into tasks, runs task-scoped agents, verifies declared commands, and optionally commits/pushes/deploys. |
+| Fixed-domain audits | `run-keystone-accounting-audit.sh`, `run-rmm-ops-automation-audit.sh` | shell wrappers | Run one specialized prompt for a narrow domain when the full launch-readiness pipeline is too broad. |
+| Committee loop | `commitee/agent_loop.py` | Python prototype | Experimental multi-agent deliberation harness using prompts and JSON schemas under `commitee/`. |
+
+The harness layer is responsible for deterministic behavior:
+
+- It snapshots long-running scripts before execution so edits to the source file do not corrupt an active run.
+- It writes and resumes checkpoints instead of trusting terminal output.
+- It generates native evidence before asking agents to interpret it.
+- It filters verifier-declared evidence commands and skips prose instead of executing arbitrary text.
+- It treats transport failures, shell syntax failures, API errors, missing helper functions, and malformed artifacts as harness failures rather than successful verifier decisions.
+- It uses Lattice MCP context automatically for Codex and Claude when `LATTICE_MCP_AUTO=1`.
+- It supports Claude in either normal prompt mode or PTY mode through `CLAUDE_TRANSPORT=prompt|pty`.
+
+Agent selection is pluggable per phase. Codex, Claude, Gemini, and runner-backed paths can be mixed through environment variables such as `RUNNER`, `IMPLEMENTER_AGENT`, `REVIEWER_AGENT`, `FEATURE_BUILD_IMPLEMENTER_AGENT`, and `FEATURE_BUILD_REVIEWER_AGENT`.
 
 ## How it works
 
