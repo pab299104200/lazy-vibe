@@ -1173,6 +1173,11 @@ verifier_has_only_remediation_metadata_findings() {
       if (type == "docs" && remediation_file) {
         metadata_type = 1
       }
+      if (type == "test_harness" &&
+          remediation_file &&
+          details ~ /(native-test|native test|non-command|prose.*shell|command not found|supported .*commands|generated .*prompt|packet.*work.?log|status: not-started)/) {
+        metadata_type = 1
+      }
       if (type == "blocked" &&
           details ~ /(packet.*work.?log|implementation summary|summary.*partial|status: not-started|status: partial)/) {
         metadata_type = 1
@@ -6424,7 +6429,7 @@ metadata_closeout_units_from_queue() {
     if [[ -n "$ONLY_GROUP" && "$_group" != "$ONLY_GROUP" ]]; then
       continue
     fi
-    [[ "$category" == "coordinator_cleanup" || "$category" == "needs_targeted_revision" ]] || continue
+    [[ "$category" == "coordinator_cleanup" || "$category" == "needs_targeted_revision" || "$category" == "test_harness" || "$category" == "blocked" ]] || continue
     verifier_has_only_remediation_metadata_findings "$unit_id" || continue
     units+=("$unit_id")
   done < "$queue"
