@@ -7761,7 +7761,6 @@ unit_implementation_newer_than_verifier() {
   local candidate
   for candidate in \
     "$REMEDIATION_DIR/artifacts/$unit_id-summary.md" \
-    "$REMEDIATION_DIR/artifacts/$unit_id-native-test.log" \
     "$REMEDIATION_DIR/artifacts/$unit_id-metadata-closeout.md" \
     "$REMEDIATION_DIR/logs/implement-$unit_id.log"; do
     if [[ -s "$candidate" && "$candidate" -nt "$verifier" ]]; then
