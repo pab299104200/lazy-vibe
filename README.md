@@ -501,6 +501,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 
 The normal remediation lifecycle is deterministic: catalog, coordinate, implement, verify, auto-revise safe implementation findings, collect deterministic launch evidence, rerun affected verifiers, then write the final queue. Operators should not need to copy commands out of verifier reports. Environment variables are force/escape hatches, not required steps for the standard path.
 
+`--rerun-verifiers` is verifier-only when used by itself, but when it is combined with `--execute` it forces verifier reruns after the selected implementation pass. This is especially important with `--revise-existing`: selected units are implemented first, then their verifier artifacts are refreshed from the new active checkout.
+
 Browser evidence wrappers receive `PORTAL_AUDIT_RUN_DIR`, `PORTAL_AUDIT_JOB_ID`, `PORTAL_AUDIT_JOURNEY_SLUG`, `PORTAL_AUDIT_ARTIFACT_DIR`, and `PORTAL_AUDIT_EVIDENCE_MODE` during deterministic evidence collection. A PASS `summary.json` only counts as reusable evidence when every declared `proof_files[]` entry exists on disk; PASS without durable proof is classified as failed evidence. Queue generation also auto-resolves launch-evidence rows that explicitly depend on another `IU-*` once that target unit is accepted with no unresolved findings.
 
 `03-implementation-units.tsv` is normalized before prompts are rebuilt. Each `unit_id` is an artifact identity and must appear once; when a coordinator emits repeated rows for the same unit, the runner merges the packet lists into one row before planning, implementation, and verification so agents do not overwrite the same prompt, log, summary, verifier, and checkpoint files.

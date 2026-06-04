@@ -46,6 +46,7 @@ QUEUE_DRAIN_MAX_ROUNDS="${REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS:-20}"
 EXECUTE=0
 VERIFY=0
 VERIFY_ONLY=0
+EXPLICIT_VERIFY_ONLY=0
 FINALIZE_ONLY=0
 SUMMARY_ONLY=0
 STATE_RESUME=0
@@ -350,6 +351,7 @@ while (($#)); do
     --verify-only)
       VERIFY=1
       VERIFY_ONLY=1
+      EXPLICIT_VERIFY_ONLY=1
       shift
       ;;
     --finalize-only)
@@ -504,6 +506,11 @@ if [[ -n "$PROFILE" ]]; then
   fi
   [[ -z "$PRODUCT_PROFILE" && -f "$_profile_dir/product-profile.md" ]] && PRODUCT_PROFILE="$_profile_dir/product-profile.md"
   [[ "$SHARED_PROMPT" == "$SCRIPT_DIR/shared.md" && -f "$_profile_dir/shared.md" ]] && SHARED_PROMPT="$_profile_dir/shared.md"
+fi
+
+if [[ "$FORCE_VERIFY" == "1" && "$VERIFY_ONLY" == "1" && "$EXECUTE" == "1" && "$EXPLICIT_VERIFY_ONLY" != "1" ]]; then
+  VERIFY_ONLY=0
+  printf '[rerun] --rerun-verifiers combined with --execute; implementation will run before forced verifier rerun\n'
 fi
 
 mkdir -p "$REMEDIATION_DIR"/{packets,prompts,logs,artifacts}
