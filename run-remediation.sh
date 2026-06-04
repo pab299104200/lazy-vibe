@@ -5573,12 +5573,8 @@ integrate_unit_worktree_changes() {
   local recorded_workspace
   recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
   if [[ -n "$recorded_workspace" && "$recorded_workspace" == "$REPO_ROOT" ]]; then
-    if unit_worktree_changed_after_workspace_marker "$unit_id" "$worktree_dir"; then
-      printf '[worktree-merge] %s: active workspace was selected, but unit worktree changed during implementation; attempting recovery merge before verification\n' "$unit_id"
-    else
-      printf '[worktree-merge] %s: active workspace revision; no worktree merge required before verification\n' "$unit_id"
-      return 0
-    fi
+    printf '[worktree-merge] %s: active workspace revision; ignoring stale unit worktree before verification\n' "$unit_id"
+    return 0
   elif [[ -n "$recorded_workspace" && "$recorded_workspace" != "$worktree_dir" ]]; then
     printf '[worktree-merge] %s: recorded implementation workspace is %s; skipping stale worktree %s\n' \
       "$unit_id" "$recorded_workspace" "$worktree_dir"
