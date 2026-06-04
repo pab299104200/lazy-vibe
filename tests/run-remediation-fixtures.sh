@@ -195,8 +195,10 @@ run_summary_only "$repo" "$audit" "$remediation"
 
 queue="$remediation/07-remediation-queue.tsv"
 summary="$remediation/06-run-summary.tsv"
+triage="$remediation/08-manual-triage.md"
 [[ -s "$queue" ]] || fail "queue was not generated"
 [[ -s "$summary" ]] || fail "summary was not generated"
+[[ -s "$triage" ]] || fail "manual triage index was not generated"
 
 assert_equals accepted "$(queue_category "$queue" IU-0001)" "accepted category"
 assert_equals accepted_evidence_pending "$(queue_category "$queue" IU-0002)" "launch evidence category"
@@ -217,5 +219,15 @@ assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0016)" "stat
 
 assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0001)" "accepted summary"
 assert_equals $'blocked\tstop' "$(summary_decision "$summary" IU-0013)" "blocked summary"
+
+for unit in IU-0005 IU-0006 IU-0013; do
+  [[ -s "$remediation/artifacts/triage-$unit.md" ]] || fail "triage artifact missing for $unit"
+done
+grep -q 'flaky broad suite' "$remediation/artifacts/triage-IU-0005.md" || fail "test harness reason missing"
+grep -q 'code and docs disagree' "$remediation/artifacts/triage-IU-0006.md" || fail "contract conflict reason missing"
+grep -q 'needs credentials' "$remediation/artifacts/triage-IU-0013.md" || fail "blocked reason missing"
+grep -q 'Do not rerun broad product-code remediation blindly' "$remediation/artifacts/triage-IU-0005.md" || fail "test harness next action missing"
+grep -q 'Resolve the product/security contract first' "$remediation/artifacts/triage-IU-0006.md" || fail "contract next action missing"
+grep -q 'External input, access, dependency, or human decision is required' "$remediation/artifacts/triage-IU-0013.md" || fail "blocked next action missing"
 
 printf 'PASS run-remediation fixture categories\n'

@@ -523,6 +523,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `05-verifier-findings.tsv` | Aggregate verifier findings across units. |
 | `06-run-summary.tsv` | Implementation and verifier decision summary by unit. |
 | `07-remediation-queue.tsv` | Triage queue that classifies units as accepted, targeted revision, contract conflict, test harness, split required, blocked, or not verified. |
+| `08-manual-triage.md` | Human-readable index for manual buckets, with extracted verifier failure reasons and required next actions. |
+| `artifacts/triage-*.md` | Per-unit manual triage notes for `blocked`, `test_harness`, `contract_conflict`, and `split_required` units. |
 | `logs/*.log` | Full agent logs. |
 | `04-final-remediation-review.md` | Final read-only signoff. |
 
