@@ -1467,6 +1467,32 @@ command_is_forbidden() {
   return 1
 }
 
+command_is_long_running_server() {
+  local command="$1" lower
+  lower="$(printf '%s' "$command" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    *"npm run dev"*|\
+    *"npm start"*|\
+    *"yarn dev"*|\
+    *"yarn start"*|\
+    *"pnpm dev"*|\
+    *"pnpm start"*|\
+    *"vite --"*|\
+    *"vite --host"*|\
+    *"next dev"*|\
+    *"react-scripts start"*|\
+    *"flask run"*|\
+    *"uvicorn "*|\
+    *"gunicorn "*|\
+    *"python manage.py runserver"*|\
+    *"rails server"*|\
+    *"serve -s "*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 shell_fragment_is_valid() {
   local fragment="$1"
   [[ -n "$fragment" ]] || return 1
@@ -1502,6 +1528,7 @@ command_looks_executable() {
 evidence_command_is_allowed() {
   local command="$1"
   [[ -n "$command" ]] || return 1
+  command_is_long_running_server "$command" && return 1
   command_is_forbidden "$command" && return 1
   command_looks_executable "$command" || return 1
   shell_fragment_is_valid "$command" || return 1
@@ -5726,6 +5753,15 @@ run_implementer_and_test() {
           printf '\n[native-test] skipped non-command evidence instruction: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
           printf '\n$ %s\n[native-test] skipped non-command evidence instruction; not executed\n' "$test_cmd" >> "$test_log"
           continue
+        fi
+        if command_is_long_running_server "$test_cmd"; then
+          {
+            printf '\n$ %s\n' "$test_cmd"
+            printf '[native-test] refused long-running server command; native verification commands must terminate. Use a finite smoke/test command or mark browser/live evidence pending.\n'
+          } >> "$test_log"
+          printf '\n[native-test] refused long-running server command: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+          test_status=124
+          break
         fi
         printf '\n[native-test] running: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
         local test_script

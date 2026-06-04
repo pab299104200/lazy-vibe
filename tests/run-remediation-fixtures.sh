@@ -229,5 +229,8 @@ grep -q 'needs credentials' "$remediation/artifacts/triage-IU-0013.md" || fail "
 grep -q 'Do not rerun broad product-code remediation blindly' "$remediation/artifacts/triage-IU-0005.md" || fail "test harness next action missing"
 grep -q 'Resolve the product/security contract first' "$remediation/artifacts/triage-IU-0006.md" || fail "contract next action missing"
 grep -q 'External input, access, dependency, or human decision is required' "$remediation/artifacts/triage-IU-0013.md" || fail "blocked next action missing"
+grep -q 'command_is_long_running_server' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command guard missing"
+grep -q 'refused long-running server command' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command refusal log missing"
+grep -q 'npm run dev' "$SCRIPT_DIR/run-remediation.sh" || fail "npm dev-server guard missing"
 
 printf 'PASS run-remediation fixture categories\n'
