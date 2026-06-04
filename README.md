@@ -31,6 +31,8 @@ lazy-vibe/
 ├── generic-jobs.tsv                    # default job manifest (used when no profile sets one)
 ├── generic-launch-readiness-audit-prompt.md
 ├── generic-product-profile-template.md
+├── tests/
+│   └── run-remediation-fixtures.sh     # remediation queue/summary regression fixtures
 └── profiles/
     └── <your-product>/
         ├── jobs.tsv          # optional — overrides generic-jobs.tsv
@@ -118,7 +120,7 @@ The harness treats "good enough" as working, debuggable, documented, and maintai
 
 Verifier findings have dedicated categories for these gaps: `api_contract`, `boundary_tests`, `operability`, and `static_analysis`. Those categories flow back into the normal targeted-revision queue instead of becoming vague final-review advice.
 
-Harness health should be treated the same way. Queue classification, verifier artifact parsing, split child handling, stale worktree handling, native-test extraction, evidence-pending classification, final summary math, manifest guards, and active-workspace merge behavior need fixture-based regression coverage before the harness is considered mature. When those fixtures are absent, document that as harness debt instead of assuming the scripts are self-proving.
+Harness health is treated the same way. `tests/run-remediation-fixtures.sh` builds a temporary remediation ledger and verifies queue classification plus summary behavior for accepted units, evidence-pending units, API contract findings, boundary-test findings, operability findings, static-analysis findings, missing verifiers, stale verifier inputs, split child pending/decomposed states, postcheck-invalid worktree evidence, failed deterministic evidence, contract conflicts, test-harness blockers, and blocked units.
 
 ### What the audit relies on
 
