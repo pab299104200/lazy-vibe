@@ -2635,8 +2635,8 @@ write_packet() {
     printf '1. Verify the finding against current code and docs before editing.\n'
     printf '2. Record the root cause before editing: symptom, real cause, correct fix layer, affected contracts, required tests, and required docs.\n'
     printf '3. Fix the defect at the correct backend, frontend, protocol, data, or workflow layer.\n'
-    printf '4. Add or update tests that prove success and failure behavior, including authorization, isolation, trust-boundary, integration, and protocol negatives where relevant.\n'
-    printf '5. Update the product documentation locations named by the product profile wherever behavior, contracts, workflows, controls, or operator/customer guidance changes. If the repo uses `docs/architecture`, `docs/functional`, or `docs/manual`, keep those layers truthful.\n'
+    printf '4. Add or update source-controlled tests that prove success and failure behavior, including authorization, tenant/account/project isolation, RBAC negatives, trust-boundary, destructive-action authorization, audit-log assertions, idempotency/retry behavior, lifecycle/state-transition negatives, integration, and protocol negatives where relevant.\n'
+    printf '5. Update the product documentation locations named by the product profile wherever behavior, contracts, workflows, controls, or operator/customer guidance changes. If the repo uses `docs/architecture`, `docs/functional`, or `docs/manual`, keep those layers truthful. If APIs, routes, CLIs, jobs, webhooks, protocol operations, integrations, generated clients, OpenAPI, or schemas change, update contract-level docs with request/response shape, permissions/auth, validation/errors, pagination/filtering/sorting where relevant, idempotency/retry behavior, lifecycle/state transitions, audit/logging expectations, and examples where useful.\n'
     printf '6. Record the outcome in this packet under `## Work Log`.\n\n'
     if [[ "$kind" == "spec-addition" ]]; then
       printf 'Spec-origin rule: this packet is not documentation polish. Implement the missing product/protocol/workflow contract in code, tests, and docs, or explicitly prove the contract is already implemented and update the packet with that evidence.\n\n'
@@ -4393,6 +4393,15 @@ Treat standards violations as implementation defects, not cosmetic concerns. Fix
 
 Do not leave legacy, superseded, placeholder, stub, mock, no-op, or duplicate old/new paths in place when this remediation replaces them. If the current fix establishes the correct product contract and no explicit compatibility contract requires the old path, cut the cord in the same unit: remove stale code, routes, jobs, feature flags, config/env keys, docs, tests, scripts, and compatibility shims. If compatibility is genuinely required, document the contract and add focused verification for both the current path and the compatibility path.
 
+## Contract / Boundary / Operations Rule
+
+Do not treat docs, tests, or observability as follow-up work when they are in scope for the assigned packets.
+
+- If the unit changes an API, route, CLI, async job, webhook, protocol operation, integration, generated client, OpenAPI document, or schema, update the product-profile documentation locations with contract-level truth: operation, request shape, response shape, permissions/auth, validation/errors, pagination/filtering/sorting where relevant, idempotency/retry behavior, lifecycle or state transitions, audit/logging expectations, and examples where useful.
+- If the unit touches tenant/account/project isolation, RBAC, destructive actions, audit-sensitive state changes, connector/evidence failure, retry/idempotency behavior, or lifecycle transitions, add or update permanent source-controlled regression tests. Audit prose or one-off manual proof is not a substitute for runnable boundary tests when the repo can support them.
+- If the workflow can fail in production, make the failure diagnosable and recoverable: structured logs, audit records, request/correlation IDs where applicable, job/status state, retry/error states, operator-visible errors, recovery/admin actions, and runbook or docs updates where relevant.
+- If the repo already supports type checking, complexity checks, dead-code checks, linting, or dependency/security scanning, run the relevant supported commands for the changed surface or record the exact environment blocker. Do not normalize new hard-to-debug code just because existing code has debt.
+
 ## Assigned Packets
 
 \`\`\`text
@@ -4420,11 +4429,14 @@ Own this implementation unit end to end:
    - \`- Status: \`blocked\`\` — cannot proceed; describe the blocker.
    This status is used by the coordinator on re-runs to skip already-completed packets. Do not leave it as \`not-started\`.
 3. Update the product documentation locations named by the product profile as required.
-4. Apply the shared coding standard to changed backend, frontend, test, migration, script, and helper code.
-5. Apply the shared UI specification to changed UI surfaces and operator/customer workflows.
-6. Run the strongest relevant verification available in the repo for the changed surface.
-7. Search the changed surface for legacy/superseded/stub residue and remove it or document the explicit compatibility contract that requires it.
-8. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, standards reviewed, legacy cleanup performed or compatibility retained, remaining risks, and any packets left incomplete.
+4. Update API/operation contract docs, generated schemas, OpenAPI, or client contracts when the changed surface exposes or consumes a contract.
+5. Add or update permanent boundary tests for high-risk auth, tenancy, RBAC, audit, idempotency, retry, connector/evidence failure, destructive action, and lifecycle behavior.
+6. Add or update operational debugging support for serious workflows: structured logs, audit events, request/job IDs, status/error state, operator-visible recovery, and runbook/docs where applicable.
+7. Apply the shared coding standard to changed backend, frontend, test, migration, script, and helper code.
+8. Apply the shared UI specification to changed UI surfaces and operator/customer workflows.
+9. Run the strongest relevant verification available in the repo for the changed surface, including supported type, complexity, dead-code, lint, security, and focused test commands where applicable.
+10. Search the changed surface for legacy/superseded/stub residue and remove it or document the explicit compatibility contract that requires it.
+11. Write \`$REMEDIATION_DIR/artifacts/$unit_id-summary.md\` with changed files, tests, docs, standards reviewed, API/operation contract docs updated or not applicable, boundary tests added or not applicable, operational debugging evidence, static-analysis gates run or not applicable, legacy cleanup performed or compatibility retained, remaining risks, and any packets left incomplete.
 
 Keep the context window under 200k tokens. If these packets are too broad, complete the highest-severity coherent subset, mark completed packets \`Status: \`complete\`\`, and mark the rest \`Status: \`partial\`\` in the packet logs.
 
@@ -4434,6 +4446,10 @@ For revision passes, do not stop at restating verifier findings. Resolve them. T
 - A verifier-finding disposition table: fixed / still failing / launch-evidence-pending / sandbox-blocked.
 - Exact commands run and outcomes.
 - Exact docs updated, or a statement that no docs change was needed after checking the product-profile documentation locations.
+- Exact API/operation contract docs, generated schemas, OpenAPI, or client contracts updated, or why none applied.
+- Exact boundary tests added or updated for high-risk authorization, isolation, audit, idempotency, retry, destructive action, connector/evidence failure, and lifecycle behavior, or why none applied.
+- Exact operational debugging evidence added or verified: logs, audit events, request/job IDs, status/error state, operator-visible recovery, and runbook/docs where applicable.
+- Exact type, complexity, dead-code, lint, security, and focused test commands run, or why the repo/change surface did not support them.
 - Exact shared standards reviewed, including whether the coding standard, UI standard, and definition-of-done checklist were applicable and satisfied.
 - Legacy/superseded/stub cleanup performed, or the explicit compatibility contract that required keeping an old path.
 PROMPT
@@ -4517,16 +4533,19 @@ This verifier is intentionally independent from the implementation workstream an
 6. Confirm the implementer reviewed and satisfied the shared coding standard for changed code/tests/scripts/migrations/helpers.
 7. Confirm the implementer reviewed and satisfied the shared UI specification for changed frontend, route, workflow, copy, accessibility, and operator-facing surfaces.
 8. Confirm the implementer reviewed and satisfied the shared definition-of-done checklist, including success paths, failure paths, controls, docs, and focused verification.
-9. Confirm success-path and failure-path tests exist and were run or honestly blocked.
-10. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
-10a. For stale-code packets, verify deletion/convergence explicitly: the stale artifact is removed or made unreachable only through a documented compatibility contract; stale tests/docs/config are removed or updated; replacement callers still pass focused tests; no new shim preserves the obsolete behavior without proof.
-10b. For every implementation packet, check whether the changed surface now has both old and new behavior active. If legacy code, hidden routes, old API clients, stale docs/tests/config, feature flags, placeholders, stubs, mocks, no-op shims, or compatibility glue remain without an explicit compatibility contract, block signoff with \`type=stale_code\`.
-11. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, unverified P0/P1 code closure, incomplete code, missing standards review, material coding/UI/definition-of-done violations, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
-12. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
-13. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
-14. If the blocker is a flaky, timing-sensitive, performance, environment-ordering, or broad harness issue, classify it as \`test_harness\` and specify the exact targeted command or human decision required. Do not demand repeated full-suite execution from the auto-revise loop.
-15. Do not reopen an already closed packet solely because the original audit text still exists or because launch evidence is pending under implementation scope. Reopen it only when current code/docs/tests/work-log evidence contradicts the claimed closure, a focused runnable implementation gate fails, a standards violation exists on the changed surface, or a required implementation artifact is missing.
-16. If the unit requires more than \`$MAX_AUTO_REVISE_FINDINGS\` independent code/docs/test fixes, or the findings span unrelated product areas that should not be revised as one change, classify the excess as \`split_required\` and use \`Decision: stop\` / \`Implementation decision: blocked\`.
+9. Confirm API/operation contract docs, generated schemas, OpenAPI, or client contracts were updated when APIs, routes, CLIs, async jobs, webhooks, protocol operations, integrations, or generated clients changed. The contract must cover operation, request/response shape, permissions/auth, validation/errors, pagination/filtering/sorting where relevant, idempotency/retry behavior, lifecycle/state transitions, audit/logging expectations, and examples where useful.
+10. Confirm permanent source-controlled boundary tests exist and were run or honestly blocked for high-risk authorization, tenant/account/project isolation, RBAC negatives, destructive actions, audit-log assertions, idempotency/retry behavior, stale connector/evidence failure, protocol replay, and lifecycle/state-transition negatives.
+11. Confirm operational debugging is concrete for serious workflows: structured logs, audit records, request/correlation IDs where applicable, job/status state, retry/error states, operator-visible errors, recovery/admin actions, and runbook/docs where relevant.
+12. Confirm supported type checking, complexity, dead-code, lint, dependency/security, and focused test commands were run for changed surfaces where the repo supports them, or that blockers were classified honestly.
+13. Search for alternate paths that could invalidate the fix, especially trust-boundary bypasses, authorization or isolation gaps, stale UI/API contracts, protocol/integration replay, lifecycle recovery, and audit evidence gaps.
+13a. For stale-code packets, verify deletion/convergence explicitly: the stale artifact is removed or made unreachable only through a documented compatibility contract; stale tests/docs/config are removed or updated; replacement callers still pass focused tests; no new shim preserves the obsolete behavior without proof.
+13b. For every implementation packet, check whether the changed surface now has both old and new behavior active. If legacy code, hidden routes, old API clients, stale docs/tests/config, feature flags, placeholders, stubs, mocks, no-op shims, or compatibility glue remain without an explicit compatibility contract, block signoff with \`type=stale_code\`.
+14. Block implementation signoff for: missing or untruthful packet Work Log status lines, overclaimed packet closure, failing runnable tests, stale tests, documentation contradictions, missing API/operation contract docs, missing high-risk boundary tests, missing operational debugging evidence, unverified P0/P1 code closure, incomplete code, missing standards review, material coding/UI/definition-of-done violations, or any subagent context budget over 200000 tokens. In launch scope, also block signoff for missing launch evidence.
+15. Prefer focused verification commands owned by this unit. Do not run the full backend/frontend suite unless the packet is explicitly a runtime quality-gate packet or the focused evidence cannot prove the claim. If a local command is sandbox-blocked, classify it as \`sandbox_blocked\` or \`launch_evidence\` rather than product failure unless it is a normal supported local implementation gate.
+16. If docs, tests, packet text, and code disagree about the intended product/security contract, classify the finding as \`contract_conflict\` and use \`Decision: stop\` or \`Implementation decision: blocked\` unless the intended contract is explicit in the assigned packet.
+17. If the blocker is a flaky, timing-sensitive, performance, environment-ordering, or broad harness issue, classify it as \`test_harness\` and specify the exact targeted command or human decision required. Do not demand repeated full-suite execution from the auto-revise loop.
+18. Do not reopen an already closed packet solely because the original audit text still exists or because launch evidence is pending under implementation scope. Reopen it only when current code/docs/tests/work-log evidence contradicts the claimed closure, a focused runnable implementation gate fails, a standards violation exists on the changed surface, or a required implementation artifact is missing.
+19. If the unit requires more than \`$MAX_AUTO_REVISE_FINDINGS\` independent code/docs/test fixes, or the findings span unrelated product areas that should not be revised as one change, classify the excess as \`split_required\` and use \`Decision: stop\` / \`Implementation decision: blocked\`.
 
 Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 
@@ -4550,7 +4569,11 @@ Use one row per unresolved verifier finding. Valid \`type\` values:
 - \`code\` — product/source implementation defect.
 - \`stale_code\` — stale, superseded, stubbed, placeholder, unreachable, or duplicate code/config/docs/tests remain after the implementation.
 - \`docs\` — stale or contradictory docs with clear intended behavior.
+- \`api_contract\` — missing or stale API/operation contract docs, generated schema, OpenAPI, client contract, or contract test for a changed callable surface.
 - \`tests\` — missing or failing normal focused tests.
+- \`boundary_tests\` — missing permanent regression tests for high-risk authorization, isolation, RBAC, audit, destructive action, idempotency, retry, connector/evidence failure, protocol replay, or lifecycle behavior.
+- \`operability\` — missing logs, audit events, request/job IDs, status/error state, operator-visible recovery, or runbook/docs needed to diagnose and recover a serious workflow.
+- \`static_analysis\` — missing or failing supported type, complexity, dead-code, lint, dependency, or security gate for the changed surface.
 - \`standards\` — coding-standard, UI-standard, or definition-of-done violation on the changed surface.
 - \`test_harness\` — flaky/timing/performance/environment-ordering/broad-suite harness issue that needs a targeted command or explicit human decision before auto-revision.
 - \`contract_conflict\` — code/tests/docs/packet disagree on the intended behavior and a human product/security decision is required.

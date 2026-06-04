@@ -28,6 +28,15 @@ Read and apply the shared Cadres standards before closing any audit job that eva
 
 For each relevant finding, classify standards violations as first-class launch-readiness issues, not cosmetic concerns. Examples include oversized or duplicated code that violates the coding standard, UI flows that violate the UI specification, missing failure-path handling, missing docs/tests required by definition of done, or incomplete platform integration. If a job does not touch frontend/UI, state that the UI standard was not applicable. If any shared standard file is unavailable, record that as residual audit risk.
 
+## Contract, Boundary, Operations, And Maintainability Gate
+
+Treat these as first-class launch-readiness checks. They are not optional polish and they are not satisfied by broad claims in prose.
+
+- **API contract docs**: architecture and functional specs explain design and behavior, but high-risk routes, APIs, CLIs, jobs, webhooks, protocol operations, and integrations also need contract-level truth. Verify that current docs or generated schemas describe the operation, request shape, response shape, permission/auth model, validation and error cases, pagination/filtering/sorting where relevant, idempotency/retry behavior, lifecycle or state transitions, audit/logging expectations, and examples where useful. If OpenAPI, JSON Schema, generated clients, route contracts, or API tests exist, check that they match code and docs.
+- **Boundary tests**: audit evidence is episodic. For security, tenancy, RBAC, destructive actions, audit trails, idempotency, retry, connector/evidence failure, and lifecycle transitions, look for permanent source-controlled regression tests that can run in CI or as supported local commands. If the product only has an audit note or manual proof for a high-risk boundary, record a missing boundary-test finding.
+- **Operational debugging**: a workflow that works but cannot be diagnosed or recovered is not launch-ready. For serious workflows, verify structured logs, audit events, request/correlation IDs where applicable, job/status state, retry/error state, operator-visible errors, recovery/admin actions, and runbook or support docs where the product profile expects them.
+- **Static maintainability gates**: when the repo supports type checking, complexity checks, dead-code checks, linting, or dependency/security scanning, treat those commands as maintainability evidence. Missing or failing supported commands should become findings. Existing large/complex/dead-code areas can be reported without blocking everything, but new or changed surfaces should not normalize hard-to-debug agent code.
+
 ## Exploration Boundary Protocol
 
 This applies to all discovery and synthesis jobs. When you reach the job budget, context limit, or a major unexplored module that is materially relevant to P0/P1 launch readiness, log it as a pending deep-dive by **appending** a tab-separated row to:
@@ -77,7 +86,7 @@ Bootstrap the run directory. Inventory repo docs, source roots, tests, package/b
 
 ## GENERIC 1A
 
-Audit product claims and docs. Map launch claims from the product profile to documentation and likely implementation surfaces. Identify missing, vague, or overclaimed launch promises.
+Audit product claims and docs. Map launch claims from the product profile to documentation and likely implementation surfaces. Identify missing, vague, or overclaimed launch promises. For externally callable or workflow-driving surfaces, check whether the current docs include API/operation contract details instead of only architecture intent.
 
 ## GENERIC 1B
 
@@ -89,7 +98,7 @@ Audit user/operator journeys. Identify critical workflows from the profile and d
 
 ## GENERIC 2A
 
-Audit backend/API/domain logic. Focus on core launch claims, validation, permissions, error handling, idempotency, state transitions, and data integrity. Check changed or high-risk backend code against `/home/pete/cadres/shared/templates/coding.md` and the definition-of-done checklist.
+Audit backend/API/domain logic. Focus on core launch claims, validation, permissions, error handling, idempotency, state transitions, data integrity, API contract docs/schema parity, and route/operation contract tests. Check changed or high-risk backend code against `/home/pete/cadres/shared/templates/coding.md` and the definition-of-done checklist.
 
 ## GENERIC 2B
 
@@ -101,15 +110,15 @@ Audit integrations, async jobs, protocols, imports/exports, webhooks, queues, sc
 
 ## GENERIC 3A
 
-Cross-cutting security and data-boundary synthesis. Challenge authentication, authorization, tenant/account/project scoping if present, public endpoints, sensitive data exposure, CSRF/session/token behavior, secrets, and destructive actions.
+Cross-cutting security and data-boundary synthesis. Challenge authentication, authorization, tenant/account/project scoping if present, public endpoints, sensitive data exposure, CSRF/session/token behavior, secrets, and destructive actions. Require source-controlled boundary tests for high-risk negatives instead of accepting audit-only proof.
 
 ## GENERIC 3B
 
-Cross-cutting operability and recovery synthesis. Review logs, audit trails, metrics, migrations, backups, retries, rollback, partial failure, runbooks, deployment docs, and support/admin workflows.
+Cross-cutting operability and recovery synthesis. Review logs, audit trails, metrics, migrations, backups, retries, rollback, partial failure, runbooks, deployment docs, and support/admin workflows. For each critical workflow, decide whether an operator can diagnose and recover from a production failure using concrete logs, IDs, status, audit events, and recovery actions.
 
 ## GENERIC 3C
 
-Cross-cutting test, docs, and maintainability synthesis. Compare launch claims to tests and docs. Identify missing integration/E2E coverage, stale tests, unsupported smoke paths, large/refactor-risk files, and violations of the shared coding, UI, and definition-of-done standards.
+Cross-cutting test, docs, and maintainability synthesis. Compare launch claims to tests and docs. Identify missing integration/E2E coverage, stale tests, unsupported smoke paths, missing type/complexity/dead-code gates, large/refactor-risk files, and violations of the shared coding, UI, and definition-of-done standards.
 
 ## GENERIC 3D
 
