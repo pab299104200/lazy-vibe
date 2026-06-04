@@ -1730,15 +1730,39 @@ native_test_results_block() {
   local unit_id="$1"
   local test_log="$REMEDIATION_DIR/artifacts/$unit_id-native-test.log"
   if [[ -f "$test_log" ]]; then
-    cat "$test_log"
+    bounded_log_block "$test_log" "native test output"
   else
     printf 'No native test output available.\n'
   fi
   local precheck_log="$REMEDIATION_DIR/artifacts/static-prechecks.log"
   if [[ -f "$precheck_log" ]]; then
     printf '\n## Harness Static Prechecks\n'
-    cat "$precheck_log"
+    bounded_log_block "$precheck_log" "static precheck output"
   fi
+}
+
+bounded_log_block() {
+  local log_file="$1" label="$2"
+  local max_bytes="${REMEDIATION_PROMPT_LOG_MAX_BYTES:-80000}"
+  [[ "$max_bytes" =~ ^[0-9]+$ ]] || max_bytes=80000
+  local size
+  size="$(wc -c < "$log_file" 2>/dev/null || printf '0')"
+  if (( size <= max_bytes )); then
+    cat "$log_file"
+    return 0
+  fi
+
+  local half=$((max_bytes / 2))
+  (( half > 0 )) || half=40000
+  printf '[harness] %s truncated for verifier prompt: file=%s bytes=%s cap=%s\n' \
+    "$label" "$log_file" "$size" "$max_bytes"
+  printf '[harness] showing first %s bytes and last %s bytes; inspect the file directly for full output.\n\n' "$half" "$half"
+  printf '%s\n' "----- BEGIN ${label} HEAD -----"
+  head -c "$half" "$log_file" || true
+  printf '\n%s\n' "----- END ${label} HEAD -----"
+  printf '%s\n' "----- BEGIN ${label} TAIL -----"
+  tail -c "$half" "$log_file" || true
+  printf '\n%s\n' "----- END ${label} TAIL -----"
 }
 
 native_test_placeholder_text() {
