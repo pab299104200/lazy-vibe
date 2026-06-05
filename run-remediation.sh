@@ -7664,7 +7664,12 @@ write_run_summary() {
         impl_result="split"
       fi
     elif [[ -s "$impl_artifact" ]]; then
-      impl_result="$(grep -oi 'IMPLEMENTATION_RESULT:[[:space:]]*[a-z]*' "$impl_artifact" 2>/dev/null | head -1 | sed 's/.*IMPLEMENTATION_RESULT:[[:space:]]*//' || true)"
+      impl_result="$(
+        tr -d '*`' < "$impl_artifact" \
+          | grep -oi 'IMPLEMENTATION_RESULT:[[:space:]]*[a-z-]*' \
+          | head -1 \
+          | sed 's/.*IMPLEMENTATION_RESULT:[[:space:]]*//' || true
+      )"
       [[ -z "$impl_result" ]] && impl_result="$(grep -oi 'RESULT:[[:space:]]*[A-Za-z/]*' "$impl_log" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"
       [[ -z "$impl_result" ]] && impl_result="completed"
     elif [[ -f "$impl_log" ]]; then

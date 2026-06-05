@@ -168,6 +168,11 @@ write_summary "$remediation" IU-0013 blocked
 write_findings "$remediation" IU-0014 $'IU-0014\tP1\tboundary_tests\ttests/boundary.py\t1\tmissing tenant negative\tadd permanent boundary test'
 write_findings "$remediation" IU-0015 $'IU-0015\tP1\toperability\tjobs/sync.py\t1\tmissing job status\tadd logs and recovery state'
 write_findings "$remediation" IU-0016 $'IU-0016\tP1\tstatic_analysis\tsrc/service.py\t1\tcomplexity gate missing\trun radon or profile command'
+cat > "$remediation/artifacts/IU-0016-summary.md" <<'EOF'
+# IU-0016 implementation summary
+
+**IMPLEMENTATION_RESULT:** fixed
+EOF
 
 for verifier in "$remediation"/artifacts/verify-*.md; do
   [[ "$verifier" == *verify-IU-0009.md ]] && continue
@@ -219,6 +224,7 @@ assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0016)" "stat
 
 assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0001)" "accepted summary"
 assert_equals $'blocked\tstop' "$(summary_decision "$summary" IU-0013)" "blocked summary"
+assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0016)" "bold implementation result summary"
 
 for unit in IU-0005 IU-0006 IU-0013; do
   [[ -s "$remediation/artifacts/triage-$unit.md" ]] || fail "triage artifact missing for $unit"
