@@ -1212,7 +1212,7 @@ unit_has_native_test_artifact_findings() {
         if (file ~ /\/docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
           remediation_file = 1
         }
-        if (remediation_file && details ~ /(native-test|native test|stale selector|stale .*script|stale .*log)/) {
+        if (remediation_file && details ~ /(native-test|native test|stale selector|stale .*script|stale .*log|prose.*shell|command not found|non-command)/) {
           found = 1
         }
       }
@@ -1221,7 +1221,7 @@ unit_has_native_test_artifact_findings() {
   fi
 
   [[ -s "$report" ]] || return 1
-  grep -aqE 'docs/audit/.+/(artifacts|logs|packets)/.+native-test|native-test.+(stale selector|stale .*script|stale .*log)|stale selector.+native-test' "$report"
+  grep -aqE 'docs/audit/.+/(artifacts|logs|packets)/.+native-test|native-test.+(stale selector|stale .*script|stale .*log|command not found|prose.*shell|non-command)|stale selector.+native-test' "$report"
 }
 
 unit_evidence_has_failed_status() {
@@ -6812,6 +6812,7 @@ execute_queue_drain() {
   decompose_oversized_verifier_findings
   execute_native_test_script_repairs
   write_remediation_queue_summary >/dev/null
+  print_next_action_plan_summary
 
   local round=1 evidence_attempted=0 stalled_action_keys=$'\n'
   while :; do
@@ -6850,25 +6851,36 @@ execute_queue_drain() {
         fi
         execute_revise_next_batch "$units"
       else
-        units="$(pending_split_child_units)"
-        action_key="split_children_pending:$units"
+        units="$(metadata_closeout_units_from_queue)"
+        action_key="artifact_repair:$units"
         if [[ -n "$units" ]] && ! drain_action_was_stalled "$stalled_action_keys" "$action_key"; then
-          action="split_children_pending"
-          printf '[drain-queue] round=%s action=split-children units=%s\n' "$round" "$units"
-          if [[ "$DRY_RUN" == "1" ]]; then
-            break
-          fi
-          execute_split_child_units_batch "$units"
-        elif [[ "$evidence_attempted" == "0" ]] && ! drain_action_was_stalled "$stalled_action_keys" "evidence:*"; then
-          action="evidence"
-          action_key="evidence:*"
-          evidence_attempted=1
-          printf '[drain-queue] round=%s action=evidence\n' "$round"
+          action="artifact_repair"
+          printf '[drain-queue] round=%s action=artifact-repair units=%s\n' "$round" "$units"
           if [[ "$DRY_RUN" == "1" ]]; then
             break
           fi
           execute_metadata_closeout_repairs
-          execute_evidence_collection_rounds
+        else
+          units="$(pending_split_child_units)"
+          action_key="split_children_pending:$units"
+          if [[ -n "$units" ]] && ! drain_action_was_stalled "$stalled_action_keys" "$action_key"; then
+            action="split_children_pending"
+            printf '[drain-queue] round=%s action=split-children units=%s\n' "$round" "$units"
+            if [[ "$DRY_RUN" == "1" ]]; then
+              break
+            fi
+            execute_split_child_units_batch "$units"
+          elif [[ "$evidence_attempted" == "0" ]] && ! drain_action_was_stalled "$stalled_action_keys" "evidence:*"; then
+            action="evidence"
+            action_key="evidence:*"
+            evidence_attempted=1
+            printf '[drain-queue] round=%s action=evidence\n' "$round"
+            if [[ "$DRY_RUN" == "1" ]]; then
+              break
+            fi
+            execute_metadata_closeout_repairs
+            execute_evidence_collection_rounds
+          fi
         fi
       fi
     fi
@@ -8129,6 +8141,101 @@ manual_triage_next_action() {
   esac
 }
 
+queue_next_action_for_unit() {
+  local unit_id="$1" category="$2" finding_count="$3"
+  local summary="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  case "$category" in
+    accepted)
+      printf 'none\tgreen\tUnit is accepted; no remediation action is planned.\n'
+      ;;
+    accepted_evidence_pending|accepted_with_carry_over)
+      printf 'evidence_only\tautomated\tImplementation is accepted; deterministic launch/browser/live evidence collection is still pending.\n'
+      ;;
+    evidence_failed)
+      printf 'evidence_repair\tautomated\tImplementation is accepted but deterministic evidence artifacts failed or are missing durable proof files.\n'
+      ;;
+    not_verified)
+      if implementation_summary_is_fixed "$summary"; then
+        printf 'verify_only\tautomated\tImplementation summary is fixed but verifier artifact is missing or stale; rerun verifier only.\n'
+      else
+        printf 'implement_then_verify\tautomated\tNo accepted current implementation proof exists; run implementation and then verifier.\n'
+      fi
+      ;;
+    needs_targeted_revision)
+      if [[ "$finding_count" =~ ^[0-9]+$ ]] && (( finding_count > 0 && finding_count <= MAX_AUTO_REVISE_FINDINGS )); then
+        printf 'targeted_revision\tautomated\tVerifier reported a bounded implementation finding set; rerun a narrow implementation pass and verifier.\n'
+      else
+        printf 'split_or_manual_revision\tmanual\tVerifier finding set exceeds the automatic revision bound; split the work or triage before rerun.\n'
+      fi
+      ;;
+    coordinator_cleanup)
+      printf 'metadata_closeout\tautomated\tFindings are remediation-owned packet/process/evidence metadata; repair closeout metadata and reverify.\n'
+      ;;
+    split_children_pending)
+      printf 'run_split_children\tautomated\tParent unit has generated split children that still need implementation or verification.\n'
+      ;;
+    split_decomposed)
+      printf 'split_parent_noop\tgreen\tParent unit was decomposed; closure is owned by child units.\n'
+      ;;
+    test_harness)
+      if unit_has_native_test_artifact_findings "$unit_id" || verifier_has_only_remediation_metadata_findings "$unit_id"; then
+        printf 'artifact_repair\tautomated\tVerifier points at remediation-owned native-test, packet, or evidence artifacts; repair artifacts instead of product code.\n'
+      else
+        printf 'manual_test_harness\tmanual\tVerifier classified this as harness/environment/fixture work that needs a targeted command or decision before agent rerun.\n'
+      fi
+      ;;
+    contract_conflict)
+      printf 'manual_contract_decision\tmanual\tVerifier found a product/security contract conflict; choose the authoritative contract before implementation.\n'
+      ;;
+    blocked)
+      printf 'manual_blocked\tmanual\tExternal input, access, dependency, or explicit human decision is required.\n'
+      ;;
+    split_required)
+      printf 'manual_split\tmanual\tVerifier requested decomposition before another implementation pass.\n'
+      ;;
+    needs_review)
+      printf 'manual_review\tmanual\tQueue category is ambiguous; inspect verifier artifact before running agents.\n'
+      ;;
+    *)
+      printf 'manual_review\tmanual\tUnknown queue category; inspect verifier artifact before running agents.\n'
+      ;;
+  esac
+}
+
+write_next_action_plan() {
+  local queue="$1"
+  local plan_tsv="$REMEDIATION_DIR/09-next-actions.tsv"
+  local plan_md="$REMEDIATION_DIR/09-next-actions.md"
+  printf 'unit_id\tcategory\taction\tsafety\tgroup\tpackets\tfinding_count\treason\n' > "$plan_tsv"
+  {
+    printf '# Remediation Next Actions\n\n'
+    printf 'Generated by `run-remediation.sh` from `%s`.\n\n' "$queue"
+    printf 'The harness uses this deterministic plan to separate product implementation, verifier-only reruns, evidence collection, artifact repair, split-parent no-ops, and manual blockers. Re-running agents blindly against manual rows is intentionally not part of the plan.\n\n'
+    printf '| Unit | Category | Action | Safety | Packets | Reason |\n'
+    printf '|---|---|---|---|---|---|\n'
+  } > "$plan_md"
+
+  [[ -s "$queue" ]] || return 0
+
+  local unit_id group model_class packets category finding_count verifier findings action safety reason
+  while IFS=$'\t' read -r unit_id group model_class packets category finding_count verifier findings; do
+    [[ "$unit_id" == "unit_id" || -z "${unit_id:-}" ]] && continue
+    IFS=$'\t' read -r action safety reason < <(queue_next_action_for_unit "$unit_id" "$category" "$finding_count")
+    reason="$(printf '%s' "$reason" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$unit_id" "$category" "$action" "$safety" "$group" "$packets" "$finding_count" "$reason" >> "$plan_tsv"
+    printf '| `%s` | `%s` | `%s` | `%s` | `%s` | %s |\n' \
+      "$unit_id" "$category" "$action" "$safety" "$packets" "$reason" >> "$plan_md"
+  done < "$queue"
+}
+
+print_next_action_plan_summary() {
+  local plan_tsv="$REMEDIATION_DIR/09-next-actions.tsv"
+  [[ -s "$plan_tsv" ]] || return 0
+  printf '[queue-plan] %s\n' "$plan_tsv"
+  awk -F '\t' 'NR > 1 { count[$3] += 1 } END { for (action in count) printf "[queue-plan]   %s: %d\n", action, count[action] }' "$plan_tsv" | sort
+}
+
 write_manual_triage_artifacts() {
   local queue="$1"
   local index="$REMEDIATION_DIR/08-manual-triage.md"
@@ -8201,6 +8308,9 @@ write_remediation_queue_summary() {
 
   printf 'Queue: %s\n' "$queue"
   awk -F '\t' 'NR > 1 { count[$5] += 1 } END { for (category in count) printf "  %s: %d\n", category, count[category] }' "$queue" | sort
+  write_next_action_plan "$queue"
+  printf 'Next actions: %s\n' "$REMEDIATION_DIR/09-next-actions.tsv"
+  awk -F '\t' 'NR > 1 { count[$3] += 1 } END { for (action in count) printf "  %s: %d\n", action, count[action] }' "$REMEDIATION_DIR/09-next-actions.tsv" | sort
   write_manual_triage_artifacts "$queue"
 }
 

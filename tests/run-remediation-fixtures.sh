@@ -64,6 +64,11 @@ queue_category() {
   awk -F '\t' -v unit="$unit_id" 'NR > 1 && $1 == unit { print $5; found = 1; exit } END { if (!found) exit 1 }' "$queue"
 }
 
+next_action() {
+  local plan="$1" unit_id="$2"
+  awk -F '\t' -v unit="$unit_id" 'NR > 1 && $1 == unit { print $3; found = 1; exit } END { if (!found) exit 1 }' "$plan"
+}
+
 summary_decision() {
   local summary="$1" unit_id="$2"
   awk -F '\t' -v unit="$unit_id" 'NR > 1 && $1 == unit { print $4 "\t" $5; found = 1; exit } END { if (!found) exit 1 }' "$summary"
@@ -112,11 +117,12 @@ PX-0013	P1	quality	Blocked	fixture.md	15	blocked	row
 PX-0014	P1	quality	Boundary tests	fixture.md	16	boundary	row
 PX-0015	P1	quality	Operability	fixture.md	17	operability	row
 PX-0016	P1	quality	Static analysis	fixture.md	18	static	row
+PX-0017	P1	quality	Native artifact repair	fixture.md	19	native artifact	row
 EOF
 
 cat > "$remediation/02-workstreams.tsv" <<'EOF'
 group	packets	model_class	rationale
-quality	PX-0001,PX-0002,PX-0003,PX-0004,PX-0005,PX-0006,PX-0007,PX-0008,PX-0009,PX-0010,PX-0011,PX-0012,PX-0013,PX-0014,PX-0015,PX-0016	standard	fixture
+quality	PX-0001,PX-0002,PX-0003,PX-0004,PX-0005,PX-0006,PX-0007,PX-0008,PX-0009,PX-0010,PX-0011,PX-0012,PX-0013,PX-0014,PX-0015,PX-0016,PX-0017	standard	fixture
 EOF
 
 cat > "$remediation/03-implementation-units.tsv" <<'EOF'
@@ -139,9 +145,10 @@ IU-0013	PX-0013	quality	standard	P1	blocked
 IU-0014	PX-0014	quality	standard	P1	boundary tests
 IU-0015	PX-0015	quality	standard	P1	operability
 IU-0016	PX-0016	quality	standard	P1	static analysis
+IU-0017	PX-0017	quality	standard	P1	native artifact repair
 EOF
 
-for packet in PX-0001 PX-0002 PX-0003 PX-0004 PX-0005 PX-0006 PX-0009 PX-0010 PX-0011 PX-0012 PX-0013 PX-0014 PX-0015 PX-0016; do
+for packet in PX-0001 PX-0002 PX-0003 PX-0004 PX-0005 PX-0006 PX-0009 PX-0010 PX-0011 PX-0012 PX-0013 PX-0014 PX-0015 PX-0016 PX-0017; do
   write_packet "$remediation" "$packet" complete
 done
 write_packet "$remediation" PX-0007 split-into-child-units
@@ -159,6 +166,9 @@ write_findings "$remediation" IU-0002 $'IU-0002\tP1\tlaunch_evidence\te2e\t1\tbr
 write_findings "$remediation" IU-0003 $'IU-0003\tP1\tapi_contract\tdocs/api.md\t1\tcontract docs missing\tadd request response permissions errors'
 write_verifier "$remediation" IU-0005 revise revise pending
 write_findings "$remediation" IU-0005 $'IU-0005\tP1\ttest_harness\ttests/e2e.spec.ts\t1\tflaky broad suite\tprovide targeted command'
+write_verifier "$remediation" IU-0017 revise revise pending
+write_findings "$remediation" IU-0017 "IU-0017"$'\tP1\ttest_harness\t'"$remediation"$'/artifacts/IU-0017-native-test-deadbeef.sh'$'\t3\tMalformed native-test script exits with command not found\tRegenerate native-test evidence artifact'
+write_summary "$remediation" IU-0017 fixed
 write_verifier "$remediation" IU-0006 stop blocked blocked
 write_findings "$remediation" IU-0006 $'IU-0006\tP1\tcontract_conflict\tdocs/contract.md\t1\tcode and docs disagree\tmake product decision'
 write_findings "$remediation" IU-0012 $'IU-0012\tP1\tlaunch_evidence\te2e\t1\tdepends on IU-0001 proof\tIU-0001 accepted covers this evidence'
@@ -199,9 +209,11 @@ write_summary "$remediation" IU-0009 fixed
 run_summary_only "$repo" "$audit" "$remediation"
 
 queue="$remediation/07-remediation-queue.tsv"
+plan="$remediation/09-next-actions.tsv"
 summary="$remediation/06-run-summary.tsv"
 triage="$remediation/08-manual-triage.md"
 [[ -s "$queue" ]] || fail "queue was not generated"
+[[ -s "$plan" ]] || fail "next-action plan was not generated"
 [[ -s "$summary" ]] || fail "summary was not generated"
 [[ -s "$triage" ]] || fail "manual triage index was not generated"
 
@@ -221,6 +233,20 @@ assert_equals blocked "$(queue_category "$queue" IU-0013)" "blocked category"
 assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0014)" "boundary_tests category"
 assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0015)" "operability category"
 assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0016)" "static_analysis category"
+assert_equals test_harness "$(queue_category "$queue" IU-0017)" "native artifact category"
+
+assert_equals none "$(next_action "$plan" IU-0001)" "accepted next action"
+assert_equals evidence_only "$(next_action "$plan" IU-0002)" "evidence next action"
+assert_equals targeted_revision "$(next_action "$plan" IU-0003)" "api contract next action"
+assert_equals implement_then_verify "$(next_action "$plan" IU-0004)" "missing implementation next action"
+assert_equals manual_test_harness "$(next_action "$plan" IU-0005)" "manual test harness next action"
+assert_equals manual_contract_decision "$(next_action "$plan" IU-0006)" "contract next action"
+assert_equals run_split_children "$(next_action "$plan" IU-0007)" "split child next action"
+assert_equals split_parent_noop "$(next_action "$plan" IU-0008)" "split parent noop next action"
+assert_equals verify_only "$(next_action "$plan" IU-0009)" "stale verifier next action"
+assert_equals evidence_repair "$(next_action "$plan" IU-0011)" "failed evidence next action"
+assert_equals manual_blocked "$(next_action "$plan" IU-0013)" "blocked next action"
+assert_equals artifact_repair "$(next_action "$plan" IU-0017)" "native-test artifact next action"
 
 assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0001)" "accepted summary"
 assert_equals $'blocked\tstop' "$(summary_decision "$summary" IU-0013)" "blocked summary"

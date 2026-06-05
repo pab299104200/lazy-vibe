@@ -497,7 +497,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `--rerun-verifiers` | Force verifier agents to rerun even when checkpoints exist. |
 | `--rerun-final-review` | Force final review to rerun even when its input fingerprint is unchanged. |
 | `--revise-next` | Select safe `needs_targeted_revision` rows from the current queue and run targeted implementation plus verification. |
-| `--drain-queue` | Keep deriving safe next actions from the current queue: verify missing/stale rows, revise safe rows, execute pending split children, repair metadata, collect deterministic evidence, refresh final review, and regenerate summaries. |
+| `--drain-queue` | Keep deriving safe next actions from the current queue: verify missing/stale rows, revise safe rows, repair remediation-owned artifacts/metadata, execute pending split children, collect deterministic evidence, refresh final review, and regenerate summaries. |
 | `--no-drain-queue` | Disable default queue drain for a reused remediation directory. |
 | `--revise-existing` | Skip cataloging and re-run implementation against existing packets. |
 | `--split-incomplete` | Detect and split oversized or incomplete units before re-running. |
@@ -524,11 +524,14 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `06-run-summary.tsv` | Implementation and verifier decision summary by unit. |
 | `07-remediation-queue.tsv` | Triage queue that classifies units as accepted, targeted revision, contract conflict, test harness, split required, blocked, or not verified. |
 | `08-manual-triage.md` | Human-readable index for manual buckets, with extracted verifier failure reasons and required next actions. |
+| `09-next-actions.tsv` / `09-next-actions.md` | Deterministic queue plan that maps every unit to `verify_only`, `implement_then_verify`, `targeted_revision`, `artifact_repair`, `evidence_only`, `split_parent_noop`, or a manual action before the harness runs more agents. |
 | `artifacts/triage-*.md` | Per-unit manual triage notes for `blocked`, `test_harness`, `contract_conflict`, and `split_required` units. |
 | `logs/*.log` | Full agent logs. |
 | `04-final-remediation-review.md` | Final read-only signoff. |
 
-The normal remediation lifecycle is deterministic: catalog, coordinate, implement, verify, auto-revise safe implementation findings, collect deterministic launch evidence, rerun affected verifiers, then write the final queue. Operators should not need to copy commands out of verifier reports. Environment variables are force/escape hatches, not required steps for the standard path.
+The normal remediation lifecycle is deterministic: catalog, coordinate, implement, verify, auto-revise safe implementation findings, collect deterministic launch evidence, rerun affected verifiers, then write the final queue and next-action plan. Operators should not need to copy commands out of verifier reports. Environment variables are force/escape hatches, not required steps for the standard path.
+
+Queue planning is intentionally stricter than queue classification. The queue says what state a unit is in; `09-next-actions.*` says what the harness will do next. Bad remediation-owned native-test scripts, stale native-test logs, packet-work-log contradictions, and metadata-only closeout problems are routed to `artifact_repair` or `metadata_closeout` rather than broad product-code remediation. True harness, contract, split, or blocked rows remain manual with `08-manual-triage.md` and `artifacts/triage-*.md` explaining why another blind agent pass is not deterministic.
 
 `--rerun-verifiers` is verifier-only when used by itself, but when it is combined with `--execute` it forces verifier reruns after the selected implementation pass. This is especially important with `--revise-existing`: selected units are implemented first, then their verifier artifacts are refreshed from the new active checkout.
 
