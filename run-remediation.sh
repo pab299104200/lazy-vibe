@@ -1195,28 +1195,33 @@ unit_has_native_test_artifact_findings() {
   local unit_id="$1"
   local findings
   findings="$(verifier_findings_tsv_for_unit "$unit_id")"
-  [[ -s "$findings" ]] || return 1
+  local report="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
 
-  awk -F '\t' -v rdir="$REMEDIATION_DIR" '
-    NR > 1 && $1 != "" {
-      file = $4
-      details = tolower($4 " " $6 " " $7)
-      remediation_file = 0
-      if (index(file, rdir "/") == 1) {
-        remediation_file = 1
+  if [[ -s "$findings" ]]; then
+    awk -F '\t' -v rdir="$REMEDIATION_DIR" '
+      NR > 1 && $1 != "" {
+        file = $4
+        details = tolower($4 " " $6 " " $7)
+        remediation_file = 0
+        if (index(file, rdir "/") == 1) {
+          remediation_file = 1
+        }
+        if (file ~ /^docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
+          remediation_file = 1
+        }
+        if (file ~ /\/docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
+          remediation_file = 1
+        }
+        if (remediation_file && details ~ /(native-test|native test|stale selector|stale .*script|stale .*log)/) {
+          found = 1
+        }
       }
-      if (file ~ /^docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
-        remediation_file = 1
-      }
-      if (file ~ /\/docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
-        remediation_file = 1
-      }
-      if (remediation_file && details ~ /(native-test|native test|stale selector|stale .*script|stale .*log)/) {
-        found = 1
-      }
-    }
-    END { exit found ? 0 : 1 }
-  ' "$findings"
+      END { exit found ? 0 : 1 }
+    ' "$findings" && return 0
+  fi
+
+  [[ -s "$report" ]] || return 1
+  grep -aqE 'docs/audit/.+/(artifacts|logs|packets)/.+native-test|native-test.+(stale selector|stale .*script|stale .*log)|stale selector.+native-test' "$report"
 }
 
 unit_evidence_has_failed_status() {

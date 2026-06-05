@@ -243,6 +243,8 @@ grep -q 'refused unscoped broad verification command' "$SCRIPT_DIR/run-remediati
 grep -q 'cd frontend && npx playwright test' "$SCRIPT_DIR/run-remediation.sh" || fail "unscoped Playwright guard missing"
 grep -q 'unit_has_native_test_artifact_findings' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test artifact finding guard missing"
 grep -q 'preserving unit-generated script/log for verifier' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test artifact preservation log missing"
+grep -q 'artifacts/verify-\$unit_id.md' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test artifact verifier-report fallback missing"
+grep -q 'stale selector.+native-test' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test stale selector fallback missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi
