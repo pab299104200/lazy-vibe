@@ -238,6 +238,9 @@ grep -q 'External input, access, dependency, or human decision is required' "$re
 grep -q 'command_is_long_running_server' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command guard missing"
 grep -q 'refused long-running server command' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command refusal log missing"
 grep -q 'npm run dev' "$SCRIPT_DIR/run-remediation.sh" || fail "npm dev-server guard missing"
+grep -q 'command_is_unscoped_broad_native_test' "$SCRIPT_DIR/run-remediation.sh" || fail "broad native-test guard missing"
+grep -q 'refused unscoped broad verification command' "$SCRIPT_DIR/run-remediation.sh" || fail "broad native-test refusal log missing"
+grep -q 'cd frontend && npx playwright test' "$SCRIPT_DIR/run-remediation.sh" || fail "unscoped Playwright guard missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi
