@@ -33,6 +33,7 @@ lazy-vibe/
 ├── generic-product-profile-template.md
 ├── tests/
 │   ├── run-audit-summary-fixtures.sh   # audit summary/remediation-context regression fixtures
+│   ├── run-feature-build-fixtures.sh   # feature-build result-quality regression fixtures
 │   └── run-remediation-fixtures.sh     # remediation queue/summary regression fixtures
 └── profiles/
     └── <your-product>/
@@ -121,7 +122,7 @@ The harness treats "good enough" as working, debuggable, documented, and maintai
 
 Verifier findings have dedicated categories for these gaps: `api_contract`, `boundary_tests`, `operability`, and `static_analysis`. Those categories flow back into the normal targeted-revision queue instead of becoming vague final-review advice.
 
-Harness health is treated the same way. `tests/run-audit-summary-fixtures.sh` verifies that audit summaries preserve source job metadata and classify failures into remediation-usable context such as browser evidence and missing output. `tests/run-remediation-fixtures.sh` builds a temporary remediation ledger and verifies queue classification plus summary behavior for accepted units, evidence-pending units, API contract findings, boundary-test findings, operability findings, static-analysis findings, missing verifiers, stale verifier inputs, split child pending/decomposed states, split parents with blocked child units, postcheck-invalid worktree evidence, failed deterministic evidence, contract conflicts, test-harness blockers, and blocked units.
+Harness health is treated the same way. `tests/run-audit-summary-fixtures.sh` verifies that audit summaries preserve source job metadata and classify failures into remediation-usable context such as browser evidence and missing output. `tests/run-feature-build-fixtures.sh` verifies that feature-build tasks cannot close without runnable verification commands and complete result artifacts. `tests/run-remediation-fixtures.sh` builds a temporary remediation ledger and verifies queue classification plus summary behavior for accepted units, evidence-pending units, API contract findings, boundary-test findings, operability findings, static-analysis findings, missing verifiers, stale verifier inputs, split child pending/decomposed states, split parents with blocked child units, postcheck-invalid worktree evidence, failed deterministic evidence, contract conflicts, test-harness blockers, and blocked units.
 
 ### What the audit relies on
 
@@ -627,7 +628,7 @@ The harness is state-driven:
 3. Implementer agents execute pending tasks whose dependencies are complete, with parallel DAG execution across ready tasks.
 4. Before dispatching an agent, the harness runs the task verification contract. If the current tree already satisfies it, the task is marked complete without burning implementation tokens.
 5. Reviewer tasks run like normal tasks and can block downstream work.
-6. The harness, not the agent, marks a task complete only after expected files exist and declared verification commands pass.
+6. The harness, not the agent, marks a task complete only after expected files exist, declared verification commands pass, and the task result artifact satisfies the closeout quality gate.
 7. The harness injects coding, UI, definition-of-done, route, and multi-layer contract standards into task prompts.
 8. The harness rejects deferral/workaround language by default.
 9. Optional post-build review and remediation commands can call the existing audit/remediation control planes before commit, push, and deploy.
@@ -643,6 +644,7 @@ The harness is state-driven:
 | `FEATURE_BUILD_MAX_RETRIES` | `1` | Retry attempts per failed task before the harness stops. |
 | `FEATURE_BUILD_MAX_PARALLEL` | `3` | Maximum ready DAG tasks running in parallel. |
 | `FEATURE_BUILD_STANDARD_GATES` | `1` | Inject coding/UI/definition-of-done verification and run final standard gates. |
+| `FEATURE_BUILD_RESULT_QUALITY_GATES` | `1` | Require complete per-task result artifacts after agent execution and for already-complete tasks during verify-only runs. The result must include expected closeout sections, exact verification commands, no deferral language, and `Final status: complete`. |
 | `FEATURE_BUILD_REQUIRE_REVIEW_TASKS` | `1` | Reject plans that contain no review tasks. |
 | `FEATURE_BUILD_ALLOW_DEFERRALS` | `0` | Reject task plans containing deferral/workaround language unless explicitly enabled. |
 | `FEATURE_BUILD_POST_BUILD_REVIEW_COMMAND` | — | Optional independent review command after build verification. Receives `FEATURE_BUILD_FEATURE`, `FEATURE_BUILD_RUN_DIR`, `FEATURE_BUILD_SPEC`, and `FEATURE_BUILD_SCORECARD`. |
@@ -708,7 +710,7 @@ The harness is state-driven:
 | `docs/plans/<feature>/verify/<task>/*.log` | Verification command output. |
 | `docs/plans/<feature>/artifacts/post-build-review.json` | Optional structured post-build review decision: `{"accepted": true}` or `{"verdict": "revise"}`. |
 
-`tasks.json` is the contract. Each task must include `task_id`, `title`, `task_type`, `depends_on`, `status`, `files_expected`, and `verification_commands`. The harness refuses duplicate IDs and unknown dependencies.
+`tasks.json` is the contract. Each task must include `task_id`, `title`, `task_type`, `depends_on`, `status`, `files_expected`, and `verification_commands`. The harness refuses duplicate IDs, unknown dependencies, and non-skipped tasks with no runnable verification commands after harness filtering.
 
 When standard gates are enabled, the harness appends verification commands from repo shape:
 
@@ -719,6 +721,8 @@ When standard gates are enabled, the harness appends verification commands from 
 - Multi-layer contract work adds deterministic checks for backend, frontend, docs, and agent surfaces when task titles, types, or expected files mention agent, BES, job payload, telemetry, permissions, webhooks, integrations, or contracts.
 
 With `--verify`, those backend/frontend standard gates also run once at the end before post-build review, commit, or push.
+
+Per-task result quality gates are separate from shell verification. After an agent runs, `results/<task>.md` must include the required closeout sections, list the exact verification commands from `tasks.json`, avoid deferral/workaround language unless explicitly allowed, and declare `Final status: complete`. Verify-only also checks result quality for tasks already marked `complete`. This prevents agents from closing feature tasks with unstructured prose while code, docs, tests, cleanup, or operability proof are missing.
 
 ### Harness consolidation roadmap
 

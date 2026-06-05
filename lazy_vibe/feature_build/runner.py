@@ -78,6 +78,31 @@ DEFERRAL_MARKERS = {
     "nice-to-have",
     "stretch",
 }
+RESULT_REQUIRED_SECTIONS = (
+    "files created/modified",
+    "verification commands",
+    "issues encountered",
+    "legacy/superseded/stub cleanup",
+    "final status",
+)
+INCOMPLETE_RESULT_MARKERS = {
+    "final status: partial",
+    "final status: blocked",
+    "status: partial",
+    "status: blocked",
+}
+OPERABILITY_MARKERS = (
+    "audit",
+    "correlation",
+    "error",
+    "failure",
+    "job status",
+    "log",
+    "observable",
+    "recovery",
+    "retry",
+    "not applicable",
+)
 NON_DEFERRAL_PHRASES = {
     "explicit deferrals",
     "no deferral",
@@ -324,6 +349,10 @@ def review_tasks_required() -> bool:
 
 def deferrals_allowed() -> bool:
     return os.getenv("FEATURE_BUILD_ALLOW_DEFERRALS", "0").strip().lower() in TRUE_VALUES
+
+
+def result_quality_gates_enabled() -> bool:
+    return os.getenv("FEATURE_BUILD_RESULT_QUALITY_GATES", "1").strip().lower() in TRUE_VALUES
 
 
 def no_user_deferral_allowed() -> str:
@@ -872,8 +901,11 @@ Requirements:
 - Include review tasks after foundation, backend, frontend, tests/docs, and final readiness.
 - Include contract-gate tasks for every multi-layer feature that crosses backend, frontend, agent, BES, job payload, telemetry, permission, webhook, or external integration boundaries.
 - Verification commands must be real shell commands run from the repo root.
+- Every non-skipped task must have at least one verification command after harness filtering. Do not rely on prose, screenshots, or agent claims as the only proof.
 - Task verification commands must be targeted to the task surface. Do not put full-suite commands such as `cd backend && python3 -m pytest`, `cd backend && pytest`, `cd frontend && npm run test`, or `cd frontend && npm run build` in individual tasks. Full suites are final gates after all tasks complete.
 - Include coding-standard, UI-standard, and definition-of-done verification where relevant.
+- For API, permission, tenant, RBAC, destructive-action, lifecycle, connector, webhook, job, retry, or audit-sensitive work, include boundary/failure verification commands that prove negative paths and operator-visible failure behavior, not only happy paths.
+- Include documentation/contract tasks when routes, APIs, permissions, lifecycle states, audit events, jobs, external integrations, or operator workflows change.
 - Do not defer, phase, postpone, or mark feature requirements as future work unless the user explicitly accepted that deferral.
 - Do not create workaround tasks when a full implementation task is possible.
 - Include cleanup work in the same implementation graph. When a feature supersedes an older path, add tasks to delete or converge legacy code, hidden routes, stale API clients, obsolete tests/docs/config, placeholder surfaces, and compatibility shims unless an explicit product/API compatibility contract requires them.
@@ -933,6 +965,16 @@ def enforce_task_contract(args: argparse.Namespace, root: Path, tasks: list[Task
             )
             if task.verification_commands != before:
                 changed = True
+    missing_verification = [
+        task.task_id
+        for task in tasks
+        if task.status != "skipped" and not task.verification_commands
+    ]
+    if missing_verification:
+        raise ValueError(
+            "feature build plan contains tasks with no runnable verification commands after harness filtering: "
+            + ", ".join(missing_verification)
+        )
     return changed
 
 
@@ -1275,6 +1317,7 @@ def run_task(
 ) -> None:
     ok, error = verify_task(task, root, run_dir)
     if ok:
+        write_already_ok_result(task, run_dir)
         task.status = "complete"
         task.last_error = ""
         print(f"[already-ok] task={task.task_id}")
@@ -1330,7 +1373,7 @@ def run_task(
             return
         raise RuntimeError(task.last_error)
 
-    ok, error = verify_task(task, root, run_dir)
+    ok, error = verify_task(task, root, run_dir, require_result=True)
     if ok:
         task.status = "complete"
         task.last_error = ""
@@ -1378,7 +1421,9 @@ Before reporting done:
 1. Run every verification command declared in the task file and tasks.json.
 2. Confirm expected files exist.
 3. Search the changed surface for stale/superseded/stub residue and either remove it or document the explicit compatibility contract that requires it.
-4. Write your result to:
+4. For API, permission, tenant, RBAC, destructive-action, lifecycle, connector, webhook, job, retry, or audit-sensitive work, document the negative/failure proof and operator-visible error, audit, log, retry, or recovery behavior.
+5. Confirm docs/contracts/manual material were updated when the task changes APIs, permissions, lifecycle states, audit events, jobs, external integrations, or operator workflows.
+6. Write your result to:
 {result_file}
 
 Result format:
@@ -1386,11 +1431,13 @@ Result format:
 - Verification commands and outputs
 - Issues encountered
 - Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept
+- Boundary/failure/operability proof, or why not applicable
+- Documentation/contract updates, or why not applicable
 - Final status: complete, partial, or blocked
 """
 
 
-def verify_task(task: Task, root: Path, run_dir: Path) -> tuple[bool, str]:
+def verify_task(task: Task, root: Path, run_dir: Path, require_result: bool = False) -> tuple[bool, str]:
     missing = [path for path in task.files_expected if not (root / path).exists()]
     if missing:
         return False, f"missing expected files: {', '.join(missing)}"
@@ -1401,7 +1448,100 @@ def verify_task(task: Task, root: Path, run_dir: Path) -> tuple[bool, str]:
         result = run_shell(command, root, verify_dir / f"{index:02d}.log")
         if result.returncode != 0:
             return False, f"command failed ({result.returncode}): {command}"
+    if require_result or task.status == "complete":
+        ok, error = verify_task_result_quality(task, run_dir)
+        if not ok:
+            return False, error
     return True, ""
+
+
+def verify_task_result_quality(task: Task, run_dir: Path) -> tuple[bool, str]:
+    if not result_quality_gates_enabled():
+        return True, ""
+    result_file = run_dir / "results" / f"{task.task_id}.md"
+    if not result_file.exists():
+        return False, f"missing task result artifact: {result_file}"
+    text = read_text(result_file)
+    lower = text.lower()
+    if not deferrals_allowed() and contains_deferral_marker(text):
+        return False, f"task result contains deferral/workaround language: {result_file}"
+    missing_sections = [section for section in RESULT_REQUIRED_SECTIONS if section not in lower]
+    if missing_sections:
+        return False, (
+            f"task result missing required closeout section(s): {', '.join(missing_sections)}"
+        )
+    if any(marker in lower for marker in INCOMPLETE_RESULT_MARKERS):
+        return False, "task result final status is not complete"
+    if "final status: complete" not in lower:
+        return False, "task result must declare `Final status: complete`"
+    missing_commands = [command for command in task.verification_commands if command not in text]
+    if missing_commands:
+        return False, (
+            "task result does not list verification command(s): "
+            + "; ".join(missing_commands[:3])
+        )
+    if task_needs_operability_closeout(task) and not any(marker in lower for marker in OPERABILITY_MARKERS):
+        return False, (
+            "task result must document boundary/failure/operability proof or explicitly say not applicable"
+        )
+    return True, ""
+
+
+def write_already_ok_result(task: Task, run_dir: Path) -> None:
+    result_file = run_dir / "results" / f"{task.task_id}.md"
+    if result_file.exists():
+        return
+    command_lines = "\n".join(f"- {command} -> pass" for command in task.verification_commands)
+    file_lines = "\n".join(f"- {path}" for path in task.files_expected) or "- No expected files declared"
+    write_text(
+        result_file,
+        f"""# {task.task_id}: {task.title}
+
+## Files created/modified
+{file_lines}
+
+## Verification commands and outputs
+{command_lines}
+
+## Issues encountered
+No implementation agent was run; the current checkout already satisfied this task's verification contract.
+
+## Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept
+Not applicable; no implementation agent was run.
+
+## Boundary/failure/operability proof, or why not applicable
+Not applicable; no implementation agent was run.
+
+## Documentation/contract updates, or why not applicable
+Not applicable; no implementation agent was run.
+
+## Final status
+Final status: complete
+""",
+    )
+
+
+def task_needs_operability_closeout(task: Task) -> bool:
+    text = " ".join([task.title, task.task_type, *task.files_expected]).lower()
+    markers = (
+        "api",
+        "audit",
+        "auth",
+        "connector",
+        "destructive",
+        "idempot",
+        "integration",
+        "job",
+        "lifecycle",
+        "permission",
+        "rbac",
+        "retry",
+        "session",
+        "sync",
+        "tenant",
+        "webhook",
+    )
+    return any(marker in text for marker in markers)
 
 
 def verify_all(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
@@ -1414,7 +1554,7 @@ def verify_all(args: argparse.Namespace, root: Path, run_dir: Path, state_file: 
     for task in tasks:
         if only is not None and task.task_id not in only:
             continue
-        ok, error = verify_task(task, root, run_dir)
+        ok, error = verify_task(task, root, run_dir, require_result=task.status == "complete")
         if ok:
             print(f"[verify-ok] {task.task_id}")
         else:
