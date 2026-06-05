@@ -1191,6 +1191,34 @@ verifier_has_only_remediation_metadata_findings() {
   ' "$findings"
 }
 
+unit_has_native_test_artifact_findings() {
+  local unit_id="$1"
+  local findings
+  findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+  [[ -s "$findings" ]] || return 1
+
+  awk -F '\t' -v rdir="$REMEDIATION_DIR" '
+    NR > 1 && $1 != "" {
+      file = $4
+      details = tolower($4 " " $6 " " $7)
+      remediation_file = 0
+      if (index(file, rdir "/") == 1) {
+        remediation_file = 1
+      }
+      if (file ~ /^docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
+        remediation_file = 1
+      }
+      if (file ~ /\/docs\/audit\/[^/]+\/[^/]+\/(packets|artifacts|logs|prompts)\//) {
+        remediation_file = 1
+      }
+      if (remediation_file && details ~ /(native-test|native test|stale selector|stale .*script|stale .*log)/) {
+        found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$findings"
+}
+
 unit_evidence_has_failed_status() {
   local unit_id="$1"
   local unit_dir="$REMEDIATION_DIR/artifacts/$unit_id"
@@ -5754,6 +5782,10 @@ run_implementer_and_test() {
     local group
     group="$(awk -F '\t' -v unit_id="$unit_id" 'NR > 1 && $1 == unit_id { print $3; exit }' "$UNITS_TSV")"
     local test_log="$REMEDIATION_DIR/artifacts/$unit_id-native-test.log"
+    if unit_has_native_test_artifact_findings "$unit_id"; then
+      printf '\n[native-test] skipping automatic profile native-test commands for %s because current verifier findings target native-test remediation artifacts; preserving unit-generated script/log for verifier.\n' "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
+      return "$status"
+    fi
     local -a test_cmds=()
     local test_cmd
     while IFS= read -r test_cmd; do
