@@ -23,7 +23,11 @@ RUNNER_UNAVAILABLE_RE = re.compile(
 @dataclass(frozen=True)
 class JobRow:
     job_id: str
+    group: str
     kind: str
+    title: str
+    output: str
+    ref: str
     result: str
     log_path: Path
 
@@ -96,7 +100,10 @@ def read_manifest_jobs(args: argparse.Namespace, run_dir: Path, completed: set[s
             if not group_selected(group, args.from_group, args.to_group):
                 continue
             log_path = run_dir / "logs" / f"{job_id}.log"
-            jobs.append(JobRow(job_id, kind, job_result(job_id, log_path, completed), log_path))
+            title = (row.get("title") or "").strip()
+            output = (row.get("output") or "").strip()
+            ref = (row.get("ref") or "").strip()
+            jobs.append(JobRow(job_id, group, kind, title, output, ref, job_result(job_id, log_path, completed), log_path))
     return jobs
 
 
@@ -112,7 +119,7 @@ def read_dynamic_jobs(run_dir: Path, completed: set[str]) -> list[JobRow]:
             continue
         seen.add(job_id)
         log_path = run_dir / "logs" / f"{job_id}.log"
-        jobs.append(JobRow(job_id, "deep-dive", job_result(job_id, log_path, completed), log_path))
+        jobs.append(JobRow(job_id, "", "deep-dive", "", "", "", job_result(job_id, log_path, completed), log_path))
     return jobs
 
 
@@ -120,16 +127,100 @@ def load_test_job(run_dir: Path, completed: set[str], enabled: str) -> list[JobR
     if enabled != "1":
         return []
     log_path = run_dir / "logs" / "load-test.log"
-    return [JobRow("load-test", "load", job_result("load-test", log_path, completed), log_path)]
+    return [JobRow("load-test", "", "load", "Load test", "", "", job_result("load-test", log_path, completed), log_path)]
 
 
-def write_tsv(path: Path, rows: list[JobRow]) -> None:
+def output_artifact_path(run_dir: Path, row: JobRow) -> Path | None:
+    if not row.output:
+        return None
+    output = Path(row.output)
+    if output.is_absolute():
+        return output
+    return run_dir / "artifacts" / output
+
+
+def native_summary_paths(run_dir: Path, row: JobRow) -> list[Path]:
+    candidates = [
+        run_dir / "artifacts" / f"{row.job_id}-native-summary.md",
+        run_dir / "artifacts" / f"{row.job_id}-native-summary.tsv",
+        run_dir / "artifacts" / f"{row.job_id}-e2e-summary.md",
+        run_dir / "artifacts" / f"{row.job_id}-e2e-summary.tsv",
+        run_dir / "artifacts" / f"{row.job_id}-lighthouse-summary.md",
+        run_dir / "artifacts" / f"{row.job_id}-lighthouse-summary.tsv",
+        run_dir / "artifacts" / f"{row.job_id}-accessibility-summary.md",
+        run_dir / "artifacts" / f"{row.job_id}-accessibility-summary.tsv",
+    ]
+    return [path for path in candidates if path.exists()]
+
+
+def remediation_context(args: argparse.Namespace, row: JobRow) -> str:
+    run_dir = Path(args.run_dir)
+    output_path = output_artifact_path(run_dir, row)
+    native_paths = native_summary_paths(run_dir, row)
+    details: list[str] = []
+    if row.group:
+        details.append(f"group={row.group}")
+    if row.title:
+        details.append(f"title={row.title}")
+    if row.ref:
+        details.append(f"ref={row.ref}")
+    if output_path is not None:
+        status = "exists" if output_path.exists() else "missing"
+        details.append(f"output={output_path} ({status})")
+    if native_paths:
+        details.append("native_artifacts=" + ",".join(str(path) for path in native_paths[:4]))
+    details.append("class=" + remediation_class(row, output_path, native_paths))
+    return "; ".join(details)
+
+
+def remediation_class(
+    row: JobRow,
+    output_path: Path | None,
+    native_paths: list[Path],
+) -> str:
+    if row.result == "RUNNER_UNAVAILABLE":
+        return "runner_unavailable"
+    if row.result == "not-run":
+        return "not_run"
+    text_parts: list[str] = []
+    if row.log_path.exists():
+        text_parts.append(row.log_path.read_text(encoding="utf-8", errors="replace")[-12000:])
+    for path in native_paths:
+        text_parts.append(path.read_text(encoding="utf-8", errors="replace")[-12000:])
+    text = "\n".join(text_parts).lower()
+    if any(token in text for token in ("command not found", "no such file", "cannot find module", "unknown argument")):
+        return "harness_or_native_command"
+    if any(token in text for token in ("playwright", "lighthouse", "axe", "accessibility", "browser", "e2e")):
+        return "runtime_or_browser_evidence"
+    if output_path is not None and not output_path.exists():
+        return "audit_output_missing"
+    if any(token in text for token in ("401", "403", "rbac", "tenant", "permission", "authorization", "auth")):
+        return "security_boundary"
+    if any(token in text for token in ("openapi", "api contract", "request schema", "response schema")):
+        return "api_contract"
+    if any(token in text for token in ("audit log", "correlation", "request id", "job status", "retry")):
+        return "operability"
+    return "implementation_or_docs_gap"
+
+
+def write_tsv(path: Path, args: argparse.Namespace, rows: list[JobRow]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(["job_id", "kind", "result"])
+        writer.writerow(["job_id", "kind", "result", "group", "title", "output", "log_path", "remediation_context"])
         for row in rows:
-            writer.writerow([row.job_id, row.kind, row.result])
+            writer.writerow(
+                [
+                    row.job_id,
+                    row.kind,
+                    row.result,
+                    row.group,
+                    row.title,
+                    str(output_artifact_path(Path(args.run_dir), row) or ""),
+                    str(row.log_path),
+                    remediation_context(args, row),
+                ]
+            )
 
 
 def summarize_counts(rows: list[JobRow]) -> tuple[int, int, int]:
@@ -215,14 +306,16 @@ def write_next_actions(path: Path, args: argparse.Namespace, rows: list[JobRow])
 
     lines.extend(
         [
-            "| Job | Kind | Result | Log | Likely reason |",
-            "| --- | --- | --- | --- | --- |",
+            "| Job | Kind | Result | Output | Log | Likely reason | Remediation context |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in non_pass:
+        output_path = output_artifact_path(Path(args.run_dir), row)
+        output_display = str(output_path) if output_path else ""
         log_display = str(row.log_path)
         lines.append(
-            f"| `{row.job_id}` | `{row.kind}` | `{row.result}` | `{log_display}` | {log_hint(row.log_path)} |"
+            f"| `{row.job_id}` | `{row.kind}` | `{row.result}` | `{output_display}` | `{log_display}` | {log_hint(row.log_path)} | {remediation_context(args, row)} |"
         )
     lines.append("")
     lines.append("## Rerun Commands")
@@ -261,7 +354,7 @@ def main() -> int:
 
     summary_file = Path(args.summary_file)
     next_actions_file = Path(args.next_actions_file)
-    write_tsv(summary_file, rows)
+    write_tsv(summary_file, args, rows)
     write_next_actions(next_actions_file, args, rows)
     print_console_summary(rows, summary_file, next_actions_file)
     return 0

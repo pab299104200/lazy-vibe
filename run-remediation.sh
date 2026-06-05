@@ -1018,14 +1018,27 @@ unit_split_children_pending() {
   while IFS=$'\t' read -r child_id packets_csv _group _model _severity _rationale; do
     [[ "$child_id" == "$unit_id"-S[0-9][0-9]* ]] || continue
     verifier_accepts_unit "$child_id" && continue
-    verifier_finding_type_exists "$(verifier_findings_tsv_for_unit "$child_id")" "contract_conflict" && continue
-    verifier_finding_type_exists "$(verifier_findings_tsv_for_unit "$child_id")" "test_harness" && continue
-    verifier_finding_type_exists "$(verifier_findings_tsv_for_unit "$child_id")" "blocked" && continue
+    return 0
+  done < <(tail -n +2 "$UNITS_TSV")
+  return 1
+}
+
+split_parent_has_manual_child_blockers() {
+  local unit_id="$1"
+  local child_id _packets_csv _group _model _severity _rationale findings
+  [[ -s "$UNITS_TSV" ]] || return 1
+  while IFS=$'\t' read -r child_id _packets_csv _group _model _severity _rationale; do
+    [[ "$child_id" == "$unit_id"-S[0-9][0-9]* ]] || continue
+    verifier_accepts_unit "$child_id" && continue
+    findings="$(verifier_findings_tsv_for_unit "$child_id")"
+    if verifier_finding_type_exists "$findings" "contract_conflict" ||
+      verifier_finding_type_exists "$findings" "test_harness" ||
+      verifier_finding_type_exists "$findings" "blocked" ||
+      verifier_finding_type_exists "$findings" "split_required"; then
+      return 0
+    fi
     if file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' \
       "$REMEDIATION_DIR/artifacts/verify-$child_id.md"; then
-      continue
-    fi
-    if ! unit_packets_have_terminal_status "$packets_csv"; then
       return 0
     fi
   done < <(tail -n +2 "$UNITS_TSV")
@@ -8311,10 +8324,14 @@ queue_next_action_for_unit() {
       printf 'metadata_closeout\tautomated\tFindings are remediation-owned packet/process/evidence metadata; repair closeout metadata and reverify.\n'
       ;;
     split_children_pending)
-      printf 'run_split_children\tautomated\tParent unit has generated split children that still need implementation or verification.\n'
+      if split_parent_has_manual_child_blockers "$unit_id"; then
+        printf 'child_manual_blockers\tmanual\tParent unit has split children with blocked, contract, split, or test-harness findings; close those child rows before treating the parent as decomposed.\n'
+      else
+        printf 'run_split_children\tautomated\tParent unit has generated split children that still need implementation or verification.\n'
+      fi
       ;;
     split_decomposed)
-      printf 'split_parent_noop\tgreen\tParent unit was decomposed; closure is owned by child units.\n'
+      printf 'split_parent_noop\tgreen\tParent unit was decomposed and its direct child units have accepted implementation state; launch evidence remains tracked on child rows.\n'
       ;;
     test_harness)
       if unit_has_native_test_artifact_findings "$unit_id" || verifier_has_only_remediation_metadata_findings "$unit_id"; then

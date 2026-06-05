@@ -118,11 +118,13 @@ PX-0014	P1	quality	Boundary tests	fixture.md	16	boundary	row
 PX-0015	P1	quality	Operability	fixture.md	17	operability	row
 PX-0016	P1	quality	Static analysis	fixture.md	18	static	row
 PX-0017	P1	quality	Native artifact repair	fixture.md	19	native artifact	row
+PX-0018	P1	quality	Split parent blocked child	fixture.md	20	split row
+PX-0018-S01	P1	quality	Split child blocked	fixture.md	21	child blocked row
 EOF
 
 cat > "$remediation/02-workstreams.tsv" <<'EOF'
 group	packets	model_class	rationale
-quality	PX-0001,PX-0002,PX-0003,PX-0004,PX-0005,PX-0006,PX-0007,PX-0008,PX-0009,PX-0010,PX-0011,PX-0012,PX-0013,PX-0014,PX-0015,PX-0016,PX-0017	standard	fixture
+quality	PX-0001,PX-0002,PX-0003,PX-0004,PX-0005,PX-0006,PX-0007,PX-0008,PX-0009,PX-0010,PX-0011,PX-0012,PX-0013,PX-0014,PX-0015,PX-0016,PX-0017,PX-0018	standard	fixture
 EOF
 
 cat > "$remediation/03-implementation-units.tsv" <<'EOF'
@@ -146,6 +148,8 @@ IU-0014	PX-0014	quality	standard	P1	boundary tests
 IU-0015	PX-0015	quality	standard	P1	operability
 IU-0016	PX-0016	quality	standard	P1	static analysis
 IU-0017	PX-0017	quality	standard	P1	native artifact repair
+IU-0018	PX-0018	quality	standard	P1	split parent blocked child
+IU-0018-S01	PX-0018-S01	quality	standard	P1	split child blocked
 EOF
 
 for packet in PX-0001 PX-0002 PX-0003 PX-0004 PX-0005 PX-0006 PX-0009 PX-0010 PX-0011 PX-0012 PX-0013 PX-0014 PX-0015 PX-0016 PX-0017; do
@@ -155,6 +159,8 @@ write_packet "$remediation" PX-0007 split-into-child-units
 write_packet "$remediation" PX-0007-S01 not-started
 write_packet "$remediation" PX-0008 split-into-child-units
 write_packet "$remediation" PX-0008-S01 complete
+write_packet "$remediation" PX-0018 split-into-child-units
+write_packet "$remediation" PX-0018-S01 complete
 
 for unit in IU-0001 IU-0002 IU-0003 IU-0005 IU-0006 IU-0008-S01 IU-0009 IU-0010 IU-0011 IU-0012 IU-0013 IU-0014 IU-0015 IU-0016; do
   write_verifier "$remediation" "$unit" accept fixed complete
@@ -183,6 +189,9 @@ cat > "$remediation/artifacts/IU-0016-summary.md" <<'EOF'
 
 **IMPLEMENTATION_RESULT:** fixed
 EOF
+write_verifier "$remediation" IU-0018-S01 stop blocked blocked
+write_findings "$remediation" IU-0018-S01 $'IU-0018-S01\tP1\tblocked\texternal\t1\tneeds production credential\tprovide credential'
+write_summary "$remediation" IU-0018-S01 blocked
 
 for verifier in "$remediation"/artifacts/verify-*.md; do
   [[ "$verifier" == *verify-IU-0009.md ]] && continue
@@ -234,6 +243,7 @@ assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0014)" "boun
 assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0015)" "operability category"
 assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0016)" "static_analysis category"
 assert_equals test_harness "$(queue_category "$queue" IU-0017)" "native artifact category"
+assert_equals split_children_pending "$(queue_category "$queue" IU-0018)" "blocked split child category"
 
 assert_equals none "$(next_action "$plan" IU-0001)" "accepted next action"
 assert_equals evidence_only "$(next_action "$plan" IU-0002)" "evidence next action"
@@ -247,6 +257,7 @@ assert_equals verify_only "$(next_action "$plan" IU-0009)" "stale verifier next 
 assert_equals evidence_repair "$(next_action "$plan" IU-0011)" "failed evidence next action"
 assert_equals manual_blocked "$(next_action "$plan" IU-0013)" "blocked next action"
 assert_equals artifact_repair "$(next_action "$plan" IU-0017)" "native-test artifact next action"
+assert_equals child_manual_blockers "$(next_action "$plan" IU-0018)" "blocked split child next action"
 
 assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0001)" "accepted summary"
 assert_equals $'blocked\tstop' "$(summary_decision "$summary" IU-0013)" "blocked summary"
