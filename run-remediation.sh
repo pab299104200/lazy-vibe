@@ -5760,8 +5760,7 @@ run_implementer_and_test() {
             printf '[native-test] refused long-running server command; native verification commands must terminate. Use a finite smoke/test command or mark browser/live evidence pending.\n'
           } >> "$test_log"
           printf '\n[native-test] refused long-running server command: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
-          test_status=124
-          break
+          continue
         fi
         printf '\n[native-test] running: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
         local test_script
