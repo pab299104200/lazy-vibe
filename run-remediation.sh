@@ -97,6 +97,9 @@ REMEDIATION_SANDBOX_PYTEST_FALLBACK="${REMEDIATION_SANDBOX_PYTEST_FALLBACK:-1}"
 REMEDIATION_STATIC_PRECHECKS="${REMEDIATION_STATIC_PRECHECKS:-1}"
 REMEDIATION_AUTO_DRAIN_QUEUE="${REMEDIATION_AUTO_DRAIN_QUEUE:-1}"
 REMEDIATION_VERIFY_AFTER_EXECUTE="${REMEDIATION_VERIFY_AFTER_EXECUTE:-1}"
+REMEDIATION_REQUIRE_BROWSER_DEPLOY="${REMEDIATION_REQUIRE_BROWSER_DEPLOY:-1}"
+REMEDIATION_AUTO_DEPLOY_BROWSER_VPS="${REMEDIATION_AUTO_DEPLOY_BROWSER_VPS:-0}"
+REMEDIATION_VPS_DEPLOYED="${REMEDIATION_VPS_DEPLOYED:-0}"
 NO_CATALOG=0
 FEATURE=""
 SCORECARD=""
@@ -1540,6 +1543,111 @@ command_is_unscoped_broad_native_test() {
       ;;
   esac
   return 1
+}
+
+command_is_browser_evidence_command() {
+  local command="$1"
+  [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* || "$command" == *"browser-evidence"* || "$command" == *"lighthouse"* ]]
+}
+
+profile_slug() {
+  if [[ -n "${PROFILE:-}" ]]; then
+    basename "$PROFILE"
+    return 0
+  fi
+  if [[ -n "${PRODUCT_PROFILE:-}" ]]; then
+    basename "$(dirname "$PRODUCT_PROFILE")"
+    return 0
+  fi
+  printf '\n'
+}
+
+profile_is_meridian() {
+  [[ "$(profile_slug)" == "meridian" ]]
+}
+
+ensure_browser_vps_deploy_ready() {
+  local command="$1"
+  command_is_browser_evidence_command "$command" || return 0
+  profile_is_meridian || return 0
+  [[ "$REMEDIATION_REQUIRE_BROWSER_DEPLOY" == "1" ]] || return 0
+  [[ "$REMEDIATION_VPS_DEPLOYED" == "1" ]] && return 0
+
+  if [[ "$REMEDIATION_AUTO_DEPLOY_BROWSER_VPS" == "1" && -x "$REPO_ROOT/scripts/deploy-runtime" ]]; then
+    printf '[browser-deploy] Meridian browser evidence requires deployed code; running scripts/deploy-runtime dev\n'
+    if (cd "$REPO_ROOT" && scripts/deploy-runtime dev); then
+      export REMEDIATION_VPS_DEPLOYED=1
+      return 0
+    fi
+    printf '[browser-deploy] scripts/deploy-runtime dev failed; refusing VPS browser evidence against stale code\n' >&2
+    return 1
+  fi
+
+  printf '[browser-deploy] Meridian browser evidence runs against the dev VPS and requires deployed code. Run `scripts/deploy-runtime dev` after implementation changes, or set REMEDIATION_AUTO_DEPLOY_BROWSER_VPS=1 to let the harness deploy before browser proof. If deployment has already happened, set REMEDIATION_VPS_DEPLOYED=1 for this harness run.\n' >&2
+  return 1
+}
+
+browser_evidence_env_preamble() {
+  local unit_id="$1" journey_slug="$2" audit_artifact_dir="$3" skip_runtime_quality="$4"
+  cat <<EOF
+set -a
+[ -f docs/ux/.creds ] && . docs/ux/.creds
+set +a
+export E2E_EMAIL="\${E2E_EMAIL:-\${email:-}}"
+export E2E_PASSWORD="\${E2E_PASSWORD:-\${password:-}}"
+export E2E_BASE_URL="\${E2E_BASE_URL:-\${url:-}}"
+export E2E_API_BASE="\${E2E_API_BASE:-\${api_url:-}}"
+export PORTAL_AUDIT_RUN_DIR="$REMEDIATION_DIR"
+export PORTAL_AUDIT_JOB_ID="$unit_id"
+export PORTAL_AUDIT_JOURNEY_SLUG="$journey_slug"
+export PORTAL_AUDIT_ARTIFACT_DIR="$audit_artifact_dir"
+export PORTAL_AUDIT_EVIDENCE_MODE="$REMEDIATION_EVIDENCE_MODE"
+export PORTAL_AUDIT_SKIP_RUNTIME_QUALITY="\${PORTAL_AUDIT_SKIP_RUNTIME_QUALITY:-$skip_runtime_quality}"
+export REMEDIATION_REQUIRE_BROWSER_DEPLOY="\${REMEDIATION_REQUIRE_BROWSER_DEPLOY:-$REMEDIATION_REQUIRE_BROWSER_DEPLOY}"
+export REMEDIATION_VPS_DEPLOYED="\${REMEDIATION_VPS_DEPLOYED:-$REMEDIATION_VPS_DEPLOYED}"
+if [[ -n "\${E2E_BASE_URL:-}" && "\$E2E_BASE_URL" != http://* && "\$E2E_BASE_URL" != https://* ]]; then
+  export E2E_BASE_URL="https://\$E2E_BASE_URL"
+fi
+if [[ -z "\${E2E_API_BASE:-}" && "\$E2E_BASE_URL" =~ ^https?://([^/:]+)(:[0-9]+)?/?$ && "\${BASH_REMATCH[1]}" != localhost && "\${BASH_REMATCH[1]}" != 127.* ]]; then
+  export E2E_API_BASE="https://api-\${BASH_REMATCH[1]}"
+fi
+EOF
+  if profile_is_meridian; then
+    cat <<'EOF'
+if [[ -z "${E2E_BASE_URL:-}" ]]; then
+  printf '[browser-env] Meridian Playwright evidence must target the dev VPS SPA URL from docs/ux/.creds or E2E_BASE_URL.\n' >&2
+  exit 86
+fi
+if [[ "$E2E_BASE_URL" =~ ^https?://(localhost|127\.) ]]; then
+  printf '[browser-env] Meridian Playwright evidence must run against the dev VPS, not localhost: %s\n' "$E2E_BASE_URL" >&2
+  exit 86
+fi
+if [[ -z "${E2E_API_BASE:-}" ]]; then
+  printf '[browser-env] Meridian split-subdomain VPS requires E2E_API_BASE, usually https://api-${E2E_BASE_URL#https://}.\n' >&2
+  exit 86
+fi
+_e2e_web_host="${E2E_BASE_URL#http://}"
+_e2e_web_host="${_e2e_web_host#https://}"
+_e2e_web_host="${_e2e_web_host%%/*}"
+_e2e_web_host="${_e2e_web_host%%:*}"
+_e2e_api_host="${E2E_API_BASE#http://}"
+_e2e_api_host="${_e2e_api_host#https://}"
+_e2e_api_host="${_e2e_api_host%%/*}"
+_e2e_api_host="${_e2e_api_host%%:*}"
+if [[ "$_e2e_api_host" == "$_e2e_web_host" ]]; then
+  printf '[browser-env] Meridian dev VPS is split-subdomain. E2E_API_BASE must not equal the SPA host (%s).\n' "$_e2e_web_host" >&2
+  exit 86
+fi
+if [[ "$_e2e_api_host" != api-* ]]; then
+  printf '[browser-env] Meridian dev VPS API host should be api-* for split-subdomain proof, got %s.\n' "$_e2e_api_host" >&2
+  exit 86
+fi
+if [[ "${REMEDIATION_REQUIRE_BROWSER_DEPLOY:-1}" == "1" && "${REMEDIATION_VPS_DEPLOYED:-0}" != "1" ]]; then
+  printf '[browser-env] Meridian VPS Playwright evidence requires deployed code. Run scripts/deploy-runtime dev or set REMEDIATION_AUTO_DEPLOY_BROWSER_VPS=1 before the harness launches browser proof.\n' >&2
+  exit 87
+fi
+EOF
+  fi
 }
 
 shell_fragment_is_valid() {
@@ -5824,16 +5932,35 @@ run_implementer_and_test() {
           printf '\n[native-test] refused unscoped broad verification command: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
           continue
         fi
+        local executable_test_cmd="$test_cmd"
+        if command_is_browser_evidence_command "$test_cmd"; then
+          if ! ensure_browser_vps_deploy_ready "$test_cmd"; then
+            {
+              printf '\n$ %s\n' "$test_cmd"
+              printf '[native-test] refused Meridian VPS browser command before deploy. Run scripts/deploy-runtime dev, or set REMEDIATION_AUTO_DEPLOY_BROWSER_VPS=1 before rerunning the harness. Set REMEDIATION_VPS_DEPLOYED=1 only after deployment has completed.\n'
+            } >> "$test_log"
+            printf '\n[native-test] refused Meridian VPS browser command before deploy: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            test_status=87
+            break
+          fi
+          local native_slug native_artifact_dir native_skip_runtime_quality
+          native_slug="native-test"
+          native_artifact_dir="$REMEDIATION_DIR/artifacts/$unit_id/$native_slug"
+          native_skip_runtime_quality=0
+          [[ "$REMEDIATION_EVIDENCE_MODE" == "targeted" ]] && native_skip_runtime_quality=1
+          executable_test_cmd="$(browser_evidence_env_preamble "$unit_id" "$native_slug" "$native_artifact_dir" "$native_skip_runtime_quality")
+$test_cmd"
+        fi
         printf '\n[native-test] running: %s\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
         local test_script
         test_script="$REMEDIATION_DIR/artifacts/$unit_id-native-test-$(printf '%s' "$test_cmd" | sha256sum | awk '{print substr($1, 1, 10)}').sh"
         {
           printf '#!/usr/bin/env bash\n'
           printf 'set -euo pipefail\n'
-          printf '%s\n' "$test_cmd"
+          printf '%s\n' "$executable_test_cmd"
         } > "$test_script"
         chmod +x "$test_script"
-        if shell_fragment_is_valid "$test_cmd"; then
+        if shell_fragment_is_valid "$executable_test_cmd"; then
           if {
             printf '$ %s\n' "$test_cmd"
             printf '[native-test] script: %s\n' "$test_script"
@@ -7328,7 +7455,7 @@ run_evidence_command() {
   if [[ "$wrapped_command" == "cd frontend && "*"/frontend/"* ]]; then
     wrapped_command="${wrapped_command//\/frontend\//\/}"
   fi
-  if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* || "$command" == *"browser-evidence"* || "$command" == *"lighthouse"* ]]; then
+  if command_is_browser_evidence_command "$command"; then
     if unit_has_passing_summary_artifact "$unit_id"; then
       {
         printf 'STATUS: pass\n'
@@ -7339,17 +7466,29 @@ run_evidence_command() {
       printf '[evidence] %s: pass (reused summary artifact): %s\n' "$unit_id" "$command"
       return 0
     fi
+    if ! ensure_browser_vps_deploy_ready "$command"; then
+      {
+        printf 'STATUS: fail\n'
+        printf 'COMMAND: %s\n' "$command"
+        printf 'ERROR: Meridian VPS browser evidence requires the current code to be deployed before Playwright runs.\n'
+        printf 'REQUIRED_FIX: Run scripts/deploy-runtime dev from the Meridian repo, or set REMEDIATION_AUTO_DEPLOY_BROWSER_VPS=1 before rerunning the harness. Set REMEDIATION_VPS_DEPLOYED=1 only after deployment has completed.\n'
+        printf 'FINISHED_AT: %s\n' "$(date -Is)"
+      } > "$status_file"
+      printf '[evidence] %s: fail (VPS deploy required before browser proof): %s\n' "$unit_id" "$command"
+      return 1
+    fi
   fi
   if [[ "$command" == *" -m postgres"* && -z "${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-}" && -x "$REPO_ROOT/scripts/dev-postgres" ]]; then
     wrapped_command="./scripts/dev-postgres bootstrap && export MERIDIAN_TEST_ALEMBIC_POSTGRES_URL=\"\${MERIDIAN_TEST_ALEMBIC_POSTGRES_URL:-postgresql://meridian:meridian@127.0.0.1:5432/meridian_test}\" && $command"
   fi
-  if [[ "$command" == *"playwright"* || "$command" == *"test:e2e"* || "$command" == *"browser-evidence"* || "$command" == *"lighthouse"* ]]; then
+  if command_is_browser_evidence_command "$command"; then
     local journey_slug audit_artifact_dir skip_runtime_quality
     journey_slug="$safe_label"
     audit_artifact_dir="$unit_dir/$journey_slug"
     skip_runtime_quality=0
     [[ "$REMEDIATION_EVIDENCE_MODE" == "targeted" ]] && skip_runtime_quality=1
-    wrapped_command="set -a; [ -f docs/ux/.creds ] && . docs/ux/.creds; set +a; export E2E_EMAIL=\"\${E2E_EMAIL:-\${email:-}}\" E2E_PASSWORD=\"\${E2E_PASSWORD:-\${password:-}}\" E2E_BASE_URL=\"\${E2E_BASE_URL:-\${url:-}}\" E2E_API_BASE=\"\${E2E_API_BASE:-\${api_url:-}}\" PORTAL_AUDIT_RUN_DIR=\"$REMEDIATION_DIR\" PORTAL_AUDIT_JOB_ID=\"$unit_id\" PORTAL_AUDIT_JOURNEY_SLUG=\"$journey_slug\" PORTAL_AUDIT_ARTIFACT_DIR=\"$audit_artifact_dir\" PORTAL_AUDIT_EVIDENCE_MODE=\"$REMEDIATION_EVIDENCE_MODE\" PORTAL_AUDIT_SKIP_RUNTIME_QUALITY=\"\${PORTAL_AUDIT_SKIP_RUNTIME_QUALITY:-$skip_runtime_quality}\"; if [[ -n \"\${E2E_BASE_URL:-}\" && \"\$E2E_BASE_URL\" != http://* && \"\$E2E_BASE_URL\" != https://* ]]; then export E2E_BASE_URL=\"https://\$E2E_BASE_URL\"; fi; if [[ -z \"\${E2E_API_BASE:-}\" && \"\$E2E_BASE_URL\" =~ ^https?://([^/:]+)(:[0-9]+)?/?$ && \"\${BASH_REMATCH[1]}\" != localhost && \"\${BASH_REMATCH[1]}\" != 127.* ]]; then export E2E_API_BASE=\"https://api-\${BASH_REMATCH[1]}\"; fi; $wrapped_command"
+    wrapped_command="$(browser_evidence_env_preamble "$unit_id" "$journey_slug" "$audit_artifact_dir" "$skip_runtime_quality")
+$wrapped_command"
   fi
 
   run_script="$(mktemp "$unit_dir/${safe_label}.XXXXXX.sh")"

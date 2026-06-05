@@ -271,6 +271,10 @@ grep -q 'unit_has_native_test_artifact_findings' "$SCRIPT_DIR/run-remediation.sh
 grep -q 'preserving unit-generated script/log for verifier' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test artifact preservation log missing"
 grep -q 'artifacts/verify-\$unit_id.md' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test artifact verifier-report fallback missing"
 grep -q 'stale selector.+native-test' "$SCRIPT_DIR/run-remediation.sh" || fail "native-test stale selector fallback missing"
+grep -q 'browser_evidence_env_preamble' "$SCRIPT_DIR/run-remediation.sh" || fail "browser evidence env preamble missing"
+grep -q 'Meridian dev VPS is split-subdomain' "$SCRIPT_DIR/run-remediation.sh" || fail "Meridian split-subdomain guard missing"
+grep -q 'ensure_browser_vps_deploy_ready' "$SCRIPT_DIR/run-remediation.sh" || fail "Meridian browser deploy preflight missing"
+grep -q 'scripts/deploy-runtime dev' "$SCRIPT_DIR/run-remediation.sh" || fail "Meridian deploy-runtime guidance missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi
