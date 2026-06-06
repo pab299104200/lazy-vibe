@@ -1176,6 +1176,8 @@ def strip_command_text(text: str) -> str:
 def remove_task_scoping_phrases(text: str) -> str:
     """Ignore explicit in-plan sequencing; still reject open-ended deferrals."""
     text = text.replace("follow-up assertions", "")
+    text = re.sub(r"\bfound\s+no\s+[a-z0-9_ .,;:/-]*?\btodo/fixme\s+markers?\b", "", text)
+    text = re.sub(r"\bno\s+[a-z0-9_ .,;:/-]*?\btodo/fixme\s+markers?\b", "", text)
     text = re.sub(r"\bfuture\s+[a-z0-9_ ./-]*?\s+plan\s+(?:entries|metadata|references)\b", "", text)
     text = re.sub(r"\bfuture\s+[a-z0-9_ ./-]*?\s+task\s+(?:verification|metadata|references)\b", "", text)
     text = re.sub(

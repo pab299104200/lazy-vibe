@@ -162,7 +162,11 @@ assert "docs/new-feature/fixture.md:1:# Fixture" in result.output
 assert not contains_deferral_marker(
     "Replaced stale future workload-identity plan entries so later task verification uses the package path."
 )
+assert not contains_deferral_marker(
+    "Residue scan found no stale routes, TODO/FIXME markers, or stub paths in changed files."
+)
 assert contains_deferral_marker("Leave the product integration for future work.")
+assert contains_deferral_marker("TODO: implement the product integration later.")
 PY
 
 cat > "$run_dir/tasks.json" <<'EOF'
