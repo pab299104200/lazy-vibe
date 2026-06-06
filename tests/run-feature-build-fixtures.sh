@@ -149,7 +149,7 @@ PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" REPO="$repo" python3 - <<'PY
 import os
 from pathlib import Path
 
-from lazy_vibe.feature_build.runner import run_shell
+from lazy_vibe.feature_build.runner import contains_deferral_marker, run_shell
 
 repo = Path(os.environ["REPO"])
 result = run_shell(
@@ -159,6 +159,10 @@ result = run_shell(
 )
 assert result.returncode == 0, result
 assert "docs/new-feature/fixture.md:1:# Fixture" in result.output
+assert not contains_deferral_marker(
+    "Replaced stale future workload-identity plan entries so later task verification uses the package path."
+)
+assert contains_deferral_marker("Leave the product integration for future work.")
 PY
 
 cat > "$run_dir/tasks.json" <<'EOF'
