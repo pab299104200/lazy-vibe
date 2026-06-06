@@ -420,9 +420,90 @@ def run_shell(
         check=False,
     )
     output = completed.stdout or ""
+    if completed.returncode == 127 and is_rg_verification_command(command):
+        fallback = run_rg_verification_fallback(command, cwd)
+        if fallback.returncode != 127:
+            output = fallback.output
+            completed_returncode = fallback.returncode
+        else:
+            completed_returncode = completed.returncode
+    else:
+        completed_returncode = completed.returncode
     if log_path is not None:
         write_text(log_path, output)
-    return CommandResult(command=command, returncode=completed.returncode, output=output)
+    return CommandResult(command=command, returncode=completed_returncode, output=output)
+
+
+def is_rg_verification_command(command: str) -> bool:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] == "rg"
+
+
+def run_rg_verification_fallback(command: str, cwd: Path) -> CommandResult:
+    try:
+        parts = shlex.split(command)
+    except ValueError as exc:
+        return CommandResult(command=command, returncode=127, output=f"rg fallback parse failed: {exc}\n")
+    if not parts or parts[0] != "rg":
+        return CommandResult(command=command, returncode=127, output="")
+
+    show_line_numbers = False
+    index = 1
+    while index < len(parts) and parts[index].startswith("-"):
+        option = parts[index]
+        if option == "-n":
+            show_line_numbers = True
+            index += 1
+            continue
+        return CommandResult(
+            command=command,
+            returncode=127,
+            output=f"rg fallback does not support option: {option}\n",
+        )
+    if index >= len(parts):
+        return CommandResult(command=command, returncode=127, output="rg fallback missing pattern\n")
+    pattern = parts[index]
+    paths = parts[index + 1 :]
+    if not paths:
+        return CommandResult(command=command, returncode=127, output="rg fallback missing path(s)\n")
+
+    try:
+        regex = re.compile(pattern)
+    except re.error as exc:
+        return CommandResult(command=command, returncode=2, output=f"rg fallback regex error: {exc}\n")
+
+    output_lines: list[str] = []
+    missing: list[str] = []
+    for raw_path in paths:
+        path = (cwd / raw_path).resolve()
+        if not path.exists():
+            missing.append(raw_path)
+            continue
+        if path.is_dir():
+            candidates = [item for item in path.rglob("*") if item.is_file()]
+        else:
+            candidates = [path]
+        for candidate in candidates:
+            try:
+                lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            display = str(candidate.relative_to(cwd)) if candidate.is_relative_to(cwd) else str(candidate)
+            for line_number, line in enumerate(lines, start=1):
+                if regex.search(line):
+                    if show_line_numbers:
+                        output_lines.append(f"{display}:{line_number}:{line}")
+                    else:
+                        output_lines.append(f"{display}:{line}")
+    if missing:
+        output_lines.append("rg fallback missing path(s): " + ", ".join(missing))
+        return CommandResult(command=command, returncode=2, output="\n".join(output_lines) + "\n")
+    if not output_lines:
+        return CommandResult(command=command, returncode=1, output="")
+    return CommandResult(command=command, returncode=0, output="\n".join(output_lines) + "\n")
 
 
 def command_exists(name: str) -> bool:

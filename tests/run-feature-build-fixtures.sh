@@ -118,6 +118,22 @@ EOF
 run_feature_verify "$repo" "$run_dir" "$tmp_root/pass.out" ||
   fail "feature verify failed with complete result artifact: $(cat "$tmp_root/pass.out")"
 
+PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" REPO="$repo" python3 - <<'PY'
+import os
+from pathlib import Path
+
+from lazy_vibe.feature_build.runner import run_shell
+
+repo = Path(os.environ["REPO"])
+result = run_shell(
+    'rg -n "Fixture" docs/new-feature/fixture.md',
+    repo,
+    extra_env={"PATH": "/usr/bin:/bin"},
+)
+assert result.returncode == 0, result
+assert "docs/new-feature/fixture.md:1:# Fixture" in result.output
+PY
+
 cat > "$run_dir/tasks.json" <<'EOF'
 {
   "tasks": [
