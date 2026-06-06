@@ -2033,6 +2033,8 @@ def run_final_standard_gates(args: argparse.Namespace, root: Path, run_dir: Path
             repaired = repair_standard_gate(command, root, gate_dir, index)
             if repaired:
                 result = run_shell(command, root, log_file)
+            if result.returncode != 0:
+                result = retry_standard_gate_after_infra_flake(command, root, gate_dir, index, result)
             if result.returncode != 0 and repair_standard_gate_with_agent(
                 args,
                 command,
@@ -2043,6 +2045,8 @@ def run_final_standard_gates(args: argparse.Namespace, root: Path, run_dir: Path
                 result,
             ):
                 result = run_shell(command, root, log_file)
+            if result.returncode != 0:
+                result = retry_standard_gate_after_infra_flake(command, root, gate_dir, index, result)
             if result.returncode != 0:
                 raise RuntimeError(f"standard gate failed ({result.returncode}): {command}")
 
@@ -2073,6 +2077,45 @@ def standard_gate_repair_commands(command: str) -> list[str]:
         ]
     if normalized == "cd backend && python3 -m ruff format --check .":
         return ["cd backend && python3 -m ruff format ."]
+    return []
+
+
+def retry_standard_gate_after_infra_flake(
+    command: str,
+    root: Path,
+    gate_dir: Path,
+    index: int,
+    result: CommandResult,
+) -> CommandResult:
+    retries = standard_gate_infra_flake_retry_commands(command, result.output)
+    if not retries:
+        return result
+    last = result
+    for retry_index, retry_command in enumerate(retries, start=1):
+        print(f"[standard-gate-flake-retry] {retry_command}")
+        last = run_shell(
+            retry_command,
+            root,
+            gate_dir / f"{index:02d}.flake-retry-{retry_index:02d}.log",
+        )
+        if last.returncode == 0:
+            return last
+    return last
+
+
+def standard_gate_infra_flake_retry_commands(command: str, output: str) -> list[str]:
+    normalized = normalize_command_text(command)
+    lower = output.lower()
+    vitest_worker_timeout = (
+        "vitest-pool" in lower
+        and (
+            "timeout waiting for worker to respond" in lower
+            or "timeout starting forks runner" in lower
+            or "failed to start forks worker" in lower
+        )
+    )
+    if normalized == "cd frontend && npm run test" and vitest_worker_timeout:
+        return ["cd frontend && npm run test -- --pool=threads --maxWorkers=1"]
     return []
 
 

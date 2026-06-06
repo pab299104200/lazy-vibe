@@ -149,7 +149,11 @@ PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" REPO="$repo" python3 - <<'PY
 import os
 from pathlib import Path
 
-from lazy_vibe.feature_build.runner import contains_deferral_marker, run_shell
+from lazy_vibe.feature_build.runner import (
+    contains_deferral_marker,
+    run_shell,
+    standard_gate_infra_flake_retry_commands,
+)
 
 repo = Path(os.environ["REPO"])
 result = run_shell(
@@ -167,6 +171,14 @@ assert not contains_deferral_marker(
 )
 assert contains_deferral_marker("Leave the product integration for future work.")
 assert contains_deferral_marker("TODO: implement the product integration later.")
+assert standard_gate_infra_flake_retry_commands(
+    "cd frontend && npm run test",
+    "[vitest-pool]: Failed to start forks worker. Timeout waiting for worker to respond",
+) == ["cd frontend && npm run test -- --pool=threads --maxWorkers=1"]
+assert not standard_gate_infra_flake_retry_commands(
+    "cd frontend && npm run test",
+    "expected accessible name to match",
+)
 PY
 
 cat > "$run_dir/tasks.json" <<'EOF'
