@@ -226,6 +226,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--standard-gate-repair-agent",
+        default=os.getenv(
+            "FEATURE_BUILD_STANDARD_GATE_REPAIR_AGENT",
+            os.getenv("FEATURE_BUILD_IMPLEMENTER_AGENT", ""),
+        ),
+        help=(
+            "Optional agent used for one focused repair pass when a final standard gate fails "
+            "after deterministic repairs. Use codex, claude, or gemini."
+        ),
+    )
+    parser.add_argument(
         "--post-build-rounds",
         type=int,
         default=int(os.getenv("FEATURE_BUILD_POST_BUILD_ROUNDS", "1")),
@@ -1720,7 +1731,7 @@ def final_gates(args: argparse.Namespace, root: Path, run_dir: Path, state_file:
     if args.verify:
         verify_all(args, root, run_dir, state_file, state)
         if standard_gates_enabled(args):
-            run_final_standard_gates(root, run_dir)
+            run_final_standard_gates(args, root, run_dir)
             record_event(state_file, state, "standard_gates_complete")
         run_post_build_closeout(args, root, run_dir, state_file, state)
     if args.commit:
@@ -1736,7 +1747,7 @@ def final_gates(args: argparse.Namespace, root: Path, run_dir: Path, state_file:
         record_event(state_file, state, "deployed")
 
 
-def run_final_standard_gates(root: Path, run_dir: Path) -> None:
+def run_final_standard_gates(args: argparse.Namespace, root: Path, run_dir: Path) -> None:
     commands = merge_unique(backend_standard_commands(root) + frontend_standard_commands(root))
     if not commands:
         print("[standard-gates] no backend/frontend gates detected")
@@ -1745,9 +1756,112 @@ def run_final_standard_gates(root: Path, run_dir: Path) -> None:
     gate_dir.mkdir(parents=True, exist_ok=True)
     for index, command in enumerate(commands, start=1):
         print(f"[standard-gate] {command}")
-        result = run_shell(command, root, gate_dir / f"{index:02d}.log")
+        log_file = gate_dir / f"{index:02d}.log"
+        result = run_shell(command, root, log_file)
         if result.returncode != 0:
-            raise RuntimeError(f"standard gate failed ({result.returncode}): {command}")
+            repaired = repair_standard_gate(command, root, gate_dir, index)
+            if repaired:
+                result = run_shell(command, root, log_file)
+            if result.returncode != 0 and repair_standard_gate_with_agent(
+                args,
+                command,
+                root,
+                run_dir,
+                gate_dir,
+                index,
+                result,
+            ):
+                result = run_shell(command, root, log_file)
+            if result.returncode != 0:
+                raise RuntimeError(f"standard gate failed ({result.returncode}): {command}")
+
+
+def repair_standard_gate(command: str, root: Path, gate_dir: Path, index: int) -> bool:
+    repairs = standard_gate_repair_commands(command)
+    if not repairs:
+        return False
+    print(f"[standard-gate-repair] {command}")
+    for repair_index, repair_command in enumerate(repairs, start=1):
+        print(f"[standard-gate-repair] {repair_command}")
+        result = run_shell(
+            repair_command,
+            root,
+            gate_dir / f"{index:02d}.repair-{repair_index:02d}.log",
+        )
+        if result.returncode != 0:
+            return False
+    return True
+
+
+def standard_gate_repair_commands(command: str) -> list[str]:
+    normalized = normalize_command_text(command)
+    if normalized == "cd backend && python3 -m ruff check .":
+        return [
+            "cd backend && python3 -m ruff check --fix .",
+            "cd backend && python3 -m ruff format .",
+        ]
+    if normalized == "cd backend && python3 -m ruff format --check .":
+        return ["cd backend && python3 -m ruff format ."]
+    return []
+
+
+def repair_standard_gate_with_agent(
+    args: argparse.Namespace,
+    command: str,
+    root: Path,
+    run_dir: Path,
+    gate_dir: Path,
+    index: int,
+    result: CommandResult,
+) -> bool:
+    agent = str(getattr(args, "standard_gate_repair_agent", "") or "").strip().lower()
+    if not agent:
+        return False
+    prompt_file = gate_dir / f"{index:02d}.agent-repair.md"
+    log_file = gate_dir / f"{index:02d}.agent-repair.log"
+    prompt_file.write_text(
+        build_standard_gate_repair_prompt(args, command, root, run_dir, result),
+        encoding="utf-8",
+    )
+    print(f"[standard-gate-agent-repair] gate={index:02d} agent={agent} command={command}")
+    returncode = run_agent(agent, prompt_file, root, log_file, "advanced", None)
+    if returncode != 0:
+        print(f"[standard-gate-agent-repair] failed rc={returncode} log={log_file}")
+        return False
+    return True
+
+
+def build_standard_gate_repair_prompt(
+    args: argparse.Namespace,
+    command: str,
+    root: Path,
+    run_dir: Path,
+    result: CommandResult,
+) -> str:
+    output = result.output[-16000:]
+    return f"""You are repairing a failed final feature-build standard gate.
+
+Repository: {root}
+Feature: {args.feature}
+Run directory: {run_dir}
+Failed command: {command}
+
+{EXECUTION_PHILOSOPHY}
+
+Requirements:
+- Fix the real root cause in the active checkout.
+- Do not bypass, weaken, delete, or suppress the standard gate.
+- Do not add placeholder callers or fake evidence to satisfy dead-code checks.
+- If the failure identifies unused/dead API surface, remove it unless a real product caller should exist; if a caller should exist, implement the real product caller.
+- If the failure is formatting or lint cleanup, make the smallest correct code changes and preserve behavior.
+- Rerun the failed command before finishing.
+
+Failed command output:
+
+```text
+{output}
+```
+"""
 
 
 def run_post_build_closeout(
@@ -1804,7 +1918,7 @@ def run_post_build_closeout(
         record_event(state_file, state, "post_build_remediation_complete", round=round_index)
         verify_all(args, root, run_dir, state_file, state)
         if standard_gates_enabled(args):
-            run_final_standard_gates(root, run_dir)
+            run_final_standard_gates(args, root, run_dir)
 
     raise RuntimeError("post-build review/remediation rounds exhausted without accepted verdict")
 

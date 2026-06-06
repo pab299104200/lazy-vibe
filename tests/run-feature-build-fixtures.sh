@@ -30,6 +30,32 @@ run_feature_execute() {
       --execute >"$output" 2>&1
 }
 
+run_feature_verify_with_gates() {
+  local repo="$1" run_dir="$2" output="$3"
+  REPO_ROOT="$repo" \
+  FEATURE_BUILD_REQUIRE_REVIEW_TASKS=0 \
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lazy_vibe.feature_build \
+      --feature fixture \
+      --run-dir "$run_dir" \
+      --verify-only \
+      --verify >"$output" 2>&1
+}
+
+run_feature_verify_with_agent_repair() {
+  local repo="$1" run_dir="$2" output="$3" bin_dir="$4"
+  REPO_ROOT="$repo" \
+  FEATURE_BUILD_REQUIRE_REVIEW_TASKS=0 \
+  FEATURE_BUILD_IMPLEMENTER_AGENT=codex \
+  PATH="$bin_dir:$PATH" \
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lazy_vibe.feature_build \
+      --feature fixture \
+      --run-dir "$run_dir" \
+      --verify-only \
+      --verify >"$output" 2>&1
+}
+
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/lazy-vibe-feature-build.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
 
@@ -287,5 +313,106 @@ grep -q '\[already-ok\] task=T04' "$tmp_root/stale-running.out" ||
   fail "stale running task was not recovered and executed"
 grep -q '"status": "complete"' "$run_dir/tasks.json" ||
   fail "stale running task was not marked complete"
+
+rm -rf "$run_dir"
+mkdir -p "$run_dir/results" "$repo/backend"
+cat > "$repo/backend/pyproject.toml" <<'EOF'
+[tool.ruff]
+line-length = 100
+EOF
+cat > "$repo/backend/ruff_dirty.py" <<'EOF'
+import sys
+import os
+
+print("ok")
+EOF
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T05",
+      "title": "Standard gate repair",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["test -f feature.txt"]
+    }
+  ]
+}
+EOF
+
+cat > "$run_dir/results/T05.md" <<'EOF'
+# T05
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: test -f feature.txt -> pass
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+EOF
+
+run_feature_verify_with_gates "$repo" "$run_dir" "$tmp_root/standard-repair.out" ||
+  fail "standard gate repair failed: $(cat "$tmp_root/standard-repair.out")"
+grep -q '\[standard-gate-repair\] cd backend && python3 -m ruff check .' "$tmp_root/standard-repair.out" ||
+  fail "standard gate repair did not run for Ruff check"
+grep -q 'print("ok")' "$repo/backend/ruff_dirty.py" ||
+  fail "Ruff repair removed expected executable statement"
+
+rm -rf "$run_dir"
+mkdir -p "$run_dir/results" "$repo/frontend" "$tmp_root/bin"
+cat > "$repo/frontend/package.json" <<'EOF'
+{
+  "scripts": {
+    "lint": "test -f lint_fixed.txt"
+  },
+  "devDependencies": {}
+}
+EOF
+cat > "$tmp_root/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+touch frontend/lint_fixed.txt
+EOF
+chmod +x "$tmp_root/bin/codex"
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T06",
+      "title": "Agent standard gate repair",
+      "task_type": "frontend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["test -f feature.txt"]
+    }
+  ]
+}
+EOF
+
+cat > "$run_dir/results/T06.md" <<'EOF'
+# T06
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: test -f feature.txt -> pass
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+EOF
+
+run_feature_verify_with_agent_repair "$repo" "$run_dir" "$tmp_root/standard-agent-repair.out" "$tmp_root/bin" ||
+  fail "standard gate agent repair failed: $(cat "$tmp_root/standard-agent-repair.out")"
+grep -q '\[standard-gate-agent-repair\] gate=.*agent=codex' "$tmp_root/standard-agent-repair.out" ||
+  fail "standard gate agent repair was not dispatched"
+test -f "$repo/frontend/lint_fixed.txt" ||
+  fail "standard gate agent repair did not modify the active checkout"
 
 printf 'PASS feature-build fixture gates\n'
