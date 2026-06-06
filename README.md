@@ -54,7 +54,7 @@ The major harnesses are:
 |---|---|---|---|
 | Launch-readiness audit | `run-audit.sh` | shell + native probes | Runs discovery, runtime, browser, adversarial, and final-decision jobs against a product profile. |
 | Remediation | `run-remediation.sh` | shell state machine | Converts audit findings into blocker-ledger packets, plans implementation units, runs implementers/verifiers, drains safe queue actions, and writes summary/queue artifacts. |
-| Feature build | `run-feature-build.sh` | `lazy_vibe/feature_build/runner.py` | Decomposes an approved feature spec into tasks, runs task-scoped agents, verifies declared commands, and optionally commits/pushes/deploys. |
+| Feature build | `run-feature-build.sh` | `lazy_vibe/feature_build/runner.py` | Decomposes an approved feature spec into tasks, creates a feature branch, runs task-scoped agents, verifies declared commands, commits by default, and optionally pushes/deploys. |
 | Fixed-domain audits | `run-keystone-accounting-audit.sh`, `run-rmm-ops-automation-audit.sh` | shell wrappers | Run one specialized prompt for a narrow domain when the full launch-readiness pipeline is too broad. |
 | Committee loop | `commitee/agent_loop.py` | Python prototype | Experimental multi-agent deliberation harness using prompts and JSON schemas under `commitee/`. |
 
@@ -100,7 +100,7 @@ Before packet generation, remediation now builds a deterministic blocker ledger:
 
 This is intentionally deterministic. The cataloger may merge or split blocker-ledger rows, but it must preserve the original blocker ID and explain any split with current-code evidence. A broad audit with 40 failed jobs should not automatically become 40 unrelated implementation units when several jobs are repeating the same MSP, browser-evidence, RLS, connector, or stale-baseline defect.
 
-The feature-build phase reads an approved `docs/new-feature/<slug>.md` spec, asks a planner agent to decompose it into machine-readable tasks, executes those tasks with isolated prompts, verifies declared exit commands, and can commit, push, and deploy when all gates pass.
+The feature-build phase reads an approved `docs/new-feature/<slug>.md` spec, asks a planner agent to decompose it into machine-readable tasks, creates or switches to `feature/<slug>` by default for execution, executes tasks with isolated prompts, verifies declared exit commands, auto-commits successful verified builds, and can push or deploy when explicitly requested.
 
 Feature-specific UX audit and feature remediation are not separate control planes. UX, accessibility, and browser proof belong in `run-audit.sh`; scorecard and finding remediation belongs in `run-remediation.sh`. Thin feature-scoped wrappers are acceptable, but the audit and remediation scripts own state, retries, model routing, evidence, and final verdicts.
 
@@ -290,11 +290,10 @@ FEATURE_BUILD_REVIEWER_AGENT=claude \
   --feature customer-risk-notifications \
   --execute \
   --verify \
-  --commit \
   --push dev
 ```
 
-By default the spec is read from `docs/new-feature/<feature>.md` and state is written to `docs/plans/<feature>/`.
+By default the spec is read from `docs/new-feature/<feature>.md`, state is written to `docs/plans/<feature>/`, execution happens on `feature/<feature>`, and a verified successful build is committed with `feat: build <feature>`.
 
 ---
 
@@ -631,7 +630,7 @@ The harness is state-driven:
 6. The harness, not the agent, marks a task complete only after expected files exist, declared verification commands pass, and the task result artifact satisfies the closeout quality gate.
 7. The harness injects coding, UI, definition-of-done, route, and multi-layer contract standards into task prompts.
 8. The harness rejects deferral/workaround language by default.
-9. Optional post-build review and remediation commands can call the existing audit/remediation control planes before commit, push, and deploy.
+9. Optional post-build review and remediation commands can call the existing audit/remediation control planes before the default commit and any explicit push/deploy step.
 
 ### Environment variables
 
@@ -647,6 +646,9 @@ The harness is state-driven:
 | `FEATURE_BUILD_RESULT_QUALITY_GATES` | `1` | Require complete per-task result artifacts after agent execution and for already-complete tasks during verify-only runs. The result must include expected closeout sections, exact verification commands, no deferral language, and `Final status: complete`. |
 | `FEATURE_BUILD_REQUIRE_REVIEW_TASKS` | `1` | Reject plans that contain no review tasks. |
 | `FEATURE_BUILD_ALLOW_DEFERRALS` | `0` | Reject task plans containing deferral/workaround language unless explicitly enabled. |
+| `FEATURE_BUILD_AUTO_BRANCH` | `1` | Create or switch to the feature branch before execute runs. Set to `0` to require caller-managed branches. |
+| `FEATURE_BUILD_BRANCH` | `feature/<feature>` | Branch name used by the default branch step when `--branch` is not provided. |
+| `FEATURE_BUILD_AUTO_COMMIT` | `1` | Commit successful `--execute --verify` builds after final state is written. Set to `0` to leave changes uncommitted by default. |
 | `FEATURE_BUILD_POST_BUILD_REVIEW_COMMAND` | — | Optional independent review command after build verification. Receives `FEATURE_BUILD_FEATURE`, `FEATURE_BUILD_RUN_DIR`, `FEATURE_BUILD_SPEC`, and `FEATURE_BUILD_SCORECARD`. |
 | `FEATURE_BUILD_AUTO_REMEDIATE_COMMAND` | — | Optional remediation command run when the post-build review writes a revise/fail decision. Receives the same variables plus `FEATURE_BUILD_REVIEW_ROUND`. |
 | `FEATURE_BUILD_POST_BUILD_ROUNDS` | `1` | Maximum post-build review/remediation rounds. |
@@ -686,7 +688,10 @@ The harness is state-driven:
 | `--max-retries N` | Retry failed tasks N times. |
 | `--max-parallel N` | Run up to N ready DAG tasks in parallel. |
 | `--dry-run` | Print the task schedule without invoking agents. |
-| `--commit` | Commit changes after all gates pass. |
+| `--branch BRANCH` | Feature branch to create or use before execution. Defaults to `feature/<feature>`. |
+| `--no-branch` | Disable default feature branch creation/switching. |
+| `--commit` | Force a commit after all gates pass. Successful `--execute --verify` runs commit by default. |
+| `--no-commit` | Disable the default post-verify commit. |
 | `--commit-message MSG` | Commit message. Defaults to `feat: build <feature>`. |
 | `--push [REMOTE]` | Push the current branch after commit. Defaults to `origin`; use `--push dev` for the dev VPS remote. |
 | `--push-branch BRANCH` | Branch to push. Defaults to the current branch. |

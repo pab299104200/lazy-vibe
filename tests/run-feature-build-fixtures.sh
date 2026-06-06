@@ -43,6 +43,20 @@ run_feature_execute_with_fake_agent() {
       --execute >"$output" 2>&1
 }
 
+run_feature_execute_verify_with_fake_agent() {
+  local repo="$1" run_dir="$2" output="$3" bin_dir="$4"
+  REPO_ROOT="$repo" \
+  FEATURE_BUILD_REQUIRE_REVIEW_TASKS=0 \
+  FEATURE_BUILD_IMPLEMENTER_AGENT=codex \
+  PATH="$bin_dir:$PATH" \
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lazy_vibe.feature_build \
+      --feature fixture \
+      --run-dir "$run_dir" \
+      --execute \
+      --verify >"$output" 2>&1
+}
+
 run_feature_verify_with_gates() {
   local repo="$1" run_dir="$2" output="$3"
   REPO_ROOT="$repo" \
@@ -562,5 +576,62 @@ run_feature_verify_with_gates "$repo" "$run_dir" "$tmp_root/api-contract-with-do
   fail "API contract gate failed after docs were added: $(cat "$tmp_root/api-contract-with-docs.out")"
 grep -q 'api-contract-gate: API docs touched' "$run_dir"/verify/standard-gates/*.log ||
   fail "API contract gate did not report successful docs validation"
+
+auto_repo="$tmp_root/auto-branch-repo"
+auto_run_dir="$auto_repo/docs/plans/fixture"
+mkdir -p "$auto_repo/docs/new-feature" "$auto_run_dir" "$tmp_root/bin-auto-branch"
+git -C "$auto_repo" init -q
+git -C "$auto_repo" config user.email "fixture@example.com"
+git -C "$auto_repo" config user.name "Fixture"
+printf '# Fixture\n' > "$auto_repo/docs/new-feature/fixture.md"
+git -C "$auto_repo" add .
+git -C "$auto_repo" commit -qm "fixture baseline"
+cat > "$auto_run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T08",
+      "title": "Auto branch and commit",
+      "task_type": "docs",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "pending",
+      "files_expected": ["auto_feature.txt"],
+      "verification_commands": ["test -f auto_feature.txt"]
+    }
+  ]
+}
+EOF
+cat > "$tmp_root/bin-auto-branch/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf 'done\n' > auto_feature.txt
+mkdir -p docs/plans/fixture/results
+cat > docs/plans/fixture/results/T08.md <<'RESULT'
+# T08
+
+- Files created/modified: auto_feature.txt
+- Verification commands and outputs: test -f auto_feature.txt -> pass; test -d docs -> pass
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+RESULT
+EOF
+chmod +x "$tmp_root/bin-auto-branch/codex"
+
+run_feature_execute_verify_with_fake_agent "$auto_repo" "$auto_run_dir" "$tmp_root/auto-branch-commit.out" "$tmp_root/bin-auto-branch" ||
+  fail "auto branch/commit feature build failed: $(cat "$tmp_root/auto-branch-commit.out")"
+branch="$(git -C "$auto_repo" rev-parse --abbrev-ref HEAD)"
+[ "$branch" = "feature/fixture" ] ||
+  fail "feature build did not switch to default feature branch; got $branch"
+git -C "$auto_repo" log -1 --pretty=%s | grep -q 'feat: build fixture' ||
+  fail "feature build did not auto-commit with default message"
+git -C "$auto_repo" status --porcelain | grep -q '^$' &&
+  fail "git status unexpectedly printed an empty-line entry"
+[ -z "$(git -C "$auto_repo" status --porcelain)" ] ||
+  fail "auto-committed feature build left tracked changes dirty"
 
 printf 'PASS feature-build fixture gates\n'

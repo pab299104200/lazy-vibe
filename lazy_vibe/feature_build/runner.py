@@ -203,7 +203,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=int(os.getenv("FEATURE_BUILD_MAX_PARALLEL", "3")),
         help="Maximum ready tasks to run in parallel.",
     )
-    parser.add_argument("--commit", action="store_true", help="Commit repo changes after all gates pass.")
+    parser.add_argument(
+        "--branch",
+        help="Feature branch to create/use before execution. Defaults to feature/<feature>.",
+    )
+    parser.add_argument(
+        "--no-branch",
+        action="store_true",
+        help="Do not create or switch to a feature branch before execution.",
+    )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="Force a commit after all gates pass. Auto-commit is enabled by default for execute runs.",
+    )
+    parser.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Do not auto-commit after all gates pass.",
+    )
     parser.add_argument("--commit-message", help="Commit message.")
     parser.add_argument("--push", nargs="?", const="origin", help="Push after commit. Optional remote name.")
     parser.add_argument("--push-branch", help="Branch to push. Defaults to current branch.")
@@ -1898,17 +1916,98 @@ def final_gates(args: argparse.Namespace, root: Path, run_dir: Path, state_file:
             run_final_standard_gates(args, root, run_dir)
             record_event(state_file, state, "standard_gates_complete")
         run_post_build_closeout(args, root, run_dir, state_file, state)
-    if args.commit:
+
+
+def successful_build_closeout(
+    args: argparse.Namespace,
+    root: Path,
+    run_dir: Path,
+    state_file: Path,
+    state: dict[str, Any],
+) -> None:
+    should_commit = feature_build_commit_enabled(args)
+    should_push = bool(args.push)
+    should_deploy = bool(args.deploy_command)
+    if should_commit or should_push or should_deploy:
+        record_event(
+            state_file,
+            state,
+            "closeout_ready",
+            commit=should_commit,
+            push=args.push or "",
+            deploy=should_deploy,
+        )
+    if should_commit:
         commit_changes(args, root)
-        record_event(state_file, state, "committed")
-    if args.push:
+    if should_push:
         push_changes(args, root)
-        record_event(state_file, state, "pushed", remote=args.push)
-    if args.deploy_command:
+    if should_deploy:
         result = run_shell(args.deploy_command, root, run_dir / "logs" / "deploy.log")
         if result.returncode != 0:
             raise RuntimeError(f"deploy command failed: {args.deploy_command}")
-        record_event(state_file, state, "deployed")
+
+
+def feature_build_branch_enabled(args: argparse.Namespace) -> bool:
+    if args.no_branch:
+        return False
+    if not args.execute or args.verify_only or args.dry_run:
+        return False
+    raw = os.getenv("FEATURE_BUILD_AUTO_BRANCH", "1").strip().lower()
+    return raw not in FALSE_VALUES
+
+
+def feature_build_commit_enabled(args: argparse.Namespace) -> bool:
+    if args.no_commit:
+        return False
+    if args.commit:
+        return True
+    if not args.execute or not args.verify or args.verify_only or args.dry_run:
+        return False
+    raw = os.getenv("FEATURE_BUILD_AUTO_COMMIT", "1").strip().lower()
+    return raw not in FALSE_VALUES
+
+
+def default_feature_branch(feature: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._/-]+", "-", feature.strip())
+    slug = re.sub(r"-+", "-", slug).strip("-/")
+    return f"feature/{slug or 'feature-build'}"
+
+
+def feature_branch_name(args: argparse.Namespace) -> str:
+    return args.branch or os.getenv("FEATURE_BUILD_BRANCH") or default_feature_branch(args.feature)
+
+
+def is_git_repo(root: Path) -> bool:
+    return run_shell("git rev-parse --is-inside-work-tree", root).returncode == 0
+
+
+def ensure_feature_branch(args: argparse.Namespace, root: Path) -> None:
+    if not feature_build_branch_enabled(args):
+        return
+    if not is_git_repo(root):
+        print("[branch] not a git repository; skipping feature branch")
+        return
+    target = feature_branch_name(args)
+    current = current_branch(root)
+    if current == target:
+        print(f"[branch] {target}")
+        return
+    if git_branch_exists(root, target):
+        result = run_shell(f"git switch {shlex.quote(target)}", root)
+    else:
+        result = run_shell(f"git switch -c {shlex.quote(target)}", root)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"could not switch to feature branch {target!r}. "
+            "Commit/stash conflicting work or rerun with --no-branch.\n"
+            f"{result.output}"
+        )
+    print(f"[branch] {target}")
+
+
+def git_branch_exists(root: Path, branch: str) -> bool:
+    result = run_shell(f"git show-ref --verify --quiet {shlex.quote('refs/heads/' + branch)}", root)
+    return result.returncode == 0
 
 
 def run_final_standard_gates(args: argparse.Namespace, root: Path, run_dir: Path) -> None:
@@ -2107,6 +2206,9 @@ def read_post_build_decision(artifact_dir: Path) -> str:
 
 
 def commit_changes(args: argparse.Namespace, root: Path) -> None:
+    if not is_git_repo(root):
+        print("[commit] not a git repository; skipping")
+        return
     status = run_shell("git status --porcelain", root).output.strip()
     if not status:
         print("[commit] no changes")
@@ -2139,6 +2241,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     root = repo_root()
     spec, run_dir = resolve_paths(args, root)
+    ensure_feature_branch(args, root)
     state_file = run_dir / "state.json"
     tasks_file = run_dir / "tasks.json"
     state = load_state(state_file, args.feature, spec, tasks_file)
@@ -2154,6 +2257,7 @@ def main(argv: list[str] | None = None) -> int:
             final_gates(args, root, run_dir, state_file, state)
         state["phase"] = "complete"
         save_state(state_file, state)
+        successful_build_closeout(args, root, run_dir, state_file, state)
         print(f"Feature build state: {state_file}")
         return 0
     except Exception as exc:
