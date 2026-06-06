@@ -1383,6 +1383,7 @@ def execute_tasks(args: argparse.Namespace, root: Path, run_dir: Path, state_fil
         if not batch:
             break
         run_ready_batch(args, root, run_dir, state_file, state, tasks, batch)
+        refresh_task_contracts_from_disk(tasks, run_dir)
         save_task_state(run_dir, tasks)
 
     incomplete = [
@@ -1427,6 +1428,7 @@ def run_ready_batch(
             for future in done:
                 task = active.pop(future)
                 future.result()
+                refresh_task_contracts_from_disk(tasks, run_dir)
                 save_task_state(run_dir, tasks)
                 if next_index < len(batch):
                     next_task = batch[next_index]
@@ -1571,6 +1573,17 @@ def agent_for_task(task: Task) -> str:
 
 
 def render_task_prompt(task: Task, task_file: Path, result_file: Path) -> str:
+    previous_failure = ""
+    if task.last_error:
+        previous_failure = f"""
+Previous verifier failure that must be fixed in this attempt:
+
+```text
+{task.last_error}
+```
+
+If the failure is caused by stale or impossible task metadata, update both the task markdown and `tasks.json` to match the real repository contract, then rerun verification.
+"""
     return f"""Your complete assignment is in this task file:
 {task_file}
 
@@ -1580,6 +1593,7 @@ Mandatory execution philosophy and standards:
 Read the task file. Execute every item in scope. Do not work outside the declared task scope unless a small integration fix is required for the task verification to pass.
 
 Do the whole task. Do not defer, phase, postpone, stub, mock away, or create a workaround when the full implementation can be completed now.
+{previous_failure}
 
 Reduce future tech debt as part of the task. If your change replaces an older implementation path, remove or converge the legacy path now: stale code, duplicate helpers, hidden routes, old feature flags, obsolete docs/tests, placeholder UI/API surfaces, mocks, no-op shims, and compatibility glue. Keep a legacy path only when the task/spec names an explicit compatibility contract; if you keep one, document the contract and add verification that both the current path and the compatibility path behave correctly.
 
@@ -1603,7 +1617,65 @@ Result format:
 """
 
 
+def refresh_task_from_disk(task: Task, run_dir: Path) -> bool:
+    tasks_file = run_dir / "tasks.json"
+    if not tasks_file.exists():
+        return False
+    try:
+        current = {candidate.task_id: candidate for candidate in load_tasks(tasks_file)}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    fresh = current.get(task.task_id)
+    if fresh is None:
+        return False
+
+    changed = False
+    for attr in (
+        "title",
+        "task_type",
+        "depends_on",
+        "model_class",
+        "files_expected",
+        "verification_commands",
+    ):
+        value = getattr(fresh, attr)
+        if getattr(task, attr) != value:
+            setattr(task, attr, value)
+            changed = True
+    return changed
+
+
+def refresh_task_contracts_from_disk(tasks: list[Task], run_dir: Path) -> bool:
+    tasks_file = run_dir / "tasks.json"
+    if not tasks_file.exists():
+        return False
+    try:
+        current = {candidate.task_id: candidate for candidate in load_tasks(tasks_file)}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+    changed = False
+    for task in tasks:
+        fresh = current.get(task.task_id)
+        if fresh is None:
+            continue
+        for attr in (
+            "title",
+            "task_type",
+            "depends_on",
+            "model_class",
+            "files_expected",
+            "verification_commands",
+        ):
+            value = getattr(fresh, attr)
+            if getattr(task, attr) != value:
+                setattr(task, attr, value)
+                changed = True
+    return changed
+
+
 def verify_task(task: Task, root: Path, run_dir: Path, require_result: bool = False) -> tuple[bool, str]:
+    refresh_task_from_disk(task, run_dir)
     missing = [path for path in task.files_expected if not (root / path).exists()]
     if missing:
         return False, f"missing expected files: {', '.join(missing)}"

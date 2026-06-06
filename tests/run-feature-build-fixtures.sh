@@ -30,6 +30,19 @@ run_feature_execute() {
       --execute >"$output" 2>&1
 }
 
+run_feature_execute_with_fake_agent() {
+  local repo="$1" run_dir="$2" output="$3" bin_dir="$4"
+  REPO_ROOT="$repo" \
+  FEATURE_BUILD_REQUIRE_REVIEW_TASKS=0 \
+  FEATURE_BUILD_IMPLEMENTER_AGENT=codex \
+  PATH="$bin_dir:$PATH" \
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lazy_vibe.feature_build \
+      --feature fixture \
+      --run-dir "$run_dir" \
+      --execute >"$output" 2>&1
+}
+
 run_feature_verify_with_gates() {
   local repo="$1" run_dir="$2" output="$3"
   REPO_ROOT="$repo" \
@@ -242,7 +255,7 @@ cat > "$run_dir/results/T02.md" <<'EOF'
 # T02
 
 - Files created/modified: feature.txt
-- Verification commands and outputs: test -f feature.txt -> pass
+- Verification commands and outputs: test -f feature.txt -> pass; test -d backend -> pass
 - Issues encountered: none
 - Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
 - Boundary/failure/operability proof, or why not applicable: not applicable
@@ -329,6 +342,66 @@ grep -q '\[already-ok\] task=T04' "$tmp_root/stale-running.out" ||
   fail "stale running task was not recovered and executed"
 grep -q '"status": "complete"' "$run_dir/tasks.json" ||
   fail "stale running task was not marked complete"
+
+rm -rf "$run_dir"
+mkdir -p "$run_dir" "$tmp_root/bin-contract-refresh"
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T04B",
+      "title": "Refresh agent-repaired task contract",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "pending",
+      "files_expected": ["stale/old_model.py"],
+      "verification_commands": ["test -f feature.txt"]
+    }
+  ]
+}
+EOF
+cat > "$tmp_root/bin-contract-refresh/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+tasks_file = Path("docs/plans/fixture/tasks.json")
+data = json.loads(tasks_file.read_text())
+task = data["tasks"][0]
+task["files_expected"] = ["feature.txt"]
+task["last_error"] = ""
+tasks_file.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+result = Path("docs/plans/fixture/results/T04B.md")
+result.parent.mkdir(parents=True, exist_ok=True)
+result.write_text(
+    """# T04B
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: test -f feature.txt -> pass; test -d backend -> pass
+- Issues encountered: Repaired stale expected-file metadata from stale/old_model.py to feature.txt.
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+"""
+)
+PY
+EOF
+chmod +x "$tmp_root/bin-contract-refresh/codex"
+
+run_feature_execute_with_fake_agent "$repo" "$run_dir" "$tmp_root/contract-refresh.out" "$tmp_root/bin-contract-refresh" ||
+  fail "agent-repaired task contract was not refreshed in the same run: $(cat "$tmp_root/contract-refresh.out")"
+grep -q '\[ok\] task=T04B' "$tmp_root/contract-refresh.out" ||
+  fail "agent-repaired task contract did not close without a second run"
+grep -q '"files_expected": \[' "$run_dir/tasks.json" ||
+  fail "refreshed task contract was not persisted"
+grep -q '"feature.txt"' "$run_dir/tasks.json" ||
+  fail "refreshed expected file was not persisted"
 
 rm -rf "$run_dir"
 mkdir -p "$run_dir/results" "$repo/backend"
