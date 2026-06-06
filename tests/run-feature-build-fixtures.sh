@@ -96,6 +96,38 @@ cat > "$run_dir/tasks.json" <<'EOF'
 {
   "tasks": [
     {
+      "task_id": "T01",
+      "title": "API session feature",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["bash -c 'test -f feature.txt'"]
+    }
+  ]
+}
+EOF
+
+cat > "$run_dir/results/T01.md" <<'EOF'
+# T01
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: bash -c 'test -f feature.txt && echo ok' -> ok
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+EOF
+
+run_feature_verify "$repo" "$run_dir" "$tmp_root/bash-prefix-pass.out" ||
+  fail "feature verify failed when result documented a bash -c command with an echo suffix: $(cat "$tmp_root/bash-prefix-pass.out")"
+
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
       "task_id": "T02",
       "title": "Unverified implementation",
       "task_type": "backend",

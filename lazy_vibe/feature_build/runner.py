@@ -1504,7 +1504,9 @@ def verify_task_result_quality(task: Task, run_dir: Path) -> tuple[bool, str]:
         return False, "task result final status is not complete"
     if not result_has_complete_final_status(text):
         return False, "task result must declare `Final status: complete`"
-    missing_commands = [command for command in task.verification_commands if command not in text]
+    missing_commands = [
+        command for command in task.verification_commands if not result_documents_command(command, text)
+    ]
     if missing_commands:
         return False, (
             "task result does not list verification command(s): "
@@ -1527,6 +1529,30 @@ def result_has_complete_final_status(text: str) -> bool:
             normalized,
         )
     )
+
+
+def result_documents_command(command: str, text: str) -> bool:
+    if command in text:
+        return True
+    normalized_command = normalize_command_text(command)
+    normalized_text = normalize_command_text(text)
+    if normalized_command and normalized_command in normalized_text:
+        return True
+    shell_script = extract_bash_c_script(command)
+    if shell_script:
+        normalized_script = normalize_command_text(shell_script)
+        if normalized_script and normalized_script in normalized_text:
+            return True
+    return False
+
+
+def normalize_command_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip())
+
+
+def extract_bash_c_script(command: str) -> str:
+    match = re.search(r"\bbash\s+-c\s+(['\"])(.+?)\1", command, flags=re.DOTALL)
+    return match.group(2).strip() if match else ""
 
 
 def write_already_ok_result(task: Task, run_dir: Path) -> None:
