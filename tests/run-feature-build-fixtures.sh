@@ -140,4 +140,30 @@ grep -q 'Final status: complete' "$run_dir/results/T03.md" ||
 grep -q 'test -f feature.txt' "$run_dir/results/T03.md" ||
   fail "already-ok result artifact did not list verification command"
 
+rm -rf "$run_dir"
+mkdir -p "$run_dir"
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T04",
+      "title": "Recovered stale running task",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "running",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["test -f feature.txt"]
+    }
+  ]
+}
+EOF
+
+run_feature_execute "$repo" "$run_dir" "$tmp_root/stale-running.out" ||
+  fail "stale-running execution failed: $(cat "$tmp_root/stale-running.out")"
+grep -q '\[already-ok\] task=T04' "$tmp_root/stale-running.out" ||
+  fail "stale running task was not recovered and executed"
+grep -q '"status": "complete"' "$run_dir/tasks.json" ||
+  fail "stale running task was not marked complete"
+
 printf 'PASS feature-build fixture gates\n'

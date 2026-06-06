@@ -1207,10 +1207,24 @@ def ready_tasks(tasks: list[Task], only: set[str] | None) -> list[Task]:
     return ready
 
 
+def recover_stale_running_tasks(tasks: list[Task]) -> bool:
+    changed = False
+    for task in tasks:
+        if task.status != "running":
+            continue
+        task.status = "pending"
+        task.last_error = task.last_error or "Recovered stale running task from previous interrupted run."
+        changed = True
+    return changed
+
+
 def execute_tasks(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
     tasks_file = run_dir / "tasks.json"
     tasks = load_tasks(tasks_file)
+    changed = recover_stale_running_tasks(tasks)
     if enforce_task_contract(args, root, tasks):
+        changed = True
+    if changed:
         save_task_state(run_dir, tasks)
     only = selected_ids(args)
     prompts_dir = run_dir / "prompts"
@@ -1547,7 +1561,10 @@ def task_needs_operability_closeout(task: Task) -> bool:
 def verify_all(args: argparse.Namespace, root: Path, run_dir: Path, state_file: Path, state: dict[str, Any]) -> None:
     tasks_file = run_dir / "tasks.json"
     tasks = load_tasks(tasks_file)
+    changed = recover_stale_running_tasks(tasks)
     if enforce_task_contract(args, root, tasks):
+        changed = True
+    if changed:
         save_task_state(run_dir, tasks)
     only = selected_ids(args)
     failed: list[str] = []
