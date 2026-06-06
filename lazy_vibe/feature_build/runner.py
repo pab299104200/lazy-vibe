@@ -1479,13 +1479,13 @@ def verify_task(task: Task, root: Path, run_dir: Path, require_result: bool = Fa
         if result.returncode != 0:
             return False, f"command failed ({result.returncode}): {command}"
     if require_result or task.status == "complete":
-        ok, error = verify_task_result_quality(task, run_dir)
+        ok, error = verify_task_result_quality(task, root, run_dir)
         if not ok:
             return False, error
     return True, ""
 
 
-def verify_task_result_quality(task: Task, run_dir: Path) -> tuple[bool, str]:
+def verify_task_result_quality(task: Task, root: Path, run_dir: Path) -> tuple[bool, str]:
     if not result_quality_gates_enabled():
         return True, ""
     result_file = run_dir / "results" / f"{task.task_id}.md"
@@ -1505,7 +1505,7 @@ def verify_task_result_quality(task: Task, run_dir: Path) -> tuple[bool, str]:
     if not result_has_complete_final_status(text):
         return False, "task result must declare `Final status: complete`"
     missing_commands = [
-        command for command in task.verification_commands if not result_documents_command(command, text)
+        command for command in task.verification_commands if not result_documents_command(command, text, root)
     ]
     if missing_commands:
         return False, (
@@ -1531,23 +1531,50 @@ def result_has_complete_final_status(text: str) -> bool:
     )
 
 
-def result_documents_command(command: str, text: str) -> bool:
+def result_documents_command(command: str, text: str, root: Path) -> bool:
     if command in text:
         return True
-    normalized_command = normalize_command_text(command)
-    normalized_text = normalize_command_text(text)
-    if normalized_command and normalized_command in normalized_text:
-        return True
+    normalized_texts = {
+        normalize_command_text(text),
+        normalize_command_for_result_matching(text, root),
+    }
+    normalized_texts |= {quote_insensitive_command_text(value) for value in normalized_texts}
+    normalized_commands = {
+        normalize_command_text(command),
+        normalize_command_for_result_matching(command, root),
+    }
+    normalized_commands |= {quote_insensitive_command_text(value) for value in normalized_commands}
+    for normalized_command in normalized_commands:
+        if normalized_command and any(normalized_command in value for value in normalized_texts):
+            return True
     shell_script = extract_bash_c_script(command)
     if shell_script:
-        normalized_script = normalize_command_text(shell_script)
-        if normalized_script and normalized_script in normalized_text:
-            return True
+        normalized_scripts = {
+            normalize_command_text(shell_script),
+            normalize_command_for_result_matching(shell_script, root),
+        }
+        normalized_scripts |= {quote_insensitive_command_text(value) for value in normalized_scripts}
+        for normalized_script in normalized_scripts:
+            if normalized_script and any(normalized_script in value for value in normalized_texts):
+                return True
     return False
 
 
 def normalize_command_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip())
+
+
+def normalize_command_for_result_matching(value: str, root: Path) -> str:
+    normalized = normalize_command_text(value)
+    root_text = str(root.resolve())
+    escaped = re.escape(root_text.rstrip("/"))
+    normalized = re.sub(rf"\bcd\s+{escaped}/([^;&|]+)", r"cd \1", normalized)
+    normalized = re.sub(rf"\bcd\s+{escaped}\s*&&\s*", "", normalized)
+    return normalized
+
+
+def quote_insensitive_command_text(value: str) -> str:
+    return value.replace('"', "'")
 
 
 def extract_bash_c_script(command: str) -> str:

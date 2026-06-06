@@ -124,6 +124,39 @@ EOF
 run_feature_verify "$repo" "$run_dir" "$tmp_root/bash-prefix-pass.out" ||
   fail "feature verify failed when result documented a bash -c command with an echo suffix: $(cat "$tmp_root/bash-prefix-pass.out")"
 
+mkdir -p "$repo/backend"
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T01",
+      "title": "Backend migration proof",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["cd backend && printf 'iu0020s02svctok (head)\\n' | grep -E 'iu0020s02svctok \\(head\\)'"]
+    }
+  ]
+}
+EOF
+
+cat > "$run_dir/results/T01.md" <<EOF
+# T01
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: cd $repo/backend && printf 'iu0020s02svctok (head)\\n' | grep -E "iu0020s02svctok \\(head\\)" -> iu0020s02svctok (head)
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+EOF
+
+run_feature_verify "$repo" "$run_dir" "$tmp_root/repo-relative-command-pass.out" ||
+  fail "feature verify failed when result documented an equivalent absolute cd command: $(cat "$tmp_root/repo-relative-command-pass.out")"
+
 cat > "$run_dir/tasks.json" <<'EOF'
 {
   "tasks": [
