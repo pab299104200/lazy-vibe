@@ -1332,11 +1332,27 @@ def run_task(
     ok, error = verify_task(task, root, run_dir)
     if ok:
         write_already_ok_result(task, run_dir)
-        task.status = "complete"
-        task.last_error = ""
-        print(f"[already-ok] task={task.task_id}")
-        locked_record_event(state_lock, state_file, state, "task_already_complete", task_id=task.task_id)
-        return
+        result_ok, result_error = verify_task(task, root, run_dir, require_result=True)
+        if result_ok:
+            task.status = "complete"
+            task.last_error = ""
+            print(f"[already-ok] task={task.task_id}")
+            locked_record_event(state_lock, state_file, state, "task_already_complete", task_id=task.task_id)
+            return
+        if args.verify_only:
+            task.status = "failed"
+            task.last_error = result_error
+            locked_record_event(
+                state_lock,
+                state_file,
+                state,
+                "task_verify_only_failed",
+                task_id=task.task_id,
+                error=result_error,
+            )
+            raise RuntimeError(f"{task.task_id} verification failed: {result_error}")
+        task.last_error = result_error
+        print(f"[result-repair] task={task.task_id} {result_error}")
     if args.verify_only:
         task.status = "failed"
         task.last_error = error
@@ -1486,7 +1502,7 @@ def verify_task_result_quality(task: Task, run_dir: Path) -> tuple[bool, str]:
         )
     if any(marker in lower for marker in INCOMPLETE_RESULT_MARKERS):
         return False, "task result final status is not complete"
-    if "final status: complete" not in lower:
+    if not result_has_complete_final_status(text):
         return False, "task result must declare `Final status: complete`"
     missing_commands = [command for command in task.verification_commands if command not in text]
     if missing_commands:
@@ -1499,6 +1515,18 @@ def verify_task_result_quality(task: Task, run_dir: Path) -> tuple[bool, str]:
             "task result must document boundary/failure/operability proof or explicitly say not applicable"
         )
     return True, ""
+
+
+def result_has_complete_final_status(text: str) -> bool:
+    normalized = text.lower()
+    if "final status: complete" in normalized:
+        return True
+    return bool(
+        re.search(
+            r"final status\s*(?:\n|:)\s*(?:[-*]\s*)?(?:`+)?complete(?:`+)?\b",
+            normalized,
+        )
+    )
 
 
 def write_already_ok_result(task: Task, run_dir: Path) -> None:

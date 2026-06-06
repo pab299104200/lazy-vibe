@@ -83,7 +83,10 @@ cat > "$run_dir/results/T01.md" <<'EOF'
 - Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
 - Boundary/failure/operability proof, or why not applicable: not applicable
 - Documentation/contract updates, or why not applicable: not applicable
-- Final status: complete
+
+## Final status
+
+- `complete`
 EOF
 
 run_feature_verify "$repo" "$run_dir" "$tmp_root/pass.out" ||
