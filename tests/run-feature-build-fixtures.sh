@@ -50,7 +50,7 @@ cat > "$run_dir/tasks.json" <<'EOF'
       "model_class": "balanced",
       "status": "complete",
       "files_expected": ["feature.txt"],
-      "verification_commands": ["test -f feature.txt"]
+      "verification_commands": ["test -f feature.txt", "bash -c 'count=$(grep -c \"Fixture\" docs/new-feature/fixture.md); [ $count -ge 1 ]'"]
     }
   ]
 }
@@ -78,7 +78,7 @@ cat > "$run_dir/results/T01.md" <<'EOF'
 # T01
 
 - Files created/modified: feature.txt
-- Verification commands and outputs: test -f feature.txt -> pass
+- Verification commands and outputs: test -f feature.txt -> pass; bash -c 'count=$(grep -c "Fixture" docs/new-feature/fixture.md); echo "fixture references: $count"; [ $count -ge 1 ]' -> pass; `rg -n "TODO|FIXME|placeholder" feature.txt` -> no matches
 - Issues encountered: none
 - Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
 - Boundary/failure/operability proof, or why not applicable: not applicable
@@ -156,6 +156,60 @@ EOF
 
 run_feature_verify "$repo" "$run_dir" "$tmp_root/repo-relative-command-pass.out" ||
   fail "feature verify failed when result documented an equivalent absolute cd command: $(cat "$tmp_root/repo-relative-command-pass.out")"
+
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T01",
+      "title": "Python import proof",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["python3 -c \"assert 1 == 1\""]
+    },
+    {
+      "task_id": "T02",
+      "title": "Sequenced follow-on task",
+      "task_type": "backend",
+      "depends_on": ["T01"],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["feature.txt"],
+      "verification_commands": ["test -f feature.txt"]
+    }
+  ]
+}
+EOF
+
+cat > "$run_dir/results/T01.md" <<'EOF'
+# T01
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: python3 -c "assert 1 == 1; print('ok')" -> ok
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: runtime wiring is deferred to T02.
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: covered by later review gate task.
+- Final status: complete
+EOF
+
+cat > "$run_dir/results/T02.md" <<'EOF'
+# T02
+
+- Files created/modified: feature.txt
+- Verification commands and outputs: test -f feature.txt -> pass
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+EOF
+
+run_feature_verify "$repo" "$run_dir" "$tmp_root/python-prefix-sequencing-pass.out" ||
+  fail "feature verify rejected equivalent python -c proof or scoped task sequencing: $(cat "$tmp_root/python-prefix-sequencing-pass.out")"
 
 cat > "$run_dir/tasks.json" <<'EOF'
 {

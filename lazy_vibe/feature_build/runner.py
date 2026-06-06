@@ -1049,12 +1049,45 @@ def reject_deferral_tasks(tasks: list[Task]) -> None:
 
 
 def contains_deferral_marker(value: str | None) -> bool:
-    text = (value or "").lower()
+    text = strip_command_text(value or "").lower()
     if not text:
         return False
     for phrase in NON_DEFERRAL_PHRASES:
         text = text.replace(phrase, "")
+    text = remove_task_scoping_phrases(text)
     return any(re.search(rf"(?<![a-z0-9_-]){re.escape(marker)}(?![a-z0-9_-])", text) for marker in DEFERRAL_MARKERS)
+
+
+def strip_command_text(text: str) -> str:
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    return re.sub(r"`[^`]*`", " ", text)
+
+
+def remove_task_scoping_phrases(text: str) -> str:
+    """Ignore explicit in-plan sequencing; still reject open-ended deferrals."""
+    text = text.replace("follow-up assertions", "")
+    text = re.sub(
+        r"\b(?:deferred|handled|owned|covered|scoped)\s+(?:to|by)\s+(?:t|r)\d+\b",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"\b(?:later|following)\s+[a-z0-9_ ./-]*?(?:task|tasks|review gate)\b",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"\btask\s+explicitly\s+scopes\s+[a-z0-9_ ./-]*?\s+to\s+(?:t|r)\d+(?:-(?:t|r)\d+)?\b",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"\b(?:t|r)\d+\s+(?:marks?|scopes?|scoped)\s+[a-z0-9_ ./-]*?\s+(?:as\s+)?out of scope\b",
+        "",
+        text,
+    )
+    text = re.sub(r"\b(?:t|r)\d+\s+explicitly\s+scoped\s+those\s+out\b", "", text)
+    return text
 
 
 def merge_unique(values: list[str]) -> list[str]:
@@ -1543,6 +1576,7 @@ def result_documents_command(command: str, text: str, root: Path) -> bool:
         normalize_command_text(command),
         normalize_command_for_result_matching(command, root),
     }
+    normalized_commands |= command_prefix_candidates(normalized_commands)
     normalized_commands |= {quote_insensitive_command_text(value) for value in normalized_commands}
     for normalized_command in normalized_commands:
         if normalized_command and any(normalized_command in value for value in normalized_texts):
@@ -1553,6 +1587,7 @@ def result_documents_command(command: str, text: str, root: Path) -> bool:
             normalize_command_text(shell_script),
             normalize_command_for_result_matching(shell_script, root),
         }
+        normalized_scripts |= command_prefix_candidates(normalized_scripts)
         normalized_scripts |= {quote_insensitive_command_text(value) for value in normalized_scripts}
         for normalized_script in normalized_scripts:
             if normalized_script and any(normalized_script in value for value in normalized_texts):
@@ -1570,11 +1605,20 @@ def normalize_command_for_result_matching(value: str, root: Path) -> str:
     escaped = re.escape(root_text.rstrip("/"))
     normalized = re.sub(rf"\bcd\s+{escaped}/([^;&|]+)", r"cd \1", normalized)
     normalized = re.sub(rf"\bcd\s+{escaped}\s*&&\s*", "", normalized)
+    normalized = re.sub(r";\s*echo\s+(['\"]).*?\1", "", normalized)
     return normalized
 
 
 def quote_insensitive_command_text(value: str) -> str:
     return value.replace('"', "'")
+
+
+def command_prefix_candidates(commands: set[str]) -> set[str]:
+    candidates: set[str] = set()
+    for command in commands:
+        if command.endswith(("'", '"')):
+            candidates.add(command[:-1])
+    return candidates
 
 
 def extract_bash_c_script(command: str) -> str:
