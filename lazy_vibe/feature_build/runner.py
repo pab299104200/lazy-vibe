@@ -916,7 +916,7 @@ Requirements:
 - Task verification commands must be targeted to the task surface. Do not put full-suite commands such as `cd backend && python3 -m pytest`, `cd backend && pytest`, `cd frontend && npm run test`, or `cd frontend && npm run build` in individual tasks. Full suites are final gates after all tasks complete.
 - Include coding-standard, UI-standard, and definition-of-done verification where relevant.
 - For API, permission, tenant, RBAC, destructive-action, lifecycle, connector, webhook, job, retry, or audit-sensitive work, include boundary/failure verification commands that prove negative paths and operator-visible failure behavior, not only happy paths.
-- Include documentation/contract tasks when routes, APIs, permissions, lifecycle states, audit events, jobs, external integrations, or operator workflows change.
+- Include documentation/contract tasks when routes, APIs, permissions, lifecycle states, audit events, jobs, external integrations, or operator workflows change. API contract documentation must cover endpoint purpose, request/response schemas, permission model, error cases, pagination/idempotency where relevant, lifecycle/state transitions, audit events, and examples. If the repo exposes OpenAPI, include OpenAPI generation or schema-diff proof.
 - Do not defer, phase, postpone, or mark feature requirements as future work unless the user explicitly accepted that deferral.
 - Do not create workaround tasks when a full implementation task is possible.
 - Include cleanup work in the same implementation graph. When a feature supersedes an older path, add tasks to delete or converge legacy code, hidden routes, stale API clients, obsolete tests/docs/config, placeholder surfaces, and compatibility shims unless an explicit product/API compatibility contract requires them.
@@ -1165,6 +1165,17 @@ def contract_gate_commands(root: Path, task: Task) -> list[str]:
     if any(path.startswith("docs/") for path in task.files_expected):
         commands.append("test -d docs")
     return commands
+
+
+def api_contract_gate_command(mode: str, files: list[str] | None = None) -> str:
+    module_root = shlex.quote(str(SCRIPT_ROOT))
+    command = (
+        f"PYTHONPATH={module_root} python3 -m lazy_vibe.feature_build.api_contract_gate "
+        f"--repo . --mode {shlex.quote(mode)}"
+    )
+    for path in files or []:
+        command += f" --task-file {shlex.quote(path)}"
+    return command
 
 
 def backend_standard_commands(root: Path, task: Task | None = None) -> list[str]:
@@ -1748,7 +1759,11 @@ def final_gates(args: argparse.Namespace, root: Path, run_dir: Path, state_file:
 
 
 def run_final_standard_gates(args: argparse.Namespace, root: Path, run_dir: Path) -> None:
-    commands = merge_unique(backend_standard_commands(root) + frontend_standard_commands(root))
+    commands = merge_unique(
+        backend_standard_commands(root)
+        + frontend_standard_commands(root)
+        + [api_contract_gate_command("final")]
+    )
     if not commands:
         print("[standard-gates] no backend/frontend gates detected")
         return

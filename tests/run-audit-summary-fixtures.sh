@@ -45,11 +45,13 @@ group	job_id	kind	title	output	ref
 01	01a-auth	discovery	Auth sessions	01-domain/01a-auth.md	PHASE 1A
 02	02a-browser	runtime	Browser workflow	02-runtime/02a-browser.md	PHASE 2A
 03	03a-contract	discovery	API contracts	03-contract/03a-contract.md	PHASE 3A
+04	04a-openapi	discovery	OpenAPI contract	04-contract/04a-openapi.md	PHASE 4A
 EOF
 
 cat > "$checkpoint" <<'EOF'
 01a-auth
 02a-browser
+04a-openapi
 EOF
 
 cat > "$run_dir/logs/01a-auth.log" <<'EOF'
@@ -79,6 +81,18 @@ cat > "$run_dir/logs/03a-contract.log" <<'EOF'
 [missing-output] runner exited without artifact
 EOF
 
+cat > "$run_dir/logs/04a-openapi.log" <<'EOF'
+RESULT: INCOMPLETE
+OpenAPI request schema and response schema docs do not match the route contract.
+EOF
+
+mkdir -p "$run_dir/artifacts/04-contract"
+cat > "$run_dir/artifacts/04-contract/04a-openapi.md" <<'EOF'
+# OpenAPI contract
+
+RESULT: INCOMPLETE
+EOF
+
 PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.audit.summary \
   --run-dir "$run_dir" \
   --jobs-file "$jobs_file" \
@@ -99,6 +113,7 @@ assert_tsv_field "$summary" 01a-auth result PASS
 assert_tsv_field "$summary" 02a-browser result INCOMPLETE
 assert_tsv_field "$summary" 02a-browser group 02
 grep -q 'class=runtime_or_browser_evidence' "$summary" || fail "browser remediation class missing"
+grep -q 'class=api_contract' "$summary" || fail "OpenAPI/API contract remediation class missing"
 grep -q 'native_artifacts=' "$summary" || fail "native artifact context missing"
 grep -q 'class=audit_output_missing' "$summary" || fail "missing-output class missing"
 grep -q 'Remediation context' "$next_actions" || fail "next-actions context column missing"

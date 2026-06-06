@@ -415,4 +415,63 @@ grep -q '\[standard-gate-agent-repair\] gate=.*agent=codex' "$tmp_root/standard-
 test -f "$repo/frontend/lint_fixed.txt" ||
   fail "standard gate agent repair did not modify the active checkout"
 
+rm -rf "$run_dir" "$repo/backend" "$repo/frontend"
+mkdir -p "$run_dir/results" "$repo/backend/routers"
+git -C "$repo" init -q
+git -C "$repo" config user.email "fixture@example.com"
+git -C "$repo" config user.name "Fixture"
+git -C "$repo" add .
+git -C "$repo" commit -qm "fixture baseline"
+cat > "$repo/backend/routers/api_contract_fixture.py" <<'EOF'
+def route_contract_fixture():
+    return {"ok": True}
+EOF
+cat > "$run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T07",
+      "title": "API contract gate",
+      "task_type": "backend",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "complete",
+      "files_expected": ["backend/routers/api_contract_fixture.py"],
+      "verification_commands": ["test -f backend/routers/api_contract_fixture.py"]
+    }
+  ]
+}
+EOF
+
+cat > "$run_dir/results/T07.md" <<'EOF'
+# T07
+
+- Files created/modified: backend/routers/api_contract_fixture.py
+- Verification commands and outputs: test -f backend/routers/api_contract_fixture.py -> pass; test -f /home/pete/cadres/shared/templates/route-acceptance-checklist.md -> pass; test -d backend -> pass
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+EOF
+
+if run_feature_verify_with_gates "$repo" "$run_dir" "$tmp_root/api-contract-missing-docs.out"; then
+  fail "API contract gate unexpectedly passed without docs"
+fi
+grep -q 'API surface changed without contract documentation updates' "$run_dir"/verify/standard-gates/*.log ||
+  fail "API contract gate did not explain missing docs: $(cat "$tmp_root/api-contract-missing-docs.out")"
+
+mkdir -p "$repo/docs/functional"
+cat > "$repo/docs/functional/api-contract-fixture.md" <<'EOF'
+# API contract fixture
+
+Documents endpoint purpose, request schema, response schema, permissions, errors,
+audit events, state transitions, idempotency, pagination, and examples.
+EOF
+
+run_feature_verify_with_gates "$repo" "$run_dir" "$tmp_root/api-contract-with-docs.out" ||
+  fail "API contract gate failed after docs were added: $(cat "$tmp_root/api-contract-with-docs.out")"
+grep -q 'api-contract-gate: API docs touched' "$run_dir"/verify/standard-gates/*.log ||
+  fail "API contract gate did not report successful docs validation"
+
 printf 'PASS feature-build fixture gates\n'
