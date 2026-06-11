@@ -35,6 +35,9 @@ def test_new_to_risk_accepted_is_pete_only_and_needs_review_by():
     f3 = make_finding()
     t(f3, "risk_accepted", by="pete", review_by="2026-09-01")
     assert f3.review_by == "2026-09-01"
+    f4 = make_finding()
+    with pytest.raises(TransitionError, match="ISO date"):
+        t(f4, "risk_accepted", by="pete", review_by="next quarter")
 
 
 def test_in_remediation_to_fixed_requires_regression_test():
@@ -78,11 +81,20 @@ def test_illegal_transition_rejected():
 def test_reaffirm_risk_updates_review_by_with_history():
     f = make_finding(disposition="risk_accepted", disposition_by="pete",
                      review_by="2026-06-01")
-    reaffirm_risk(f, review_by="2026-12-01", by="pete", now=NOW)
+    reaffirm_risk(f, review_by="2026-12-01", by="pete", now=NOW,
+                  reason="customer launch slipped")
     assert f.review_by == "2026-12-01"
     assert f.history[-1]["event"] == "risk_reaffirmed"
+    assert f.history[-1]["reason"] == "customer launch slipped"
     with pytest.raises(TransitionError, match="pete"):
-        reaffirm_risk(f, review_by="2027-01-01", by="policy:x", now=NOW)
+        reaffirm_risk(f, review_by="2027-01-01", by="policy:x", now=NOW,
+                      reason="customer launch slipped")
     g = make_finding()  # not risk_accepted
     with pytest.raises(TransitionError, match="risk_accepted"):
-        reaffirm_risk(g, review_by="2027-01-01", by="pete", now=NOW)
+        reaffirm_risk(g, review_by="2027-01-01", by="pete", now=NOW,
+                      reason="customer launch slipped")
+    h = make_finding(disposition="risk_accepted", disposition_by="pete",
+                     review_by="2026-06-01")
+    with pytest.raises(TransitionError, match="ISO date"):
+        reaffirm_risk(h, review_by="whenever", by="pete", now=NOW,
+                      reason="x")

@@ -1,6 +1,8 @@
 """Disposition state machine (spec §4.2)."""
 from __future__ import annotations
 
+import datetime as _dt
+
 from .model import Disposition, Finding, RegisterError
 
 D = Disposition
@@ -8,6 +10,14 @@ D = Disposition
 
 class TransitionError(RegisterError):
     """Illegal or unguarded disposition transition."""
+
+
+def _require_iso_date(finding: Finding, value: str) -> None:
+    try:
+        _dt.date.fromisoformat(value)
+    except ValueError:
+        raise TransitionError(f"{finding.finding_id}: review_by must be an "
+                              f"ISO date (YYYY-MM-DD), got {value!r}") from None
 
 
 def _require_pete_or_policy(finding: Finding, by: str, kw: dict) -> None:
@@ -38,6 +48,7 @@ def _guard_risk_accept(finding: Finding, by: str, kw: dict) -> None:
                               f"authority 'pete', got {by!r}")
     if not kw.get("review_by"):
         raise TransitionError(f"{finding.finding_id}: risk_accepted requires review_by")
+    _require_iso_date(finding, kw["review_by"])
 
 
 def _guard_fixed(finding: Finding, by: str, kw: dict) -> None:
@@ -106,7 +117,8 @@ def transition(finding: Finding, to: Disposition, *, by: str, reason: str,
     finding.validate()
 
 
-def reaffirm_risk(finding: Finding, *, review_by: str, by: str, now: str) -> None:
+def reaffirm_risk(finding: Finding, *, review_by: str, by: str, now: str,
+                  reason: str) -> None:
     """Extend a risk acceptance's review date (spec §4.2 anti-debt guard)."""
     if Disposition(finding.disposition) is not D.RISK_ACCEPTED:
         raise TransitionError(f"{finding.finding_id}: reaffirm requires "
@@ -114,8 +126,10 @@ def reaffirm_risk(finding: Finding, *, review_by: str, by: str, now: str) -> Non
     if by != "pete":
         raise TransitionError(f"{finding.finding_id}: reaffirm requires "
                               f"authority 'pete', got {by!r}")
+    _require_iso_date(finding, review_by)
     old = finding.review_by
     finding.review_by = review_by
     finding.history.append({"ts": now, "event": "risk_reaffirmed",
-                            "from": old, "to": review_by, "by": by})
+                            "from": old, "to": review_by, "by": by,
+                            "reason": reason})
     finding.validate()

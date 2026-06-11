@@ -332,6 +332,9 @@ def test_new_to_risk_accepted_is_pete_only_and_needs_review_by():
     f3 = make_finding()
     t(f3, "risk_accepted", by="pete", review_by="2026-09-01")
     assert f3.review_by == "2026-09-01"
+    f4 = make_finding()
+    with pytest.raises(TransitionError, match="ISO date"):
+        t(f4, "risk_accepted", by="pete", review_by="next quarter")
 
 
 def test_in_remediation_to_fixed_requires_regression_test():
@@ -375,14 +378,23 @@ def test_illegal_transition_rejected():
 def test_reaffirm_risk_updates_review_by_with_history():
     f = make_finding(disposition="risk_accepted", disposition_by="pete",
                      review_by="2026-06-01")
-    reaffirm_risk(f, review_by="2026-12-01", by="pete", now=NOW)
+    reaffirm_risk(f, review_by="2026-12-01", by="pete", now=NOW,
+                  reason="customer launch slipped")
     assert f.review_by == "2026-12-01"
     assert f.history[-1]["event"] == "risk_reaffirmed"
+    assert f.history[-1]["reason"] == "customer launch slipped"
     with pytest.raises(TransitionError, match="pete"):
-        reaffirm_risk(f, review_by="2027-01-01", by="policy:x", now=NOW)
+        reaffirm_risk(f, review_by="2027-01-01", by="policy:x", now=NOW,
+                      reason="customer launch slipped")
     g = make_finding()  # not risk_accepted
     with pytest.raises(TransitionError, match="risk_accepted"):
-        reaffirm_risk(g, review_by="2027-01-01", by="pete", now=NOW)
+        reaffirm_risk(g, review_by="2027-01-01", by="pete", now=NOW,
+                      reason="customer launch slipped")
+    h = make_finding(disposition="risk_accepted", disposition_by="pete",
+                     review_by="2026-06-01")
+    with pytest.raises(TransitionError, match="ISO date"):
+        reaffirm_risk(h, review_by="whenever", by="pete", now=NOW,
+                      reason="x")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -398,6 +410,8 @@ Create `lazy_vibe/register/transitions.py`:
 """Disposition state machine (spec §4.2)."""
 from __future__ import annotations
 
+import datetime as _dt
+
 from .model import Disposition, Finding, RegisterError
 
 D = Disposition
@@ -405,6 +419,14 @@ D = Disposition
 
 class TransitionError(RegisterError):
     """Illegal or unguarded disposition transition."""
+
+
+def _require_iso_date(finding: Finding, value: str) -> None:
+    try:
+        _dt.date.fromisoformat(value)
+    except ValueError:
+        raise TransitionError(f"{finding.finding_id}: review_by must be an "
+                              f"ISO date (YYYY-MM-DD), got {value!r}") from None
 
 
 def _require_pete_or_policy(finding: Finding, by: str, kw: dict) -> None:
@@ -435,6 +457,7 @@ def _guard_risk_accept(finding: Finding, by: str, kw: dict) -> None:
                               f"authority 'pete', got {by!r}")
     if not kw.get("review_by"):
         raise TransitionError(f"{finding.finding_id}: risk_accepted requires review_by")
+    _require_iso_date(finding, kw["review_by"])
 
 
 def _guard_fixed(finding: Finding, by: str, kw: dict) -> None:
@@ -503,7 +526,8 @@ def transition(finding: Finding, to: Disposition, *, by: str, reason: str,
     finding.validate()
 
 
-def reaffirm_risk(finding: Finding, *, review_by: str, by: str, now: str) -> None:
+def reaffirm_risk(finding: Finding, *, review_by: str, by: str, now: str,
+                  reason: str) -> None:
     """Extend a risk acceptance's review date (spec §4.2 anti-debt guard)."""
     if Disposition(finding.disposition) is not D.RISK_ACCEPTED:
         raise TransitionError(f"{finding.finding_id}: reaffirm requires "
@@ -511,10 +535,12 @@ def reaffirm_risk(finding: Finding, *, review_by: str, by: str, now: str) -> Non
     if by != "pete":
         raise TransitionError(f"{finding.finding_id}: reaffirm requires "
                               f"authority 'pete', got {by!r}")
+    _require_iso_date(finding, review_by)
     old = finding.review_by
     finding.review_by = review_by
     finding.history.append({"ts": now, "event": "risk_reaffirmed",
-                            "from": old, "to": review_by, "by": by})
+                            "from": old, "to": review_by, "by": by,
+                            "reason": reason})
     finding.validate()
 ```
 
