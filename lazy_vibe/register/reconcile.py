@@ -8,6 +8,7 @@ from .fingerprint import compute, jaccard, normalize_path, title_tokens
 from .ingest import Candidate
 from .model import (PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Disposition,
                     Finding)
+from .scope import Scope, matches as _scope_matches
 from .store import RegisterStore, markdown_cell
 from .themes import map_theme
 from .transitions import transition
@@ -117,7 +118,7 @@ def _create_finding(findings: dict[str, Finding], candidate: Candidate,
 
 def reconcile(store: RegisterStore, candidates: list[Candidate],
               vocab: dict[str, list[str]], *, run_id: str,
-              date: str) -> ReconcileResult:
+              date: str, scope: Scope | None = None) -> ReconcileResult:
     result = ReconcileResult()
     with store.locked():
         findings = store.load()
@@ -169,6 +170,12 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
                                     "candidate_of": fuzzy_hit.finding_id,
                                     "run_id": run_id})
                 result.fuzzy.append((new.finding_id, fuzzy_hit.finding_id))
+            if scope is not None:
+                new.in_scope = _scope_matches(new, scope)
+                if not new.in_scope:
+                    transition(new, Disposition.PARKED, by="scope",
+                               reason="outside launch scope at creation",
+                               now=_now(date))
             findings[new.finding_id] = new
             index[new.fingerprint] = new
             result.new.append(new)

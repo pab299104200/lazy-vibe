@@ -109,3 +109,33 @@ def test_bad_gate_type_rejected(tmp_path):
     p.write_text(SCOPE_YAML.replace("type: command", "type: magic"))
     with pytest.raises(RegisterError, match="gate"):
         load_scope(p)
+
+
+def test_recompute_flags_and_proposals(tmp_path, scope):
+    from lazy_vibe.register.scope import recompute
+    from lazy_vibe.register.store import RegisterStore
+    store = RegisterStore(tmp_path / "register")
+    inside = with_history(make_finding(disposition="open",
+                                       disposition_by="pete"))
+    outside = make_finding(
+        finding_id="R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb",
+        fingerprint_inputs={"category": "product_gap", "theme": "t",
+                            "path": "backend/internal/billing.py",
+                            "symbol": "-"},
+        title="internal billing rounding", in_scope=True)
+    parked_now_in = with_history(make_finding(
+        finding_id="R-0003", fingerprint="sha256:cccccccccccccccc",
+        disposition="parked", disposition_by="scope", in_scope=False))
+    store.save({f.finding_id: f for f in (inside, outside, parked_now_in)})
+    proposals = recompute(store, scope, date="2026-06-12")
+    findings = store.load()
+    assert findings["R-0001"].in_scope is True
+    assert findings["R-0002"].in_scope is False
+    assert findings["R-0003"].in_scope is True
+    # dispositions unchanged — recompute only proposes (spec §12)
+    assert findings["R-0002"].disposition == "new"
+    assert findings["R-0003"].disposition == "parked"
+    kinds = {(p.finding_id, p.kind) for p in proposals}
+    assert ("R-0002", "park") in kinds
+    assert ("R-0003", "unpark") in kinds
+    assert findings["R-0002"].history[-1]["event"] == "scope_recomputed"

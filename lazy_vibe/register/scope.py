@@ -101,6 +101,13 @@ def load_scope(path: Path) -> Scope:
                  gates=tuple(gates))
 
 
+@dataclass(frozen=True)
+class ScopeProposal:
+    finding_id: str
+    kind: str       # "park" | "unpark"
+    reason: str
+
+
 def matches(finding: Finding, scope: Scope) -> bool:
     """Deterministic scope match: surface path-prefix against the finding's
     fingerprint path, or surface route substring against path/title.
@@ -116,3 +123,33 @@ def matches(finding: Finding, scope: Scope) -> bool:
         if any(route and route in haystack for route in surface.routes):
             return True
     return scope.default_in_scope
+
+
+def recompute(store, scope: Scope, *, date: str) -> list[ScopeProposal]:
+    """Re-evaluate in_scope across the register after a scope edit.
+
+    Flags are updated; dispositions are NOT changed — transitions surface
+    as proposals for the triage queue (spec §12)."""
+    proposals: list[ScopeProposal] = []
+    now = f"{date}T00:00:00+00:00"
+    with store.locked():
+        findings = store.load()
+        for finding in findings.values():
+            computed = matches(finding, scope)
+            if computed == finding.in_scope:
+                continue
+            finding.history.append({"ts": now, "event": "scope_recomputed",
+                                    "from": finding.in_scope, "to": computed,
+                                    "product": scope.product})
+            finding.in_scope = computed
+            if not computed and finding.disposition in (
+                    "new", "open", "in_remediation", "regressed"):
+                proposals.append(ScopeProposal(
+                    finding.finding_id, "park",
+                    "left launch scope after scope edit"))
+            elif computed and finding.disposition == "parked":
+                proposals.append(ScopeProposal(
+                    finding.finding_id, "unpark",
+                    "entered launch scope after scope edit"))
+        store.save(findings)
+    return proposals

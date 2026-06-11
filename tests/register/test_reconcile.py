@@ -237,3 +237,30 @@ def test_render_report_shows_fuzzy_duplicate_disposition(store, tmp_path):
     text = report_path.read_text()
     # Triager must see the duplicate target was adjudicated away.
     assert "R-0001 (risk_accepted)" in text
+
+
+def test_reconcile_with_scope_parks_out_of_scope_new(store, tmp_path):
+    from lazy_vibe.register.scope import load_scope
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text("product: meridian\ndefault_in_scope: false\n"
+                 "surfaces:\n  - slug: other\n    paths: ['frontend/']\n")
+    scope = load_scope(p)
+    result = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE,
+                       scope=scope)
+    f = store.load()[result.new[0].finding_id]
+    assert f.in_scope is False
+    assert f.disposition == "parked"
+    assert f.disposition_by == "scope"
+
+
+def test_reconcile_with_scope_keeps_in_scope_new(store, tmp_path):
+    from lazy_vibe.register.scope import load_scope
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text("product: meridian\ndefault_in_scope: false\n"
+                 "surfaces:\n  - slug: ev\n    paths: ['backend/routers/']\n")
+    scope = load_scope(p)
+    result = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE,
+                       scope=scope)
+    f = store.load()[result.new[0].finding_id]
+    assert f.in_scope is True
+    assert f.disposition == "new"
