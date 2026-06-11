@@ -94,6 +94,8 @@ _TRANSITIONS = {
     (D.RISK_ACCEPTED, D.OPEN): _guard_reopen_protected,
 }
 
+LEGAL_EDGES = frozenset(_TRANSITIONS)
+
 
 def transition(finding: Finding, to: Disposition, *, by: str, reason: str,
                now: str, **kw) -> None:

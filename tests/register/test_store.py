@@ -97,3 +97,34 @@ def test_load_rejects_hand_edited_disposition(store):
     store.jsonl_path.write_text(text)
     with pytest.raises(RegisterError, match="history"):
         store.load()
+
+
+def test_save_rejects_illegal_history_edge(store):
+    f = make_finding(disposition="fixed",
+                     regression_test="tests/test_x.py::test_y")
+    f.history.append({"ts": "t", "event": "disposition", "from": "new",
+                      "to": "fixed", "by": "x", "reason": "fabricated"})
+    with pytest.raises(RegisterError, match="illegal edge"):
+        store.save({f.finding_id: f})
+
+
+def test_save_rejects_broken_history_chain(store):
+    f = make_finding(disposition="in_remediation")
+    f.history.append({"ts": "t", "event": "disposition", "from": "open",
+                      "to": "in_remediation", "by": "x", "reason": "no start"})
+    with pytest.raises(RegisterError, match="chain"):
+        store.save({f.finding_id: f})
+
+
+def test_markdown_escapes_pipes_and_newlines(store):
+    f = make_finding(title="SQLi in users | OR 1=1")
+    store.save({f.finding_id: f})
+    md = store.markdown_path.read_text()
+    assert "SQLi in users \\| OR 1=1" in md
+
+
+def test_save_seeds_gitignore(store):
+    f = make_finding()
+    store.save({f.finding_id: f})
+    gi = (store.register_dir / ".gitignore").read_text()
+    assert ".register.lock" in gi and "*.tmp" in gi
