@@ -99,7 +99,9 @@ def _create_finding(findings: dict[str, Finding], candidate: Candidate,
                     f"(run {candidate.run_id}). References: {candidate.references}",
         severity=candidate.severity,
         severity_source="proposed",
-        taxonomy="G",  # taxonomy refinement (B/S/A/U/...) is a triage-stage concern (plan 2), like in_scope
+        # taxonomy from the source adapter; refinement is a triage-stage
+        # concern (plan 2b), like in_scope
+        taxonomy=candidate.taxonomy,
         in_scope=True,  # scope matching arrives with launch-scope.yaml (plan 2)
         disposition=Disposition.NEW.value,
         disposition_by="ingest",

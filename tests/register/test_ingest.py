@@ -129,3 +129,8 @@ def test_read_candidates_rejects_run_id_mismatch(ledger, tmp_path):
     path.write_text(out.read_text().replace('"run_id": "x"', '"run_id": "y"', 1))
     with pytest.raises(RegisterError, match="run_id"):
         read_candidates(path)
+
+
+def test_candidate_taxonomy_defaults_to_gap(ledger):
+    candidates = parse_ledger(ledger, run_id="x")
+    assert candidates[0].taxonomy == "G"

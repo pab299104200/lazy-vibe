@@ -218,6 +218,12 @@ def test_render_report_headline(store, tmp_path):
     assert "## New findings" in text
 
 
+def test_candidate_taxonomy_flows_to_finding(store):
+    c = cand(taxonomy="S")
+    result = reconcile(store, [c], VOCAB, run_id=RUN, date=DATE)
+    assert store.load()[result.new[0].finding_id].taxonomy == "S"
+
+
 def test_render_report_shows_fuzzy_duplicate_disposition(store, tmp_path):
     f = existing(disposition="risk_accepted", disposition_by="pete",
                  review_by="2026-12-01")

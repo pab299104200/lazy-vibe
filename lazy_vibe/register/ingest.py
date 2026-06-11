@@ -29,6 +29,7 @@ class Candidate:
     title: str
     references: str
     run_id: str
+    taxonomy: str = "G"
 
 
 def _validate_severity(value: str, where: str) -> None:
