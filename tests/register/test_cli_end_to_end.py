@@ -233,3 +233,29 @@ def test_bad_review_by_in_register_gives_clean_error(workspace, tmp_path):
     assert proc.returncode == 1
     assert "error:" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_narrowed_scope_parks_and_readiness_excludes(workspace, tmp_path):
+    """Composed flow: narrowed scope -> ingest parks out-of-scope P0 ->
+    readiness excludes it from blocking (final-review seam test)."""
+    _, register_dir, _, _ = workspace
+    (register_dir / "themes.yaml").write_text(
+        "themes:\n  widget:\n    patterns: []\n")
+    scorecard = tmp_path / "widget.md"
+    scorecard.write_text(SCORECARD_MD)  # B-01 path falls back to tmp scorecard
+    scope_path = register_dir / "launch-scope.yaml"
+    scope_path.write_text(
+        "product: testprod\ndefault_in_scope: false\n"
+        "surfaces:\n  - slug: backend\n    paths: ['backend/']\n"
+        "severity_bar:\n  P0: zero_open\n  P1: zero_open_or_risk_accepted\n"
+        "  P2: triaged\n")
+    proc = cli("scorecard-ingest", "--register-dir", str(register_dir),
+               "--scorecard", str(scorecard), "--slug", "widget",
+               "--run-id", "sc-1", "--date", "2026-06-11",
+               "--scope", str(scope_path))
+    assert proc.returncode == 0, proc.stderr
+    proc = cli("readiness", "--register-dir", str(register_dir),
+               "--scope", str(scope_path), "--date", "2026-06-11")
+    assert proc.returncode == 0, proc.stdout  # parked P0 must not block
+    assert "NOT READY" not in proc.stdout
+    assert "Parked: 1" in proc.stdout

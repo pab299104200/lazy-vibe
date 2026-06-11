@@ -65,6 +65,11 @@ def load_scope(path: Path) -> Scope:
     for raw in data.get("surfaces") or []:
         if not isinstance(raw, dict) or not raw.get("slug"):
             raise RegisterError(f"{path}: each surface needs a 'slug' mapping")
+        unknown = set(raw) - {"slug", "paths", "routes"}
+        if unknown:
+            raise RegisterError(
+                f"{path}: surface {raw['slug']!r}: unsupported keys "
+                f"{sorted(unknown)} (journeys/claims_doc arrive with plan 2b)")
         paths = raw.get("paths") or []
         routes = raw.get("routes") or []
         if not isinstance(paths, list) or not isinstance(routes, list):
@@ -102,8 +107,13 @@ def load_scope(path: Path) -> Scope:
         params = {k: v for k, v in raw.items() if k not in ("id", "type")}
         gates.append(Gate(gate_id=raw["id"], gate_type=gate_type,
                           params=params))
+    default_in_scope = data.get("default_in_scope", True)
+    if not isinstance(default_in_scope, bool):
+        raise RegisterError(
+            f"{path}: 'default_in_scope' must be a boolean, got "
+            f"{default_in_scope!r}")
     return Scope(product=product,
-                 default_in_scope=bool(data.get("default_in_scope", True)),
+                 default_in_scope=default_in_scope,
                  surfaces=tuple(surfaces),
                  severity_bar=dict(bar),
                  gates=tuple(gates))

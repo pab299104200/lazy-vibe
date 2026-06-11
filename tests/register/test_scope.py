@@ -146,3 +146,20 @@ def test_recompute_flags_and_proposals(tmp_path, scope):
     assert ("R-0002", "park") in kinds
     assert ("R-0003", "unpark") in kinds
     assert findings["R-0002"].history[-1]["event"] == "scope_recomputed"
+
+
+def test_quoted_default_in_scope_rejected(tmp_path):
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text(SCOPE_YAML.replace("default_in_scope: false",
+                                    'default_in_scope: "false"'))
+    with pytest.raises(RegisterError, match="boolean"):
+        load_scope(p)
+
+
+def test_unknown_surface_keys_rejected(tmp_path):
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text(SCOPE_YAML.replace(
+        'routes: ["/api/evidence"]',
+        'routes: ["/api/evidence"]\n    journeys: ["x"]'))
+    with pytest.raises(RegisterError, match="journeys"):
+        load_scope(p)
