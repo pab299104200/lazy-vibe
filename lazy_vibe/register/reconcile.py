@@ -28,6 +28,9 @@ class ReconcileResult:
     regressed: list[Finding] = field(default_factory=list)
     fuzzy: list[tuple[str, str]] = field(default_factory=list)  # (new_id, existing_id)
     theme_candidates: set[str] = field(default_factory=set)
+    # Post-reconcile register state, captured inside the lock so callers
+    # render the report without an unlocked second store.load().
+    findings: dict[str, Finding] = field(default_factory=dict)
 
 
 def _now(date: str) -> str:
@@ -123,6 +126,8 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
                 result.theme_candidates.add(theme)
             fingerprint = compute(candidate.category, theme, candidate.path, "-")
             existing = index.get(fingerprint)
+            # Fingerprint collision splitting (spec §12) requires the
+            # verifier machinery — plan 2.
             if existing is not None:
                 if existing.last_seen.get("run_id") == run_id:
                     # Within-run duplicate fingerprint or same-run replay:
@@ -150,6 +155,10 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
                     _review_severity(existing, candidate, date)
                     result.merged.append(existing)
                 continue
+            # `findings` already contains entries created earlier in this
+            # run: same-run siblings are intentionally fuzzy-matchable, so
+            # theme-fragmented duplicates of one underlying issue get linked
+            # for verifier merge (spec §5).
             fuzzy_hit = _find_fuzzy(findings, candidate)
             new = _create_finding(findings, candidate, theme, run_id, date)
             if fuzzy_hit is not None:
@@ -162,6 +171,7 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
             index[new.fingerprint] = new
             result.new.append(new)
         store.save(findings)
+        result.findings = findings
     return result
 
 

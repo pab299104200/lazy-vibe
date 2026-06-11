@@ -200,7 +200,11 @@ artifacts. For each blocker:
 2. **Fuzzy match** — candidate set: same `normalized_path` + `category`; match if
    Jaccard similarity of normalized title tokens ≥ 0.5. Deterministic (no
    embeddings). Result is routed to a verifier agent as "probable duplicate of
-   R-NNNN: confirm or split"; confirm merges, split creates a new entry.
+   R-NNNN: confirm or split"; confirm merges, split creates a new entry. Fuzzy
+   matching deliberately includes entries created earlier in the same run:
+   theme-fragmented duplicates of one underlying issue are flagged for verifier
+   merge, and the report's disposition suffix (`(new)`) identifies same-run
+   hints.
 3. **No match** → create entry with disposition `new` → triage pipeline (§6).
 
 Output: `reconcile-report.md` — headline `N new, M suppressed, K regressed,

@@ -30,7 +30,7 @@ def _reconcile_candidates(register_dir: Path, candidates, run_id: str,
     vocab = load_vocabulary(register_dir / "themes.yaml")
     result = reconcile(store, candidates, vocab, run_id=run_id, date=date)
     report_path = register_dir / "reconcile-report.md"
-    render_report(result, store.load(), report_path, run_id=run_id)
+    render_report(result, result.findings, report_path, run_id=run_id)
     print(f"{len(result.new)} new, {len(result.suppressed)} suppressed, "
           f"{len(result.regressed)} regressed — report: {report_path}")
     return 0

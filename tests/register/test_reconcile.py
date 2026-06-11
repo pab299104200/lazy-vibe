@@ -41,6 +41,9 @@ def existing(**overrides):
 def test_no_match_creates_new_finding(store):
     result = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
     assert [f.finding_id for f in result.new] == ["R-0001"]
+    # Post-reconcile state travels with the result so callers can render
+    # the report without an unlocked second store.load().
+    assert set(result.findings) == {"R-0001"}
     loaded = store.load()
     f = loaded["R-0001"]
     assert f.disposition == "new"
@@ -120,6 +123,16 @@ def test_fuzzy_match_recorded_on_new_entry(store):
     assert new.history[-1]["event"] == "fuzzy_match_candidate"
     assert new.history[-1]["candidate_of"] == "R-0001"
     assert (result.new[0].finding_id, "R-0001") in result.fuzzy
+
+
+def test_same_run_siblings_fuzzy_link(store):
+    a = cand()
+    b = cand(blocker_id="B-0002", theme_raw="fragmented theme wording",
+             title="Evidence list endpoint not scoped to tenant")
+    result = reconcile(store, [a, b], VOCAB, run_id=RUN, date=DATE)
+    assert len(result.new) == 2
+    ids = [f.finding_id for f in result.new]
+    assert (ids[1], ids[0]) in result.fuzzy
 
 
 def test_unmapped_theme_becomes_candidate_theme(store):
