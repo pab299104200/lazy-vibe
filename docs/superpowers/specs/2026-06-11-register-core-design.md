@@ -152,6 +152,7 @@ States: `new`, `open`, `in_remediation`, `fixed`, `false_positive`,
 | new | false_positive | verifier returned UNSUPPORTED with disproving citation; auto if policy permits, else Pete |
 | new | parked | out of launch scope (scope matcher), or Pete |
 | new | risk_accepted | Pete only (policy may *propose*) |
+| open | risk_accepted | Pete only — accepting a verified-real risk (§6) |
 | open | in_remediation | remediation unit created for it |
 | in_remediation | fixed | verifier pass **and** `regression_test` set |
 | in_remediation | open | remediation unit failed/abandoned |

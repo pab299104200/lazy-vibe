@@ -29,7 +29,7 @@ lazy_vibe/register/
 
 tests/register/
 ├── __init__.py
-├── conftest.py        # shared fixtures (sample findings, tmp register dir, sample ledger)
+├── helpers.py         # shared test helpers (history-invariant setup)
 ├── test_model.py
 ├── test_transitions.py
 ├── test_fingerprint.py
@@ -807,11 +807,38 @@ git commit -m "feat(register): add theme vocabulary with candidate fallback"
 
 ### Task 5: Persistent store (`store.py`)
 
+**Integrity requirement (from Task 2 code review):** `Finding` is a mutable
+dataclass, so `transitions.transition()` alone is advisory — any caller could
+reassign `finding.disposition` directly. The store is the wall: `save()` and
+`load()` reject any finding whose disposition does not match its last
+`disposition` history event (or whose disposition is not `new` when no such
+event exists). This makes the git-committed history the verifiable source of
+truth (spec §4.3).
+
 **Files:**
 - Create: `lazy_vibe/register/store.py`
+- Create: `tests/register/helpers.py`
 - Test: `tests/register/test_store.py`
 
 - [ ] **Step 1: Write the failing tests**
+
+Create `tests/register/helpers.py`:
+
+```python
+"""Shared test helpers for register tests."""
+
+
+def with_history(finding):
+    """Append a disposition history event matching the finding's current
+    disposition, satisfying the store's history invariant (test setup)."""
+    if finding.disposition != "new":
+        finding.history.append({"ts": "2026-06-01T00:00:00+00:00",
+                                "event": "disposition", "from": "new",
+                                "to": finding.disposition,
+                                "by": finding.disposition_by,
+                                "reason": "test setup"})
+    return finding
+```
 
 Create `tests/register/test_store.py`:
 
@@ -820,6 +847,7 @@ import pytest
 
 from lazy_vibe.register.model import RegisterError
 from lazy_vibe.register.store import RegisterStore
+from tests.register.helpers import with_history
 from tests.register.test_model import make_finding
 
 
@@ -876,20 +904,44 @@ def test_by_fingerprint_index(store):
 
 
 def test_markdown_groups_by_disposition_and_severity(store):
-    f_open = make_finding(finding_id="R-0001",
-                          fingerprint="sha256:aaaaaaaaaaaaaaa1",
-                          disposition="open", severity="P1")
-    f_open_p0 = make_finding(finding_id="R-0002",
-                             fingerprint="sha256:aaaaaaaaaaaaaaa2",
-                             disposition="open", severity="P0")
-    f_parked = make_finding(finding_id="R-0003",
-                            fingerprint="sha256:aaaaaaaaaaaaaaa3",
-                            disposition="parked")
+    f_open = with_history(make_finding(finding_id="R-0001",
+                                       fingerprint="sha256:aaaaaaaaaaaaaaa1",
+                                       disposition="open", severity="P1"))
+    f_open_p0 = with_history(make_finding(finding_id="R-0002",
+                                          fingerprint="sha256:aaaaaaaaaaaaaaa2",
+                                          disposition="open", severity="P0"))
+    f_parked = with_history(make_finding(finding_id="R-0003",
+                                         fingerprint="sha256:aaaaaaaaaaaaaaa3",
+                                         disposition="parked"))
     store.save({f.finding_id: f for f in (f_open, f_open_p0, f_parked)})
     md = store.markdown_path.read_text()
     assert md.index("## open") < md.index("## parked")
     # P0 row renders before P1 row within the open section
     assert md.index("R-0002") < md.index("R-0001")
+
+
+def test_save_rejects_disposition_without_matching_history(store):
+    smuggled = make_finding(disposition="open")  # no disposition event
+    with pytest.raises(RegisterError, match="history"):
+        store.save({smuggled.finding_id: smuggled})
+
+
+def test_save_rejects_disposition_contradicting_history(store):
+    f = with_history(make_finding(disposition="open"))
+    f.disposition = "fixed"  # mutated around transition()
+    f.regression_test = "tests/test_x.py::test_y"
+    with pytest.raises(RegisterError, match="history"):
+        store.save({f.finding_id: f})
+
+
+def test_load_rejects_hand_edited_disposition(store):
+    f = with_history(make_finding(disposition="open"))
+    store.save({f.finding_id: f})
+    text = store.jsonl_path.read_text().replace('"disposition": "open"',
+                                                '"disposition": "parked"')
+    store.jsonl_path.write_text(text)
+    with pytest.raises(RegisterError, match="history"):
+        store.load()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -914,6 +966,25 @@ from .model import SEVERITY_ORDER, Finding, RegisterError
 
 _DISPOSITION_RENDER_ORDER = ("regressed", "open", "in_remediation", "new",
                              "risk_accepted", "parked", "fixed", "false_positive")
+
+
+def _check_history_invariant(finding: Finding) -> None:
+    """Persistence-boundary integrity wall (spec §4.3): every disposition
+    change must have come through transitions.transition(), which records a
+    matching history event. Rejects direct mutation and hand-edited JSONL."""
+    events = [h for h in finding.history if h.get("event") == "disposition"]
+    if events:
+        last_to = events[-1].get("to")
+        if last_to != finding.disposition:
+            raise RegisterError(
+                f"{finding.finding_id}: disposition {finding.disposition!r} does "
+                f"not match last history event {last_to!r} — disposition changes "
+                f"must go through transitions.transition()")
+    elif finding.disposition != "new":
+        raise RegisterError(
+            f"{finding.finding_id}: disposition {finding.disposition!r} has no "
+            f"matching disposition history event — disposition changes must go "
+            f"through transitions.transition()")
 
 
 class RegisterStore:
@@ -942,6 +1013,7 @@ class RegisterStore:
                 if not line.strip():
                     continue
                 finding = Finding.from_json_line(line, lineno=lineno)
+                _check_history_invariant(finding)
                 if finding.finding_id in findings:
                     raise RegisterError(
                         f"duplicate finding_id {finding.finding_id} at line {lineno}")
@@ -953,6 +1025,7 @@ class RegisterStore:
         ordered = sorted(findings.values(), key=lambda f: f.finding_id)
         for finding in ordered:
             finding.validate()
+            _check_history_invariant(finding)
         tmp = self.jsonl_path.with_suffix(".jsonl.tmp")
         with tmp.open("w") as fh:
             for finding in ordered:
@@ -1222,6 +1295,7 @@ from lazy_vibe.register.fingerprint import compute
 from lazy_vibe.register.ingest import Candidate
 from lazy_vibe.register.reconcile import reconcile, render_report
 from lazy_vibe.register.store import RegisterStore
+from tests.register.helpers import with_history
 from tests.register.test_model import make_finding
 
 VOCAB = {"tenant_scope_missing": ["tenant scope"],
@@ -1246,10 +1320,13 @@ def store(tmp_path):
 
 
 def existing(**overrides):
-    """Register entry whose fingerprint matches cand() exactly."""
+    """Register entry whose fingerprint matches cand() exactly.
+
+    Wrapped in with_history so adjudicated dispositions satisfy the
+    store's history invariant (see Task 5)."""
     fp = compute("product_gap", "tenant_scope_missing",
                  "backend/routers/evidence.py", "-")
-    return make_finding(fingerprint=fp, **overrides)
+    return with_history(make_finding(fingerprint=fp, **overrides))
 
 
 def test_no_match_creates_new_finding(store):
@@ -1613,10 +1690,9 @@ from pathlib import Path
 
 import pytest
 
-from lazy_vibe.register.model import Finding
+from lazy_vibe.register.model import Disposition
 from lazy_vibe.register.store import RegisterStore
 from lazy_vibe.register.transitions import transition
-from lazy_vibe.register.model import Disposition
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
