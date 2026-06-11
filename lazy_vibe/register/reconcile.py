@@ -14,6 +14,8 @@ from .transitions import transition
 
 FUZZY_THRESHOLD = 0.5
 
+# regressed is deliberately open-like: a re-occurrence merges evidence rather
+# than re-flagging — it is already flagged and re-queued.
 _OPEN_LIKE = {Disposition.NEW.value, Disposition.OPEN.value,
               Disposition.IN_REMEDIATION.value, Disposition.REGRESSED.value}
 
@@ -88,7 +90,7 @@ def _create_finding(findings: dict[str, Finding], candidate: Candidate,
                     f"(run {candidate.run_id}). References: {candidate.references}",
         severity=candidate.severity,
         severity_source="proposed",
-        taxonomy="G",
+        taxonomy="G",  # taxonomy refinement (B/S/A/U/...) is a triage-stage concern (plan 2), like in_scope
         in_scope=True,  # scope matching arrives with launch-scope.yaml (plan 2)
         disposition=Disposition.NEW.value,
         disposition_by="ingest",
@@ -116,6 +118,13 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
             fingerprint = compute(candidate.category, theme, candidate.path, "-")
             existing = index.get(fingerprint)
             if existing is not None:
+                if existing.last_seen.get("run_id") == run_id:
+                    # Within-run duplicate fingerprint or same-run replay:
+                    # record extra evidence only — never double-count
+                    # occurrences or re-emit report buckets (replay safety).
+                    if existing.disposition in _OPEN_LIKE:
+                        _merge_evidence(existing, candidate)
+                    continue
                 _bump_seen(existing, run_id, date)
                 if existing.disposition in {d.value for d in PROTECTED_DISPOSITIONS} \
                         or existing.disposition == Disposition.PARKED.value:
@@ -171,10 +180,12 @@ def render_report(result: ReconcileResult, findings: dict[str, Finding],
                   "| id | sev | theme | title | probable duplicate of |",
                   "|---|---|---|---|---|"]
         for f in result.new:
+            dup = fuzzy_of.get(f.finding_id)
+            dup_cell = f"{dup} ({findings[dup].disposition})" if dup else "-"
             lines.append(f"| {f.finding_id} | {f.severity} "
                          f"| {f.fingerprint_inputs['theme']} "
                          f"| {markdown_cell(f.title)} "
-                         f"| {fuzzy_of.get(f.finding_id, '-')} |")
+                         f"| {dup_cell} |")
         lines.append("")
     if result.suppressed:
         lines += ["## Suppressed", ""]

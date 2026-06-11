@@ -130,6 +130,40 @@ def test_unmapped_theme_becomes_candidate_theme(store):
     assert "_candidate:totally_novel_concern" in result.theme_candidates
 
 
+def test_within_run_duplicate_fingerprint_does_not_double_count(store):
+    dup = cand(blocker_id="B-0009", line="240",
+               references="backend/routers/evidence.py:240")
+    result = reconcile(store, [cand(), dup], VOCAB, run_id=RUN, date=DATE)
+    assert [f.finding_id for f in result.new] == ["R-0001"]
+    assert result.merged == []
+    loaded = store.load()["R-0001"]
+    assert loaded.occurrences == 1
+    refs = {e["ref"] for e in loaded.evidence}
+    assert "backend/routers/evidence.py:118" in refs
+    assert "backend/routers/evidence.py:240" in refs
+
+
+def test_reconcile_same_run_is_idempotent(store):
+    first = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    assert len(first.new) == 1
+    replay = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    assert replay.new == [] and replay.merged == []
+    assert store.load()["R-0001"].occurrences == 1
+
+
+def test_replay_does_not_double_suppress(store):
+    f = existing(disposition="risk_accepted", disposition_by="pete",
+                 review_by="2026-12-01")
+    store.save({f.finding_id: f})
+    reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    second = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    assert second.suppressed == []
+    loaded = store.load()["R-0001"]
+    assert loaded.occurrences == 2  # bumped by the first run only
+    events = [h for h in loaded.history if h["event"] == "suppressed_occurrence"]
+    assert len(events) == 1
+
+
 def test_render_report_headline(store, tmp_path):
     f_fixed = existing(disposition="fixed",
                        regression_test="tests/test_evidence.py::test_x")
@@ -148,3 +182,18 @@ def test_render_report_headline(store, tmp_path):
     assert "1 new, 0 suppressed, 1 regressed" in text
     assert "## Regressions" in text
     assert "## New findings" in text
+
+
+def test_render_report_shows_fuzzy_duplicate_disposition(store, tmp_path):
+    f = existing(disposition="risk_accepted", disposition_by="pete",
+                 review_by="2026-12-01")
+    store.save({f.finding_id: f})
+    c = cand(theme_raw="weird new theme wording",
+             title="Evidence list endpoint not scoped to tenant")
+    result = reconcile(store, [c], VOCAB, run_id=RUN, date=DATE)
+    assert (result.new[0].finding_id, "R-0001") in result.fuzzy
+    report_path = tmp_path / "reconcile-report.md"
+    render_report(result, store.load(), report_path, run_id=RUN)
+    text = report_path.read_text()
+    # Triager must see the duplicate target was adjudicated away.
+    assert "R-0001 (risk_accepted)" in text

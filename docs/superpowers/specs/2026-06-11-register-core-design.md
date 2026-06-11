@@ -139,6 +139,8 @@ Field rules:
   `F-SILENT`, `F-TRUST`, …), `RC-*` UX root-cause codes (`RC-1` wiring gap …
   `RC-7` design issue). Absorbed from the retired `feature-review` /
   `feature-ux-audit` skills (§10).
+- `evidence[].type` — `"code"` (agent-cited code location) or `"audit"` (imported
+  audit-run reference).
 - `regression_test` — `path::test_name`; **required** for disposition `fixed`.
 
 ### 4.2 Disposition state machine
