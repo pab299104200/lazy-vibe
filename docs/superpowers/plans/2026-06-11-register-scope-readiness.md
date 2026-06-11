@@ -231,7 +231,7 @@ Create `lazy_vibe/register/scope.py`:
 """Per-product launch scope: customer-facing surface + bar + gates (spec §7.1)."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -333,7 +333,11 @@ def load_scope(path: Path) -> Scope:
 
 def matches(finding: Finding, scope: Scope) -> bool:
     """Deterministic scope match: surface path-prefix against the finding's
-    fingerprint path, or surface route substring against path/title."""
+    fingerprint path, or surface route substring against path/title.
+
+    Prefixes are literal startswith matches — end a prefix with '/' to
+    enforce a directory boundary. Both matchers deliberately over-include
+    (scope IN) on ambiguity; the dangerous direction is silent scope-OUT."""
     path = normalize_path(finding.fingerprint_inputs.get("path", ""))
     haystack = f"{path} {finding.title}"
     for surface in scope.surfaces:
