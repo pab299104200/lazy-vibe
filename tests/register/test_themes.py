@@ -48,3 +48,43 @@ def test_malformed_vocabulary_is_hard_error(tmp_path):
     path.write_text("just a string")
     with pytest.raises(RegisterError, match="themes"):
         load_vocabulary(path)
+
+
+def test_empty_pattern_rejected(tmp_path):
+    path = tmp_path / "themes.yaml"
+    path.write_text('themes:\n  foo:\n    patterns: [""]\n')
+    with pytest.raises(RegisterError, match="foo"):
+        load_vocabulary(path)
+
+
+def test_non_string_pattern_rejected(tmp_path):
+    path = tmp_path / "themes.yaml"
+    path.write_text("themes:\n  foo:\n    patterns: [123]\n")
+    with pytest.raises(RegisterError, match="foo"):
+        load_vocabulary(path)
+
+
+def test_patterns_must_be_list(tmp_path):
+    path = tmp_path / "themes.yaml"
+    path.write_text("themes:\n  foo:\n    patterns: tenant scope\n")
+    with pytest.raises(RegisterError, match="foo"):
+        load_vocabulary(path)
+
+
+def test_theme_node_must_be_mapping(tmp_path):
+    path = tmp_path / "themes.yaml"
+    path.write_text("themes:\n  foo:\n    - a\n    - b\n")
+    with pytest.raises(RegisterError, match="foo"):
+        load_vocabulary(path)
+
+
+def test_empty_slug_key_rejected(tmp_path):
+    path = tmp_path / "themes.yaml"
+    path.write_text('themes:\n  "!!!":\n    patterns: []\n')
+    with pytest.raises(RegisterError, match="slug"):
+        load_vocabulary(path)
+
+
+def test_candidate_theme_is_idempotent(vocab):
+    c = map_theme("Quantum Flux Capacitor!", vocab)
+    assert map_theme(c, vocab) == c

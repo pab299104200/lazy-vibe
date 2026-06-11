@@ -379,7 +379,7 @@ historical records, backfilled into the register where findings are still live.
 - **Fingerprint collision** (different findings, same hash inputs) → reconciler
   detects evidence divergence (different file:line set) and splits with a
   `collision` history event.
-- **Unmapped theme** → entry created with `theme: _candidate:<raw>`, flagged in
+- **Unmapped theme** → entry created with `theme: _candidate:<slug>`, flagged in
   reconcile report; readiness treats in-scope `_candidate` entries as untriaged
   (`new`), i.e. blocking the P2 bar — vocabulary gaps cannot leak findings.
 - **Verifier agent failure/timeout** → finding stays `new`; reconcile report

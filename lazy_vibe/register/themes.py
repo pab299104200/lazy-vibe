@@ -30,13 +30,34 @@ def load_vocabulary(path: Path) -> dict[str, list[str]]:
     if not isinstance(data, dict) or not isinstance(data.get("themes"), dict):
         raise RegisterError(f"{path}: expected a top-level 'themes' mapping")
     vocab: dict[str, list[str]] = {}
-    for slug, spec in data["themes"].items():
+    for raw_slug, spec in data["themes"].items():
+        slug = slugify(str(raw_slug))
+        if not slug:
+            raise RegisterError(
+                f"{path}: theme key {raw_slug!r} slugifies to an empty slug — "
+                f"use a key with at least one alphanumeric character")
+        if spec is not None and not isinstance(spec, dict):
+            raise RegisterError(
+                f"{path}: theme '{raw_slug}' must be a mapping (or empty), "
+                f"got {spec!r}")
         patterns = (spec or {}).get("patterns", [])
-        vocab[slugify(slug)] = [p.lower() for p in patterns]
+        if not isinstance(patterns, list):
+            raise RegisterError(
+                f"{path}: theme '{raw_slug}': 'patterns' must be a list of "
+                f"strings, got {patterns!r}")
+        for pattern in patterns:
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise RegisterError(
+                    f"{path}: theme '{raw_slug}': pattern {pattern!r} must be "
+                    f"a non-empty string — an empty pattern would match every "
+                    f"theme and bypass the _candidate safety net")
+        vocab[slug] = [p.lower() for p in patterns]
     return vocab
 
 
 def map_theme(raw: str, vocab: dict[str, list[str]]) -> str:
+    if raw.startswith("_candidate:"):
+        return raw
     slug = slugify(raw)
     if slug in vocab:
         return slug
