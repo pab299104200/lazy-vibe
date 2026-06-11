@@ -605,13 +605,28 @@ def parse_scorecard(path: Path, *, slug: str, run_id: str) -> ScorecardParse: ..
 
 ---
 
-### Task 5: Readiness predicate (`readiness.py`)
+### Task 5: Readiness predicate (`readiness.py`) — EXECUTED 2026-06-11
 
 **Files:**
-- Create: `lazy_vibe/register/readiness.py`
+- Created: `lazy_vibe/register/readiness.py`
 - Test: `tests/register/test_readiness.py`
 
-- [ ] **Step 1: Write the failing tests**
+> **Carry-forward fixes landed in Task 6 session (Part B, 2026-06-11):**
+> - `Finding.validate()` now enforces ISO-date format on `review_by` when
+>   `disposition == "risk_accepted"` — catches hand-edited registers at
+>   `store.load` before `evaluate` runs (Part B.1). Test:
+>   `test_risk_accepted_review_by_must_be_iso_date` in `test_model.py`.
+> - `evaluate()` wraps `_dt.date.fromisoformat(today)` — malformed `today`
+>   raises `RegisterError("readiness date must be ISO …")` instead of
+>   `ValueError` (Part B.2). Test: `test_evaluate_malformed_today_raises_register_error`.
+> - `ReadinessReport` gains `not_gated_count` field; `evaluate()` increments it
+>   for in-scope open-like findings below the severity bar; `render_readiness()`
+>   appends `Not gated: N` and uses `STALE EVIDENCE (N blocking)` headline when
+>   exit_code==2 and blocking is non-empty (Part B.3). Tests:
+>   `test_render_stale_headline_includes_blocking_count`,
+>   `test_render_not_gated_line_counts_in_scope_open_without_bar`.
+
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/register/test_readiness.py`:
 
@@ -755,12 +770,12 @@ def test_render_always_lists_acceptances_and_parked(store, tmp_path):
     assert "Parked: 1" in text
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `python3 -m pytest tests/register/test_readiness.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `lazy_vibe/register/readiness.py`:
 
@@ -928,20 +943,15 @@ def render_readiness(report: ReadinessReport) -> str:
     return "\n".join(lines)
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `python3 -m pytest tests/register/test_readiness.py -v` then full suite — expect 144 passed (143 passed + 1 skipped where the Meridian scorecard corpus is absent).
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add lazy_vibe/register/readiness.py tests/register/test_readiness.py
-git commit -m "feat(register): deterministic readiness predicate with gates"
-```
+- [x] **Step 5: Committed.**
 
 ---
 
-### Task 6: CLI verbs + exports + e2e
+### Task 6: CLI verbs + exports + e2e — EXECUTED 2026-06-11
 
 **Files:**
 - Modify: `lazy_vibe/register/cli.py`
@@ -949,7 +959,20 @@ git commit -m "feat(register): deterministic readiness predicate with gates"
 - Modify: `README.md` (extend the Findings register section)
 - Test: extend `tests/register/test_cli_end_to_end.py`
 
-- [ ] **Step 1: Write the failing test**
+> **Part B carry-forwards and Part C e2e test also landed in this session (2026-06-11):**
+> See Task 5 note above for Part B.1 (validate ISO date), Part B.2 (evaluate
+> malformed today), and Part B.3 (headline + not-gated line). Part C adds
+> `test_bad_review_by_in_register_gives_clean_error` to
+> `test_cli_end_to_end.py` — proves the store.load validation fires before
+> evaluate and surfaces via the existing `RegisterError` handler (clean
+> `error:` line, no Traceback).
+>
+> Final test count: 151 passed, 0 skipped (Meridian corpus present on this
+> machine, so corpus integration test ran). 7 new tests landed: B.1 model
+> validate, B.2 evaluate today, B.3a stale headline, B.3b not-gated line,
+> T6 scorecard-ingest e2e, T6 scope-recompute e2e, Part C bad review_by.
+
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/register/test_cli_end_to_end.py`:
 
@@ -1017,12 +1040,12 @@ def test_scope_recompute_cli(workspace):
     assert "park" in proc.stdout
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `python3 -m pytest tests/register/test_cli_end_to_end.py -v`
 Expected: new tests FAIL (argparse: invalid choice).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lazy_vibe/register/cli.py`:
 
@@ -1117,16 +1140,11 @@ READY / 1 NOT READY / 2 stale gate evidence). The readiness report always
 lists active risk acceptances and parked counts.
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register -q` — expect 146 passed (145 passed + 1 skipped where the Meridian scorecard corpus is absent).
+Run: `python3 -m pytest tests/register -q` — 151 passed, 0 skipped (Meridian corpus present).
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add lazy_vibe/register/cli.py lazy_vibe/register/__init__.py README.md tests/register/test_cli_end_to_end.py
-git commit -m "feat(register): scorecard-ingest, scope-recompute and readiness CLI verbs"
-```
+- [x] **Step 5: Committed.**
 
 ---
 

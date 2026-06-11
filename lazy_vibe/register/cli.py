@@ -1,4 +1,5 @@
-"""CLI: python -m lazy_vibe.register {ingest,reconcile,backfill,report} (spec §11)."""
+"""CLI: python -m lazy_vibe.register {ingest,reconcile,backfill,report,
+scorecard-ingest,scope-recompute,readiness} (spec §11)."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +9,10 @@ from pathlib import Path
 
 from .ingest import parse_ledger, read_candidates, write_candidates
 from .model import RegisterError
+from .readiness import evaluate, render_readiness
 from .reconcile import reconcile, render_report
+from .scope import load_scope, recompute
+from .scorecard import parse_scorecard
 from .store import RegisterStore
 from .themes import load_vocabulary
 
@@ -25,10 +29,12 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _reconcile_candidates(register_dir: Path, candidates, run_id: str,
-                          date: str) -> int:
+                          date: str, scope_path=None) -> int:
     store = RegisterStore(register_dir)
     vocab = load_vocabulary(register_dir / "themes.yaml")
-    result = reconcile(store, candidates, vocab, run_id=run_id, date=date)
+    scope = load_scope(Path(scope_path)) if scope_path else None
+    result = reconcile(store, candidates, vocab, run_id=run_id, date=date,
+                       scope=scope)
     report_path = register_dir / "reconcile-report.md"
     render_report(result, result.findings, report_path, run_id=run_id)
     print(f"{len(result.new)} new, {len(result.suppressed)} suppressed, "
@@ -41,14 +47,16 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     run_id = candidates[0].run_id if candidates else "empty-run"
     date = args.date or _today()
     return _reconcile_candidates(Path(args.register_dir), candidates,
-                                 run_id, date)
+                                 run_id, date,
+                                 scope_path=getattr(args, "scope", None))
 
 
 def _cmd_backfill(args: argparse.Namespace) -> int:
     candidates = parse_ledger(Path(args.ledger), run_id=args.run_id)
     date = args.date or _today()
     return _reconcile_candidates(Path(args.register_dir), candidates,
-                                 args.run_id, date)
+                                 args.run_id, date,
+                                 scope_path=getattr(args, "scope", None))
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
@@ -58,6 +66,46 @@ def _cmd_report(args: argparse.Namespace) -> int:
         store.write_markdown(findings)
     print(f"regenerated {store.markdown_path} ({len(findings)} findings)")
     return 0
+
+
+def _cmd_scorecard_ingest(args: argparse.Namespace) -> int:
+    if len(args.scorecard) != len(args.slug):
+        raise RegisterError(
+            "--scorecard and --slug must be given the same number of times")
+    candidates = []
+    problems = []
+    for sc_path, slug in zip(args.scorecard, args.slug):
+        parsed = parse_scorecard(Path(sc_path), slug=slug, run_id=args.run_id)
+        candidates.extend(parsed.candidates)
+        problems.extend(parsed.problems)
+    for problem in problems:
+        print(f"warning: {problem}", file=sys.stderr)
+    if args.strict and problems:
+        print(f"refusing to ingest: {len(problems)} parse problems "
+              f"(--strict)", file=sys.stderr)
+        return 1
+    return _reconcile_candidates(Path(args.register_dir), candidates,
+                                 args.run_id, args.date or _today(),
+                                 scope_path=getattr(args, "scope", None))
+
+
+def _cmd_scope_recompute(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    scope = load_scope(Path(args.scope))
+    proposals = recompute(store, scope, date=args.date or _today())
+    for proposal in proposals:
+        print(f"{proposal.finding_id}: propose {proposal.kind} "
+              f"({proposal.reason})")
+    print(f"{len(proposals)} scope proposals")
+    return 0
+
+
+def _cmd_readiness(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    scope = load_scope(Path(args.scope))
+    report = evaluate(store, scope, today=args.date or _today())
+    print(render_readiness(report))
+    return report.exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--register-dir", required=True)
     p.add_argument("--candidates", required=True)
     p.add_argument("--date", default=None)
+    p.add_argument("--scope", default=None)
     p.set_defaults(func=_cmd_reconcile)
 
     p = sub.add_parser("backfill", help="ingest + reconcile a ledger in one pass")
@@ -81,11 +130,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ledger", required=True)
     p.add_argument("--run-id", required=True)
     p.add_argument("--date", default=None)
+    p.add_argument("--scope", default=None)
     p.set_defaults(func=_cmd_backfill)
 
     p = sub.add_parser("report", help="regenerate register.md from register.jsonl")
     p.add_argument("--register-dir", required=True)
     p.set_defaults(func=_cmd_report)
+
+    p = sub.add_parser("scorecard-ingest",
+                       help="ingest open findings from feature-review scorecards")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--scorecard", action="append", required=True)
+    p.add_argument("--slug", action="append", required=True)
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--date", default=None)
+    p.add_argument("--scope", default=None)
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 if any scorecard rows failed to parse")
+    p.set_defaults(func=_cmd_scorecard_ingest)
+
+    p = sub.add_parser("scope-recompute",
+                       help="re-evaluate in_scope after a launch-scope edit")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--scope", required=True)
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=_cmd_scope_recompute)
+
+    p = sub.add_parser("readiness",
+                       help="deterministic release-readiness verdict")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--scope", required=True)
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=_cmd_readiness)
 
     return parser
 

@@ -31,6 +31,7 @@ class ReadinessReport:
     gate_results: list[tuple[str, str]] = field(default_factory=list)
     risk_acceptances: list[str] = field(default_factory=list)
     parked_count: int = 0
+    not_gated_count: int = 0
 
 
 def _bar_blocks(finding: Finding, rule: str) -> str | None:
@@ -101,7 +102,12 @@ def _eval_gate(gate: Gate) -> tuple[str, str]:
 
 def evaluate(store, scope: Scope, *, today: str) -> ReadinessReport:
     report = ReadinessReport(product=scope.product, ready=True, exit_code=0)
-    today_date = _dt.date.fromisoformat(today)
+    try:
+        today_date = _dt.date.fromisoformat(today)
+    except (ValueError, TypeError) as exc:
+        raise RegisterError(
+            f"readiness date must be ISO (YYYY-MM-DD), got {today!r}"
+        ) from exc
     findings = store.load()
     for finding in findings.values():
         if finding.disposition == "parked":
@@ -125,6 +131,8 @@ def evaluate(store, scope: Scope, *, today: str) -> ReadinessReport:
             continue
         rule = scope.severity_bar.get(finding.severity)
         if rule is None:
+            if finding.disposition in _OPEN_LIKE:
+                report.not_gated_count += 1
             continue
         blocked = _bar_blocks(finding, rule)
         if blocked:
@@ -145,9 +153,13 @@ def evaluate(store, scope: Scope, *, today: str) -> ReadinessReport:
 
 
 def render_readiness(report: ReadinessReport) -> str:
-    verdict = ("READY" if report.ready
-               else "STALE EVIDENCE" if report.exit_code == 2
-               else "NOT READY")
+    if report.ready:
+        verdict = "READY"
+    elif report.exit_code == 2:
+        n = len(report.blocking)
+        verdict = f"STALE EVIDENCE ({n} blocking)" if n else "STALE EVIDENCE"
+    else:
+        verdict = "NOT READY"
     lines = [f"# Readiness — {report.product}: {verdict}", ""]
     if report.blocking:
         lines += ["## Blocking", ""]
@@ -157,5 +169,6 @@ def render_readiness(report: ReadinessReport) -> str:
         lines += [f"- {gid}: {res}" for gid, res in report.gate_results] + [""]
     lines += ["## Active risk acceptances", ""]
     lines += ([f"- {a}" for a in report.risk_acceptances] or ["- none"])
-    lines += ["", f"Parked: {report.parked_count}", ""]
+    lines += ["", f"Parked: {report.parked_count}",
+              f"Not gated: {report.not_gated_count}", ""]
     return "\n".join(lines)

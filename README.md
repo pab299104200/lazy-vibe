@@ -792,6 +792,12 @@ acceptances carry a mandatory `review_by` date.
 
 Tests: `python3 -m pytest tests/register -v`
 
+Plan 2a adds: `scorecard-ingest` (feature-review scorecards -> register),
+`scope-recompute` (re-evaluate `in_scope` after editing
+`launch-scope.yaml`), and `readiness` (deterministic verdict; exit 0
+READY / 1 NOT READY / 2 stale gate evidence). The readiness report always
+lists active risk acceptances and parked counts.
+
 ---
 
 ## Progress display

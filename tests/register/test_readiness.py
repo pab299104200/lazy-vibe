@@ -124,6 +124,38 @@ def test_missing_artifact_is_stale(store, tmp_path):
     assert report.ready is False
 
 
+def test_evaluate_malformed_today_raises_register_error(store, tmp_path):
+    """Part B.2: malformed today raises RegisterError, not ValueError."""
+    from lazy_vibe.register.model import RegisterError
+    with pytest.raises(RegisterError, match="readiness date must be ISO"):
+        evaluate(store, make_scope(tmp_path), today="not-a-date")
+
+
+def test_render_stale_headline_includes_blocking_count(store, tmp_path):
+    """Part B.3a: STALE EVIDENCE headline includes (N blocking) when blocking exists."""
+    import json
+    gates = ("  - id: sast\n    type: artifact_json\n"
+             "    path: /nonexistent/sast.json\n"
+             "    key: a\n    op: eq\n    value: 0\n")
+    f = finding("R-0001", "P0", "open", disposition_by="pete")
+    store.save({f.finding_id: f})
+    report = evaluate(store, make_scope(tmp_path, gates), today=TODAY)
+    assert report.exit_code == 2
+    text = render_readiness(report)
+    assert "STALE EVIDENCE (1 blocking)" in text
+
+
+def test_render_not_gated_line_counts_in_scope_open_without_bar(store, tmp_path):
+    """Part B.3b: 'Not gated' line counts in-scope open-like findings with no bar rule."""
+    # P3 has no severity bar in the default scope_yaml, so this finding is not gated
+    f = finding("R-0001", "P3", "open", disposition_by="pete")
+    store.save({f.finding_id: f})
+    report = evaluate(store, make_scope(tmp_path), today=TODAY)
+    assert report.ready is True  # P3 has no bar rule so nothing blocks
+    text = render_readiness(report)
+    assert "Not gated: 1" in text
+
+
 def test_render_always_lists_acceptances_and_parked(store, tmp_path):
     ra = finding("R-0001", "P1", "risk_accepted", disposition_by="pete",
                  review_by="2026-12-01")

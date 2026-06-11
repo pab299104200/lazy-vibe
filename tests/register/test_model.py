@@ -85,3 +85,10 @@ def test_fingerprint_inputs_must_be_complete():
 def test_from_json_line_reports_line_number_on_corrupt_input():
     with pytest.raises(RegisterError, match="line 7"):
         Finding.from_json_line("{not json", lineno=7)
+
+
+def test_risk_accepted_review_by_must_be_iso_date():
+    """Part B.1: review_by must parse as ISO date when disposition is risk_accepted."""
+    with pytest.raises(RegisterError, match="ISO date"):
+        make_finding(disposition="risk_accepted", disposition_by="pete",
+                     review_by="whenever").validate()

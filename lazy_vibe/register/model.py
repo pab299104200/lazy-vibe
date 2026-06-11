@@ -89,6 +89,15 @@ class Finding:
             raise RegisterError(
                 f"{self.finding_id}: disposition 'risk_accepted' requires review_by"
             )
+        if disposition is Disposition.RISK_ACCEPTED and self.review_by:
+            import datetime as _dt
+            try:
+                _dt.date.fromisoformat(self.review_by)
+            except (ValueError, TypeError):
+                raise RegisterError(
+                    f"{self.finding_id}: review_by must be an ISO date "
+                    f"(YYYY-MM-DD), got {self.review_by!r}"
+                ) from None
 
     def to_json_line(self) -> str:
         return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False)

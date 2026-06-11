@@ -141,3 +141,95 @@ def test_report_regenerates_markdown(workspace):
     proc = cli("report", "--register-dir", str(register_dir))
     assert proc.returncode == 0, proc.stderr
     assert (register_dir / "register.md").exists()
+
+
+SCORECARD_MD = """\
+# Widget Scorecard
+
+## Findings Table
+
+| ID | Severity | Type | Title | Status |
+|----|----------|------|-------|--------|
+| B-01 | Critical | Bug | Widget breaks tenancy | OPEN (new) |
+| G-01 | Low | Gap | Widget lacks docs | Fixed — verified |
+"""
+
+LAUNCH_SCOPE = """\
+product: testprod
+default_in_scope: true
+surfaces: []
+severity_bar:
+  P0: zero_open
+  P1: zero_open_or_risk_accepted
+  P2: triaged
+gates:
+  - id: trivially-green
+    type: command
+    command: "true"
+"""
+
+
+def test_scorecard_ingest_then_readiness(workspace, tmp_path):
+    _, register_dir, _, _ = workspace
+    (register_dir / "themes.yaml").write_text(
+        "themes:\n  widget:\n    patterns: []\n")
+    scorecard = tmp_path / "widget.md"
+    scorecard.write_text(SCORECARD_MD)
+    scope_path = register_dir / "launch-scope.yaml"
+    scope_path.write_text(LAUNCH_SCOPE)
+
+    proc = cli("scorecard-ingest", "--register-dir", str(register_dir),
+               "--scorecard", str(scorecard), "--slug", "widget",
+               "--run-id", "sc-run-1", "--date", "2026-06-11",
+               "--scope", str(scope_path))
+    assert proc.returncode == 0, proc.stderr
+    assert "1 new" in proc.stdout
+
+    proc = cli("readiness", "--register-dir", str(register_dir),
+               "--scope", str(scope_path), "--date", "2026-06-11")
+    assert proc.returncode == 1          # open P0 blocks
+    assert "NOT READY" in proc.stdout
+    assert "B-01" in proc.stdout or "R-0001" in proc.stdout
+
+
+def test_scope_recompute_cli(workspace):
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    scope_path = register_dir / "launch-scope.yaml"
+    scope_path.write_text("product: testprod\ndefault_in_scope: false\n"
+                          "surfaces: []\nseverity_bar: {}\n")
+    proc = cli("scope-recompute", "--register-dir", str(register_dir),
+               "--scope", str(scope_path), "--date", "2026-06-11")
+    assert proc.returncode == 0, proc.stderr
+    assert "park" in proc.stdout
+
+
+def test_bad_review_by_in_register_gives_clean_error(workspace, tmp_path):
+    """Part C: hand-edited bad review_by gives clean error: line, no Traceback."""
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    # Manually corrupt a finding: risk_accepted with non-ISO review_by
+    import json
+    jsonl_path = register_dir / "register.jsonl"
+    lines = jsonl_path.read_text().splitlines()
+    corrupted = []
+    for line in lines:
+        data = json.loads(line)
+        if data["finding_id"] == "R-0001":
+            data["disposition"] = "risk_accepted"
+            data["disposition_by"] = "pete"
+            data["review_by"] = "whenever"
+        corrupted.append(json.dumps(data, sort_keys=True))
+    jsonl_path.write_text("\n".join(corrupted) + "\n")
+
+    scope_path = register_dir / "launch-scope.yaml"
+    scope_path.write_text(LAUNCH_SCOPE.replace("testprod", "testprod"))
+    proc = cli("readiness", "--register-dir", str(register_dir),
+               "--scope", str(scope_path), "--date", "2026-06-11")
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+    assert "Traceback" not in proc.stderr
