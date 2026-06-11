@@ -10,8 +10,8 @@
 
 **Repo:** /home/pete/cadres/shared/lazy-vibe, branch `feature/register-scope-readiness` off main. Run tests from repo root: `python3 -m pytest tests/register -q` (baseline: 80 passed).
 
-**Grounding facts (verified 2026-06-11):**
-- Real Meridian scorecards live at `/home/pete/cadres/meridian/docs/scorecards/*.md` (50 files). Findings table header observed: `| ID | Severity | Type | Title | Status |` — column order varies across files, so parse by header name. Severities: Critical/High/Med(ium)/Low. Open statuses contain the word "open" case-insensitively ("OPEN (new)", "Open", "Partially fixed; open"); fixed/resolved/superseded rows must be skipped. Finding IDs: `B-05`, `S-04`, `G-08`, `A-06`, `U-04`, `M-01`, `CLOUD-B01`. Per-finding detail sections start `### B-05: …` and contain backticked `path:line` evidence refs.
+**Grounding facts (re-verified 2026-06-11 against all 50 files; the original one-file generalization was wrong):**
+- Real Meridian scorecards live at `/home/pete/cadres/meridian/docs/scorecards/*.md` (50 files) in TWO layouts. (1) Findings tables (14 files): column order varies, parse by header name; severity column is `Severity` or `Sev`; title column is one of Title/Summary/Finding/Issue/One-line summary/Item; `Status` column is optional — without one, closure is marked by explicit markers (`[FIXED]`, ALL-CAPS `RESOLVED`, cell-leading `Resolved.`), never by prose-case marker words ("never cleared", '"Done" claim' are bug text in open rows). (2) Heading findings (36 files, no findings table): `### <ID>: <title>` sections with `**Severity:** <grade>` body lines or inline `(High)`; closure via explicit marker after `—`/`✅` in the heading, `(Cleared …)` parentheticals, or Status/Severity body lines (`~~High~~ → **FIXED**`); `Med — partially fixed` / `still open` stay open. Severities: Critical/High/Med(ium)/Low plus compound grades (Low-Med→P2, Med-High→P1) and `Informational (no finding)` = verified-clean non-finding. Finding IDs: `B-05`, `CLOUD-B01`, `B-NEW-01 (CODE-ITSM-B01)`, `S-01b`, `U-05 (new)`, compound `B-02/A-01`, `A-01 / Scale`. Detail sections `### B-05: …` contain backticked `path:line` evidence refs; table layouts may carry an Evidence/Location/Key citation column instead. Corpus result: 50/50 files parse, 402 open candidates, 0 problems.
 - Meridian profile: `profiles/meridian/product-profile.md` — backend tests `cd backend && python -m pytest`, frontend `cd frontend && npm run typecheck`.
 
 ## File Structure
@@ -511,265 +511,78 @@ git commit -m "feat(register): scope-aware reconcile and in_scope recompute with
 
 ---
 
-### Task 4: Scorecard ingest (`scorecard.py`)
+### Task 4: Scorecard ingest (`scorecard.py`) — EXECUTED 2026-06-11 (revised after corpus review)
 
 **Files:**
-- Create: `lazy_vibe/register/scorecard.py`
-- Test: `tests/register/test_scorecard.py`
+- Created: `lazy_vibe/register/scorecard.py`
+- Test: `tests/register/test_scorecard.py` (33 tests incl. a real-corpus integration test)
 
-- [ ] **Step 1: Write the failing tests**
+> **Revision note:** the original Task 4 design (single findings-table layout,
+> whole-file abort on unknown severity) handled 2/50 real scorecards. The
+> landed implementation was redesigned against the full corpus; the code blocks
+> originally embedded here are superseded by the committed files, which are the
+> source of truth. Commits: `6e000d2` (first pass), `fix(register): scorecard
+> parser hardened against the real 50-file corpus` (redesign).
 
-Create `tests/register/test_scorecard.py`:
-
-```python
-import pytest
-
-from lazy_vibe.register.model import RegisterError
-from lazy_vibe.register.scorecard import parse_scorecard
-
-SCORECARD = """\
-# Cloud Connectors Scorecard
-
-**Review Date:** 2026-06-10
-
-## 2. Findings Table
-
-| ID | Severity | Type | Title | Status |
-|----|:--------:|------|-------|--------|
-| B-01 | High | Bug | S3 collector aborts on out-of-region bucket | **Fixed — verified** (`aws_collectors.py:589`) |
-| **B-05** | **Critical** | Bug | Multi-account sync runs with no RLS context | **OPEN (new)** |
-| **B-07** | **Med** | Bug | Azure NSG misses `::/0` | **OPEN (new)** |
-| G-03 | Med | Gap | Partial-collection surface S3 only | **Partially fixed; open** |
-| S-03 | Med | Security | RLS isolation untested | **Resolved** |
-| **CLOUD-B01** | High | Bug | S3 silent partial on token expiry | **Fixed — verified** |
-| **A-06** | **Med** | Autonomy | sync-all runs serially in-request | **OPEN (new)** |
-| U-04 | Med | UX | sync-all dead-end 409 | **Resolved by B-04 gate removal** |
-| **M-01** | **Low** | Competitive | 6h cadence vs hourly | **OPEN (new)** |
-
-## 3. Bugs
-
-### B-05: Multi-account sync runs with no RLS context
-
-**Evidence**
-- `core/cloud_connector_sweeps.py:131` — raw session, no RLS context.
-- `core/pipeline_runtime.py:1359` — passes SessionLocal.
-
-### B-07: Azure NSG open-to-world misses `::/0`
-
-Some prose without backticked refs first, then `connectors/azure.py:712`.
-"""
-
-
-@pytest.fixture
-def scorecard(tmp_path):
-    p = tmp_path / "cloud-connectors.md"
-    p.write_text(SCORECARD)
-    return p
-
-
-def test_parses_only_open_findings(scorecard):
-    cands = parse_scorecard(scorecard, slug="cloud-connectors",
-                            run_id="scorecards-2026-06-10")
-    ids = [c.blocker_id for c in cands]
-    assert ids == ["cloud-connectors:B-05", "cloud-connectors:B-07",
-                   "cloud-connectors:G-03", "cloud-connectors:A-06",
-                   "cloud-connectors:M-01"]
-
-
-def test_severity_mapping(scorecard):
-    cands = {c.blocker_id: c for c in parse_scorecard(
-        scorecard, slug="cloud-connectors", run_id="r")}
-    assert cands["cloud-connectors:B-05"].severity == "P0"   # Critical
-    assert cands["cloud-connectors:B-07"].severity == "P2"   # Med
-    assert cands["cloud-connectors:M-01"].severity == "P3"   # Low
-
-
-def test_taxonomy_from_id_prefix(scorecard):
-    cands = {c.blocker_id: c for c in parse_scorecard(
-        scorecard, slug="cloud-connectors", run_id="r")}
-    assert cands["cloud-connectors:B-05"].taxonomy == "B"
-    assert cands["cloud-connectors:G-03"].taxonomy == "G"
-    assert cands["cloud-connectors:A-06"].taxonomy == "A"
-    assert cands["cloud-connectors:M-01"].taxonomy == "M"
-
-
-def test_path_from_detail_section_evidence(scorecard):
-    cands = {c.blocker_id: c for c in parse_scorecard(
-        scorecard, slug="cloud-connectors", run_id="r")}
-    assert cands["cloud-connectors:B-05"].path == \
-        "core/cloud_connector_sweeps.py"
-    assert cands["cloud-connectors:B-05"].line == "131"
-    assert cands["cloud-connectors:B-07"].path == "connectors/azure.py"
-
-
-def test_path_falls_back_to_scorecard(scorecard):
-    cands = {c.blocker_id: c for c in parse_scorecard(
-        scorecard, slug="cloud-connectors", run_id="r")}
-    # G-03, A-06, M-01 have no detail sections
-    assert cands["cloud-connectors:G-03"].path.endswith("cloud-connectors.md")
-    assert cands["cloud-connectors:G-03"].line == "-"
-
-
-def test_theme_is_slug_and_candidate_fields(scorecard):
-    c = parse_scorecard(scorecard, slug="cloud-connectors", run_id="r")[0]
-    assert c.theme_raw == "cloud-connectors"
-    assert c.category == "product_gap"
-    assert c.run_id == "r"
-    assert "cloud-connectors.md#B-05" in c.references
-
-
-def test_missing_file_is_hard_error(tmp_path):
-    with pytest.raises(RegisterError, match="scorecard"):
-        parse_scorecard(tmp_path / "nope.md", slug="x", run_id="r")
-
-
-def test_no_findings_table_is_hard_error(tmp_path):
-    p = tmp_path / "empty.md"
-    p.write_text("# Scorecard\n\nNo table here.\n")
-    with pytest.raises(RegisterError, match="findings table"):
-        parse_scorecard(p, slug="x", run_id="r")
-
-
-def test_unknown_severity_is_hard_error(tmp_path, scorecard):
-    p = tmp_path / "bad.md"
-    p.write_text(scorecard.read_text().replace("**Critical**", "Mega"))
-    with pytest.raises(RegisterError, match="severity"):
-        parse_scorecard(p, slug="x", run_id="r")
-```
-
-- [ ] **Step 2: Run to verify failure**
-
-Run: `python3 -m pytest tests/register/test_scorecard.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Implement**
-
-Create `lazy_vibe/register/scorecard.py`:
+- [x] **Step 1: Failing tests** — `tests/register/test_scorecard.py`: fixtures
+  for every real format class (evidence-column tables, `Sev` alias + shuffled
+  columns, status-less tables with explicit closed markers, compound severity
+  grades, decorated/compound IDs, severity-less status tables, multi-table
+  files, heading-only scorecards with all closure variants, mixed
+  table+heading files) plus a corpus integration test guarded by
+  `pytest.mark.skipif(not Path('/home/pete/cadres/meridian/docs/scorecards').exists(), ...)`
+  asserting zero exceptions, >= 100 candidates, zero problems across all 50
+  real files.
+- [x] **Step 2: Red** — `ModuleNotFoundError` / `ImportError` confirmed.
+- [x] **Step 3: Implementation** — `lazy_vibe/register/scorecard.py`. Contract:
 
 ```python
-"""Feature-review scorecard markdown -> reconcile candidates (spec §10).
-
-Scorecards are the post-build review artifact in product repos
-(docs/scorecards/<slug>.md). The findings table is parsed by header name
-(column order varies between scorecards); only rows whose status contains
-the word "open" are ingested. The finding's stable identity is
-(category=product_gap, theme=<feature slug>, path=<first evidence ref or
-the scorecard file>, symbol=<scorecard finding id>), so re-ingesting the
-same scorecard is idempotent through the reconciler.
-"""
-from __future__ import annotations
-
-import re
-from pathlib import Path
-
-from .ingest import Candidate
-from .model import RegisterError
-
-_SEVERITY_MAP = {"critical": "P0", "high": "P1", "med": "P2",
-                 "medium": "P2", "low": "P3"}
-_ID_RE = re.compile(r"^[A-Z][A-Z-]*-?\d+$")
-_TAXONOMY_RE = re.compile(r"([A-Z])-?\d+$")
-_EVIDENCE_RE = re.compile(
-    r"`([\w./-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|sh|sql|yaml|yml|md|json))"
-    r"(?::(\d+))?")
-_REQUIRED_COLUMNS = {"id", "severity", "status"}
+@dataclass
+class ScorecardParse:
+    candidates: list[Candidate]
+    problems: list[str]   # actionable, file+row specific
 
 
-def _clean_cell(cell: str) -> str:
-    return cell.strip().strip("*").strip("`").strip()
-
-
-def _split_row(line: str) -> list[str]:
-    return [_clean_cell(c) for c in line.strip().strip("|").split("|")]
-
-
-def _find_table(lines: list[str], path: Path) -> tuple[dict[str, int], int]:
-    """Return ({column_name: index}, first_data_line_index)."""
-    for i, line in enumerate(lines):
-        if not line.lstrip().startswith("|"):
-            continue
-        header = [c.lower() for c in _split_row(line)]
-        if _REQUIRED_COLUMNS.issubset(set(header)) and \
-                ("title" in header or "summary" in header):
-            return {name: idx for idx, name in enumerate(header)}, i + 2
-    raise RegisterError(f"{path}: no findings table found (need columns "
-                        f"id/severity/status plus title or summary)")
-
-
-def _detail_evidence(text: str, finding_id: str) -> tuple[str, str] | None:
-    """First backticked path[:line] ref in the finding's `### <ID>:` section."""
-    pattern = re.compile(rf"^###\s+\**{re.escape(finding_id)}\**[:\s]",
-                         re.MULTILINE)
-    match = pattern.search(text)
-    if not match:
-        return None
-    section_end = text.find("\n### ", match.end())
-    section = text[match.end():section_end if section_end != -1 else None]
-    ref = _EVIDENCE_RE.search(section)
-    if not ref:
-        return None
-    return ref.group(1), ref.group(2) or "-"
-
-
-def parse_scorecard(path: Path, *, slug: str, run_id: str) -> list[Candidate]:
-    if not path.exists():
-        raise RegisterError(f"scorecard not found: {path}")
-    text = path.read_text()
-    lines = text.splitlines()
-    columns, data_start = _find_table(lines, path)
-    title_col = columns.get("title", columns.get("summary"))
-    candidates: list[Candidate] = []
-    for line in lines[data_start:]:
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            break
-        cells = _split_row(stripped)
-        if len(cells) <= max(columns.values()):
-            continue
-        finding_id = cells[columns["id"]]
-        if not _ID_RE.fullmatch(finding_id):
-            continue
-        status = cells[columns["status"]].lower()
-        if "open" not in status:
-            continue
-        severity_raw = cells[columns["severity"]].lower()
-        severity = _SEVERITY_MAP.get(severity_raw)
-        if severity is None:
-            raise RegisterError(
-                f"{path}: finding {finding_id}: unknown severity "
-                f"{cells[columns['severity']]!r}")
-        taxonomy_match = _TAXONOMY_RE.search(finding_id.replace("-", ""))
-        taxonomy = taxonomy_match.group(1) if taxonomy_match else "G"
-        evidence = _detail_evidence(text, finding_id)
-        if evidence is not None:
-            ev_path, ev_line = evidence
-        else:
-            ev_path, ev_line = str(path), "-"
-        candidates.append(Candidate(
-            blocker_id=f"{slug}:{finding_id}",
-            category="product_gap",
-            theme_raw=slug,
-            severity=severity,
-            path=ev_path,
-            line=ev_line,
-            title=cells[title_col],
-            references=f"{path}#{finding_id}",
-            run_id=run_id,
-            taxonomy=taxonomy,
-        ))
-    return candidates
+def parse_scorecard(path: Path, *, slug: str, run_id: str) -> ScorecardParse: ...
 ```
 
-- [ ] **Step 4: Run to verify pass**
-
-Run: `python3 -m pytest tests/register/test_scorecard.py -v` then full suite — expect 104 passed.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add lazy_vibe/register/scorecard.py tests/register/test_scorecard.py
-git commit -m "feat(register): scorecard ingest adapter"
-```
+  Design decisions (all corpus-grounded):
+  1. **Two extraction strategies.** Findings tables first (severity column
+     `severity|sev`, title column `title|summary|finding|issue|one-line
+     summary|item`, `status` optional); then `### <ID>: <title>` heading
+     sections for IDs not already seen in a table (36/50 real files have no
+     findings table — without this strategy the corpus integration test
+     cannot pass). Heading severity: inline `(High)` or `**Severity:**` body
+     line. Table IDs suppress same-ID headings (detail sections).
+  2. **Open/closed.** Status column: open iff "open" in status. No status
+     column: closed only on EXPLICIT markers — bracketed `[FIXED]` (any
+     case), standalone ALL-CAPS (`RESOLVED`), or cell-leading `Resolved.` —
+     because case-insensitive substring matching (the originally specified
+     rule) falsely closes real open findings whose prose contains marker
+     words (audit-workflow B-10 "never cleared", S-01 '"Done" claim',
+     audit-reporting B-03/M-02). Headings: explicit marker after the last
+     `—`/`✅` separator, closure parenthetical on the ID (`(Cleared …)`), or
+     Status/Severity body lines (case-insensitive there — `Resolved (W2)`,
+     `Fixed and verified` are genuine) with an open/partial counter-signal
+     guard (`still open`, `partially fixed`, `PARTIALLY RESOLVED` stay open).
+  3. **Loud per-row problems.** Unknown severity, unparseable ID, and open
+     rows in severity-less status tables append to `problems` and parsing
+     continues. Hard `RegisterError` only for missing file and
+     no-findings-structure (no qualifying table AND no finding headings).
+  4. **Severity map** adds low-med/med-low→P2, med-high/high-med→P1, direct
+     P0–P3 tokens; `informational` = verified-clean non-finding, skipped by
+     design (as are "not a finding"/"no finding" headings).
+  5. **ID cleaning**: strip trailing parentheticals (`U-05 (new)`), take the
+     first compound segment (`B-02/A-01`, `A-01 / Scale`), accept lowercase
+     suffix (`B-01b`); `_ID_RE = ^[A-Z][A-Z-]*-?\d+[a-z]?$`.
+  6. **Taxonomy** from the trailing ID letter; letters outside the model's
+     `_SIMPLE_TAXONOMY` (imported — single source of truth) map to "G".
+  7. **Evidence path**: detail-section backticked ref first, then an
+     Evidence/Location/Key-citation table cell, then the scorecard file.
+- [x] **Step 4: Green** — `python3 -m pytest tests/register -q` → 127 passed
+  (126 passed + 1 skipped without the Meridian corpus). Corpus integration:
+  50/50 files, 402 open candidates, 0 problems.
+- [x] **Step 5: Committed.**
 
 ---
 
@@ -1098,7 +911,7 @@ def render_readiness(report: ReadinessReport) -> str:
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register/test_readiness.py -v` then full suite — expect 116 passed.
+Run: `python3 -m pytest tests/register/test_readiness.py -v` then full suite — expect 138 passed (137 passed + 1 skipped where the Meridian scorecard corpus is absent).
 
 - [ ] **Step 5: Commit**
 
@@ -1202,10 +1015,21 @@ Add handlers:
 
 ```python
 def _cmd_scorecard_ingest(args: argparse.Namespace) -> int:
+    if len(args.scorecard) != len(args.slug):
+        raise RegisterError(
+            "--scorecard and --slug must be given the same number of times")
     candidates = []
+    problems = []
     for sc_path, slug in zip(args.scorecard, args.slug):
-        candidates.extend(parse_scorecard(Path(sc_path), slug=slug,
-                                          run_id=args.run_id))
+        parsed = parse_scorecard(Path(sc_path), slug=slug, run_id=args.run_id)
+        candidates.extend(parsed.candidates)
+        problems.extend(parsed.problems)
+    for problem in problems:
+        print(f"warning: {problem}", file=sys.stderr)
+    if args.strict and problems:
+        print(f"refusing to ingest: {len(problems)} parse problems "
+              f"(--strict)", file=sys.stderr)
+        return 1
     return _reconcile_candidates(Path(args.register_dir), candidates,
                                  args.run_id, args.date or _today(),
                                  scope_path=args.scope)
@@ -1241,6 +1065,8 @@ Subparsers (inside `build_parser`):
     p.add_argument("--run-id", required=True)
     p.add_argument("--date", default=None)
     p.add_argument("--scope", default=None)
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 if any scorecard rows failed to parse")
     p.set_defaults(func=_cmd_scorecard_ingest)
 
     p = sub.add_parser("scope-recompute",
@@ -1258,7 +1084,7 @@ Subparsers (inside `build_parser`):
     p.set_defaults(func=_cmd_readiness)
 ```
 
-In `_cmd_scorecard_ingest`, validate lengths first: if `len(args.scorecard) != len(args.slug)`: raise `RegisterError("--scorecard and --slug must be given the same number of times")`.
+`parse_scorecard` returns `ScorecardParse` (candidates + problems): problems are printed as `warning: <problem>` to stderr and ingestion continues unless `--strict` is set. `sys` is already imported in `cli.py`.
 
 In `lazy_vibe/register/__init__.py`: add exports `Gate, ReadinessReport, Scope, ScopeProposal, Surface, evaluate, load_scope, matches, parse_scorecard, recompute, render_readiness` (import `evaluate as evaluate_readiness`? No — keep the name `evaluate` unexported to avoid genericity; export it as part of readiness usage via `from .readiness import ReadinessReport, evaluate, render_readiness`). Update `__all__` accordingly (keep sorted).
 
@@ -1274,7 +1100,7 @@ lists active risk acceptances and parked counts.
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register -q` — expect 118 passed.
+Run: `python3 -m pytest tests/register -q` — expect 140 passed (139 passed + 1 skipped where the Meridian scorecard corpus is absent).
 
 - [ ] **Step 5: Commit**
 
@@ -1353,7 +1179,7 @@ python3 -m lazy_vibe.register scorecard-ingest \
   --scope /home/pete/cadres/meridian/docs/audit/register/launch-scope.yaml
 ```
 
-Expected: exit 0, `N new, 0 suppressed, 0 regressed` where N = total open findings across all scorecards. If any scorecard fails to parse (no findings table, unknown severity), report the exact file and failure — fix the PARSER only if the format is legitimately common; never edit historical scorecards.
+Expected: exit 0, `N new, 0 suppressed, 0 regressed` where N ≈ 402 (corpus-verified 2026-06-11: 50/50 files parse, 402 open candidates, 0 problems; reconcile may merge same-fingerprint duplicates, so N can be slightly lower). Any `warning:` lines on stderr are per-row parse problems — report them verbatim; add `--strict` to refuse ingestion on problems. If a scorecard fails outright (missing file, no findings structure), report the exact file and failure — fix the PARSER only if the format is legitimately common; never edit historical scorecards.
 
 - [ ] **Step 4: Idempotency check on real data**
 
@@ -1389,4 +1215,4 @@ launch-scope.yaml with initial severity bar and test gates."
 
 - **Spec coverage:** §7.1 launch-scope format + scope principle → Tasks 2, 7; §7.2 readiness (bar, gates, exit codes, past-due FAIL, always-list acceptances/parked) → Task 5; §10 scorecards→register → Task 4, 7; §12 scope-edit recompute-as-proposals + `_candidate` blocks readiness → Tasks 3, 5; §14 step 4 → whole plan. **Deferred to Plan 2b:** triage pipeline (§6: verifier packets, triage-policy.yaml engine, queue + `triage` CLI, run-triage.sh dispatch wrapper), severity-review queue consumption, reopen proposals, `close` verb, §11 harness wiring into run-audit/run-remediation, fuzzy confirm/split, §12 collision split.
 - **Placeholder scan:** all code steps carry complete code; Task 7 is operational with exact commands and explicit stop-and-report rules.
-- **Type consistency:** `Candidate.taxonomy` (Task 1) consumed in Task 4 constructor and reconcile `_create_finding`; `Scope`/`Gate`/`Surface` (Task 2) consumed by Tasks 3/5/6 with matching field names (`gate_id`, `gate_type`, `params`); `recompute` returns `list[ScopeProposal]` consumed in `_cmd_scope_recompute`; `evaluate(store, scope, *, today)` matches CLI handler; expected test counts: 80 → 82 → 91 → 94 → 104 → 116 → 118.
+- **Type consistency:** `Candidate.taxonomy` (Task 1) consumed in Task 4 constructor and reconcile `_create_finding`; `Scope`/`Gate`/`Surface` (Task 2) consumed by Tasks 3/5/6 with matching field names (`gate_id`, `gate_type`, `params`); `recompute` returns `list[ScopeProposal]` consumed in `_cmd_scope_recompute`; `evaluate(store, scope, *, today)` matches CLI handler; `ScorecardParse` (Task 4) consumed by Task 6 `_cmd_scorecard_ingest`; expected test counts: 80 → 82 → 91 → 94 → 127 → 138 → 140 (original arithmetic 104/116/118 miscounted Task 4's tests and predates the corpus-hardening rework; subtract 1 passed / add 1 skipped on machines without `/home/pete/cadres/meridian/docs/scorecards`).
