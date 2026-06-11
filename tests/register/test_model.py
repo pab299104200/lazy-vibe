@@ -1,6 +1,6 @@
 import pytest
 
-from lazy_vibe.register.model import Disposition, Finding, RegisterError, Severity
+from lazy_vibe.register.model import Finding, RegisterError
 
 
 def make_finding(**overrides):

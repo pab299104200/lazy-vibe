@@ -19,7 +19,7 @@ class Severity(str, Enum):
     P3 = "P3"
 
 
-SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+SEVERITY_ORDER = {s.value: i for i, s in enumerate(Severity)}
 
 
 class Disposition(str, Enum):

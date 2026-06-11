@@ -57,7 +57,7 @@ Create `tests/register/__init__.py` (empty) and `tests/register/test_model.py`:
 ```python
 import pytest
 
-from lazy_vibe.register.model import Disposition, Finding, RegisterError, Severity
+from lazy_vibe.register.model import Finding, RegisterError
 
 
 def make_finding(**overrides):
