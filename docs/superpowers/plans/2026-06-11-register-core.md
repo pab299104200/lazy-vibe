@@ -2346,18 +2346,21 @@ from .ingest import Candidate, parse_ledger, read_candidates, write_candidates
 from .model import (PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Disposition,
                     Finding, RegisterError, Severity)
 from .reconcile import ReconcileResult, reconcile, render_report
-from .store import RegisterStore
+from .store import RegisterStore, markdown_cell
 from .themes import load_vocabulary, map_theme
-from .transitions import TransitionError, reaffirm_risk, transition
+from .transitions import LEGAL_EDGES, TransitionError, reaffirm_risk, transition
 
 __all__ = [
-    "Candidate", "Disposition", "Finding", "PROTECTED_DISPOSITIONS",
-    "ReconcileResult", "RegisterError", "RegisterStore", "SEVERITY_ORDER",
-    "Severity", "TransitionError", "load_vocabulary", "map_theme",
-    "parse_ledger", "read_candidates", "reaffirm_risk", "reconcile",
-    "render_report", "transition", "write_candidates",
+    "Candidate", "Disposition", "Finding", "LEGAL_EDGES",
+    "PROTECTED_DISPOSITIONS", "ReconcileResult", "RegisterError",
+    "RegisterStore", "SEVERITY_ORDER", "Severity", "TransitionError",
+    "load_vocabulary", "map_theme", "markdown_cell", "parse_ledger",
+    "read_candidates", "reaffirm_risk", "reconcile", "render_report",
+    "transition", "write_candidates",
 ]
 ```
+
+*(Note: `markdown_cell` from `.store` and `LEGAL_EDGES` from `.transitions` were added during post-plan review; both are included in the sorted `__all__` above.)*
 
 - [ ] **Step 2: Verify imports work and suite still passes**
 
@@ -2399,7 +2402,7 @@ Tests: `python3 -m pytest tests/register -v`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lazy_vibe/register/__init__.py README.md
+git add lazy_vibe/register/__init__.py README.md docs/superpowers/plans/2026-06-11-register-core.md
 git commit -m "docs(register): export public API and document register usage"
 ```
 

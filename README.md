@@ -766,6 +766,34 @@ The wrapper loads `.claude/skills/spog-ops-auditor/SKILL.md`, preserving the aut
 
 ---
 
+## Findings register (`lazy_vibe/register`)
+
+Persistent, adjudicated findings register — the convergence layer between
+audit runs. Design: `docs/superpowers/specs/2026-06-11-register-core-design.md`.
+
+Each product repo owns `docs/audit/register/` containing `register.jsonl`
+(canonical, git-committed), generated `register.md`, `themes.yaml` (theme
+vocabulary), and `reconcile-report.md` (latest run delta).
+
+Usage after an audit/remediation run produced a blocker ledger:
+
+    python3 -m lazy_vibe.register backfill \
+      --register-dir <product>/docs/audit/register \
+      --ledger <REMEDIATION_DIR>/00-blocker-ledger.tsv \
+      --run-id <run-id>
+
+The reconcile report headline (`N new, M suppressed, K regressed, J still
+open`) is the run-over-run convergence metric. Dispositions: new findings are
+adjudicated once (open / false_positive / risk_accepted / parked) and that
+decision persists; `fixed` requires a linked regression test; reappearance of
+a fixed finding is flagged as a regression. `false_positive` and
+`risk_accepted` are protected — only Pete can reopen them, and risk
+acceptances carry a mandatory `review_by` date.
+
+Tests: `python3 -m pytest tests/register -v`
+
+---
+
 ## Progress display
 
 Audit and remediation show an in-place spinner while an agent is running:
