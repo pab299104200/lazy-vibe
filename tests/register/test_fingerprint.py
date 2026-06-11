@@ -8,6 +8,9 @@ def test_normalize_path_strips_line_suffix_and_dot_prefix():
     assert normalize_path("backend/routers/evidence.py") == \
         "backend/routers/evidence.py"
     assert normalize_path("  backend/x.py:12-40 ") == "backend/x.py"
+    assert normalize_path("backend/x.py:118:") == "backend/x.py"
+    assert normalize_path("x.py:12:34") == "x.py"
+    assert normalize_path("x.py:abc") == "x.py:abc"  # not a line ref
 
 
 def test_compute_is_stable_and_text_independent():
@@ -26,6 +29,10 @@ def test_compute_differs_on_any_input():
     assert compute("product_gap", "other_theme", "backend/x.py", "-") != base
     assert compute("product_gap", "tenant_scope_missing", "backend/y.py", "-") != base
     assert compute("product_gap", "tenant_scope_missing", "backend/x.py", "f") != base
+
+
+def test_compute_resists_delimiter_injection():
+    assert compute("a|b", "c", "d", "-") != compute("a", "b|c", "d", "-")
 
 
 def test_title_tokens_normalizes():

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-_LINE_SUFFIX_RE = re.compile(r":[\d,-]+$")
+_LINE_SUFFIX_RE = re.compile(r":[\d,:-]+:?$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -17,7 +17,7 @@ def normalize_path(raw: str) -> str:
 
 
 def compute(category: str, theme: str, path: str, symbol: str = "-") -> str:
-    payload = f"{category}|{theme}|{normalize_path(path)}|{symbol}"
+    payload = "\x00".join((category, theme, normalize_path(path), symbol))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"sha256:{digest}"
 

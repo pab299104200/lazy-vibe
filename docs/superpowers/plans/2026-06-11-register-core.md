@@ -579,6 +579,9 @@ def test_normalize_path_strips_line_suffix_and_dot_prefix():
     assert normalize_path("backend/routers/evidence.py") == \
         "backend/routers/evidence.py"
     assert normalize_path("  backend/x.py:12-40 ") == "backend/x.py"
+    assert normalize_path("backend/x.py:118:") == "backend/x.py"
+    assert normalize_path("x.py:12:34") == "x.py"
+    assert normalize_path("x.py:abc") == "x.py:abc"  # not a line ref
 
 
 def test_compute_is_stable_and_text_independent():
@@ -597,6 +600,10 @@ def test_compute_differs_on_any_input():
     assert compute("product_gap", "other_theme", "backend/x.py", "-") != base
     assert compute("product_gap", "tenant_scope_missing", "backend/y.py", "-") != base
     assert compute("product_gap", "tenant_scope_missing", "backend/x.py", "f") != base
+
+
+def test_compute_resists_delimiter_injection():
+    assert compute("a|b", "c", "d", "-") != compute("a", "b|c", "d", "-")
 
 
 def test_title_tokens_normalizes():
@@ -627,7 +634,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-_LINE_SUFFIX_RE = re.compile(r":[\d,-]+$")
+_LINE_SUFFIX_RE = re.compile(r":[\d,:-]+:?$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -640,7 +647,7 @@ def normalize_path(raw: str) -> str:
 
 
 def compute(category: str, theme: str, path: str, symbol: str = "-") -> str:
-    payload = f"{category}|{theme}|{normalize_path(path)}|{symbol}"
+    payload = "\x00".join((category, theme, normalize_path(path), symbol))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"sha256:{digest}"
 
