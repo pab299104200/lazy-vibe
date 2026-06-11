@@ -143,6 +143,27 @@ def test_within_run_duplicate_fingerprint_does_not_double_count(store):
     assert "backend/routers/evidence.py:240" in refs
 
 
+def test_within_run_duplicate_higher_severity_escalates(store):
+    dup = cand(blocker_id="B-0009", severity="P0", line="240")
+    result = reconcile(store, [cand(), dup], VOCAB, run_id=RUN, date=DATE)
+    assert [f.finding_id for f in result.new] == ["R-0001"]
+    loaded = store.load()["R-0001"]
+    assert loaded.severity == "P0"
+    assert loaded.occurrences == 1
+
+
+def test_replay_does_not_duplicate_severity_review(store):
+    f = existing(disposition="open", disposition_by="pete",
+                 severity="P2", severity_source="adjudicated")
+    store.save({f.finding_id: f})
+    reconcile(store, [cand(severity="P0")], VOCAB, run_id=RUN, date=DATE)
+    reconcile(store, [cand(severity="P0")], VOCAB, run_id=RUN, date=DATE)
+    loaded = store.load()["R-0001"]
+    events = [h for h in loaded.history
+              if h["event"] == "severity_review_proposed"]
+    assert len(events) == 1
+
+
 def test_reconcile_same_run_is_idempotent(store):
     first = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
     assert len(first.new) == 1

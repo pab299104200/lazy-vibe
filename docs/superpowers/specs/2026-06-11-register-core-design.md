@@ -193,7 +193,9 @@ artifacts. For each blocker:
    - matched `false_positive` / `risk_accepted` / `parked` → **suppress** (count
      in report; no agent, no Pete).
    - matched `open` / `in_remediation` → merge evidence, bump
-     `last_seen`/`occurrences`.
+     `last_seen`/`occurrences`. Severity proposals are deduplicated per
+     (proposed severity, run id), so within-run duplicates and replays cannot
+     drop or duplicate escalation signals.
    - matched `fixed` → set `regressed`, re-queue remediation, flag prominently.
 2. **Fuzzy match** — candidate set: same `normalized_path` + `category`; match if
    Jaccard similarity of normalized title tokens ≥ 0.5. Deterministic (no

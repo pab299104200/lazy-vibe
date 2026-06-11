@@ -1691,6 +1691,27 @@ def test_within_run_duplicate_fingerprint_does_not_double_count(store):
     assert "backend/routers/evidence.py:240" in refs
 
 
+def test_within_run_duplicate_higher_severity_escalates(store):
+    dup = cand(blocker_id="B-0009", severity="P0", line="240")
+    result = reconcile(store, [cand(), dup], VOCAB, run_id=RUN, date=DATE)
+    assert [f.finding_id for f in result.new] == ["R-0001"]
+    loaded = store.load()["R-0001"]
+    assert loaded.severity == "P0"
+    assert loaded.occurrences == 1
+
+
+def test_replay_does_not_duplicate_severity_review(store):
+    f = existing(disposition="open", disposition_by="pete",
+                 severity="P2", severity_source="adjudicated")
+    store.save({f.finding_id: f})
+    reconcile(store, [cand(severity="P0")], VOCAB, run_id=RUN, date=DATE)
+    reconcile(store, [cand(severity="P0")], VOCAB, run_id=RUN, date=DATE)
+    loaded = store.load()["R-0001"]
+    events = [h for h in loaded.history
+              if h["event"] == "severity_review_proposed"]
+    assert len(events) == 1
+
+
 def test_reconcile_same_run_is_idempotent(store):
     first = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
     assert len(first.new) == 1
@@ -1810,10 +1831,16 @@ def _review_severity(finding: Finding, candidate: Candidate, date: str) -> None:
     if SEVERITY_ORDER[candidate.severity] >= SEVERITY_ORDER[finding.severity]:
         return  # not higher (P0 is lowest order value)
     if finding.severity_source == "adjudicated":
-        finding.history.append({"ts": _now(date), "event": "severity_review_proposed",
-                                "current": finding.severity,
-                                "proposed": candidate.severity,
-                                "run_id": candidate.run_id})
+        already = any(h.get("event") == "severity_review_proposed"
+                      and h.get("proposed") == candidate.severity
+                      and h.get("run_id") == candidate.run_id
+                      for h in finding.history)
+        if not already:
+            finding.history.append({"ts": _now(date),
+                                    "event": "severity_review_proposed",
+                                    "current": finding.severity,
+                                    "proposed": candidate.severity,
+                                    "run_id": candidate.run_id})
     else:
         old = finding.severity
         finding.severity = candidate.severity
@@ -1879,10 +1906,12 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
             if existing is not None:
                 if existing.last_seen.get("run_id") == run_id:
                     # Within-run duplicate fingerprint or same-run replay:
-                    # record extra evidence only — never double-count
-                    # occurrences or re-emit report buckets (replay safety).
+                    # record extra evidence and severity signal only — never
+                    # double-count occurrences or re-emit report buckets
+                    # (replay safety).
                     if existing.disposition in _OPEN_LIKE:
                         _merge_evidence(existing, candidate)
+                        _review_severity(existing, candidate, date)
                     continue
                 _bump_seen(existing, run_id, date)
                 if existing.disposition in {d.value for d in PROTECTED_DISPOSITIONS} \
