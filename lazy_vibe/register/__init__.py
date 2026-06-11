@@ -19,12 +19,12 @@ from .transitions import LEGAL_EDGES, TransitionError, reaffirm_risk, transition
 
 __all__ = [
     "Candidate", "Disposition", "Finding", "Gate", "LEGAL_EDGES",
-    "PROTECTED_DISPOSITIONS", "ReconcileResult", "ReadinessReport",
+    "PROTECTED_DISPOSITIONS", "ReadinessReport", "ReconcileResult",
     "RegisterError", "RegisterStore", "SEVERITY_ORDER", "Scope",
     "ScopeProposal", "ScorecardParse", "Severity", "Surface",
     "TransitionError",
     "evaluate", "load_scope", "load_vocabulary", "map_theme", "markdown_cell",
     "matches", "parse_ledger", "parse_scorecard", "read_candidates",
-    "reaffirm_risk", "reconcile", "recompute", "render_readiness",
+    "reaffirm_risk", "recompute", "reconcile", "render_readiness",
     "render_report", "transition", "write_candidates",
 ]

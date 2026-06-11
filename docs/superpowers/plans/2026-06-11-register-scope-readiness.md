@@ -216,6 +216,15 @@ def test_bad_gate_type_rejected(tmp_path):
     p.write_text(SCOPE_YAML.replace("type: command", "type: magic"))
     with pytest.raises(RegisterError, match="gate"):
         load_scope(p)
+
+
+def test_bad_gate_op_rejected(tmp_path):
+    # review fix 2026-06-11: a typo'd op loaded clean and was masked by the
+    # STALE short-circuit until the artifact appeared — now a load-time error
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text(SCOPE_YAML.replace("op: eq", "op: bogus"))
+    with pytest.raises(RegisterError, match="op"):
+        load_scope(p)
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -251,6 +260,10 @@ _GATE_REQUIRED = {
     "artifact_json": {"path", "key", "op", "value"},
     "artifact_exists": {"path"},
 }
+# Single source of truth for artifact_json comparison ops. readiness.py's
+# _OPS executor is keyed off this set (the executor cannot live here, and
+# scope cannot import readiness — readiness imports scope).
+VALID_OPS = frozenset({"eq", "le", "ge"})
 
 
 @dataclass(frozen=True)
@@ -321,6 +334,10 @@ def load_scope(path: Path) -> Scope:
         if missing:
             raise RegisterError(
                 f"{path}: gate {raw['id']!r}: missing {sorted(missing)}")
+        if gate_type == "artifact_json" and raw["op"] not in VALID_OPS:
+            raise RegisterError(
+                f"{path}: gate {raw['id']!r}: op {raw['op']!r} invalid "
+                f"(valid: {sorted(VALID_OPS)})")
         params = {k: v for k, v in raw.items() if k not in ("id", "type")}
         gates.append(Gate(gate_id=raw["id"], gate_type=gate_type,
                           params=params))
@@ -796,12 +813,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .model import Finding, RegisterError
-from .scope import Gate, Scope
+from .scope import VALID_OPS, Gate, Scope
 
 _OPEN_LIKE = {"new", "open", "in_remediation", "regressed"}
+# Executor for scope.VALID_OPS — load_scope validates against that set, so
+# the two must stay in sync; the assert makes drift a startup failure.
 _OPS = {"eq": lambda a, b: a == b,
         "le": lambda a, b: a <= b,
         "ge": lambda a, b: a >= b}
+assert set(_OPS) == VALID_OPS, "gate op executor out of sync with scope.VALID_OPS"
 
 
 @dataclass
@@ -877,8 +897,8 @@ def _eval_gate(gate: Gate) -> tuple[str, str]:
         raise RegisterError(f"gate {gate.gate_id}: unknown op {params['op']!r}")
     if op(value, params["value"]):
         return "PASS", f"{params['key']}={value}"
-    return "FAIL", (f"{params['key']}={value}, wanted "
-                    f"{params['op']} {params['value']}")
+    return "FAIL", (f"{params['key']}={value!r}, wanted "
+                    f"{params['op']} {params['value']!r}")
 
 
 def evaluate(store, scope: Scope, *, today: str) -> ReadinessReport:
@@ -971,6 +991,12 @@ Run: `python3 -m pytest tests/register/test_readiness.py -v` then full suite —
 > machine, so corpus integration test ran). 7 new tests landed: B.1 model
 > validate, B.2 evaluate today, B.3a stale headline, B.3b not-gated line,
 > T6 scorecard-ingest e2e, T6 scope-recompute e2e, Part C bad review_by.
+>
+> Post-review fixes (2026-06-11, same session): load_scope validates
+> artifact_json `op` against `scope.VALID_OPS` at load time (red-first
+> `test_bad_gate_op_rejected`); readiness `_OPS` keyed off `VALID_OPS` with a
+> sync assert; artifact_json FAIL detail uses `!r` on both operands; `__all__`
+> strict-sorted; dead test import removed. Suite: 152 passed, ruff clean.
 
 - [x] **Step 1: Write the failing test**
 
@@ -1142,7 +1168,7 @@ lists active risk acceptances and parked counts.
 
 - [x] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register -q` — 151 passed, 0 skipped (Meridian corpus present).
+Run: `python3 -m pytest tests/register -q` — 151 passed, 0 skipped (Meridian corpus present); 152 after the post-review gate-op test.
 
 - [x] **Step 5: Committed.**
 

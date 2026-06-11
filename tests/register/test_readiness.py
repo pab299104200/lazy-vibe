@@ -133,7 +133,6 @@ def test_evaluate_malformed_today_raises_register_error(store, tmp_path):
 
 def test_render_stale_headline_includes_blocking_count(store, tmp_path):
     """Part B.3a: STALE EVIDENCE headline includes (N blocking) when blocking exists."""
-    import json
     gates = ("  - id: sast\n    type: artifact_json\n"
              "    path: /nonexistent/sast.json\n"
              "    key: a\n    op: eq\n    value: 0\n")

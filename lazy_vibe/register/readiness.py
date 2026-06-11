@@ -14,12 +14,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .model import Finding, RegisterError
-from .scope import Gate, Scope
+from .scope import VALID_OPS, Gate, Scope
 
 _OPEN_LIKE = {"new", "open", "in_remediation", "regressed"}
+# Executor for scope.VALID_OPS — load_scope validates against that set, so
+# the two must stay in sync; the assert makes drift a startup failure.
 _OPS = {"eq": lambda a, b: a == b,
         "le": lambda a, b: a <= b,
         "ge": lambda a, b: a >= b}
+assert set(_OPS) == VALID_OPS, "gate op executor out of sync with scope.VALID_OPS"
 
 
 @dataclass
@@ -96,8 +99,8 @@ def _eval_gate(gate: Gate) -> tuple[str, str]:
         raise RegisterError(f"gate {gate.gate_id}: unknown op {params['op']!r}")
     if op(value, params["value"]):
         return "PASS", f"{params['key']}={value}"
-    return "FAIL", (f"{params['key']}={value}, wanted "
-                    f"{params['op']} {params['value']}")
+    return "FAIL", (f"{params['key']}={value!r}, wanted "
+                    f"{params['op']} {params['value']!r}")
 
 
 def evaluate(store, scope: Scope, *, today: str) -> ReadinessReport:

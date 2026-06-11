@@ -21,6 +21,10 @@ _GATE_REQUIRED = {
     "artifact_json": {"path", "key", "op", "value"},
     "artifact_exists": {"path"},
 }
+# Single source of truth for artifact_json comparison ops. readiness.py's
+# _OPS executor is keyed off this set (the executor cannot live here, and
+# scope cannot import readiness — readiness imports scope).
+VALID_OPS = frozenset({"eq", "le", "ge"})
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,10 @@ def load_scope(path: Path) -> Scope:
         if missing:
             raise RegisterError(
                 f"{path}: gate {raw['id']!r}: missing {sorted(missing)}")
+        if gate_type == "artifact_json" and raw["op"] not in VALID_OPS:
+            raise RegisterError(
+                f"{path}: gate {raw['id']!r}: op {raw['op']!r} invalid "
+                f"(valid: {sorted(VALID_OPS)})")
         params = {k: v for k, v in raw.items() if k not in ("id", "type")}
         gates.append(Gate(gate_id=raw["id"], gate_type=gate_type,
                           params=params))

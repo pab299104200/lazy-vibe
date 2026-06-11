@@ -111,6 +111,13 @@ def test_bad_gate_type_rejected(tmp_path):
         load_scope(p)
 
 
+def test_bad_gate_op_rejected(tmp_path):
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text(SCOPE_YAML.replace("op: eq", "op: bogus"))
+    with pytest.raises(RegisterError, match="op"):
+        load_scope(p)
+
+
 def test_recompute_flags_and_proposals(tmp_path, scope):
     from lazy_vibe.register.scope import recompute
     from lazy_vibe.register.store import RegisterStore
