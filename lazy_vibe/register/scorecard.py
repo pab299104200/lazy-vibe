@@ -15,17 +15,19 @@ Scorecards are the post-build review artifact in product repos
    bug descriptions. Tables with a status column but no severity column
    are also scanned: closed rows are skipped, open rows are reported as
    problems (never dropped silently).
-2. **Finding headings** — ``### <ID>: <title>`` sections (used by ~70% of
-   real scorecards, which have no findings table). Severity comes from an
-   inline ``(High)`` in the heading or a ``**Severity:** <grade>`` body
-   line. A heading finding is closed when an explicit closed marker
-   follows a ``—``/``✅`` separator in the heading (``— FIXED``, ``—
-   RESOLVED``; prose-case tails like "— package half fixed" stay open),
-   when the ID's parenthetical is a closure note (``(Cleared ...)``), or
-   when a body Status/Severity line carries a closed marker without an
-   open/partial counter-signal (``~~High~~ → FIXED`` is closed,
-   ``Med — partially fixed`` is open). Headings whose ID already appeared
-   in a table are detail sections, not new findings.
+2. **Finding headings** — ``### <ID>: <title>`` or ``### <ID> — <title>``
+   sections (used by ~70% of real scorecards, which have no findings
+   table). Severity comes from an inline ``(High)`` in the heading or a
+   ``**Severity:** <grade>`` body line. A heading finding is closed when
+   an explicit closed marker follows a ``—``/``✅`` separator in the
+   heading (``— FIXED``, ``— RESOLVED``; prose-case tails like "— package
+   half fixed" stay open), when the ID carries a closure parenthetical or
+   bracket tag (``(Cleared ...)``, ``[FIXED]`` — while ``[NEW]`` stays
+   open), or when a body Status/Severity/Resolution line carries a closed
+   marker without an open/partial counter-signal (``~~High~~ → FIXED``
+   and ``**Resolution (date):** fixed ...`` are closed, ``Med — partially
+   fixed`` is open). Headings whose ID already appeared in a table are
+   detail sections, not new findings.
 
 Verified-clean non-findings (severity ``Informational`` or "not a
 finding"/"no finding" in the heading) are excluded by design. Row-level
@@ -65,9 +67,12 @@ _TITLE_COLUMNS = ("title", "summary", "finding", "issue",
 _EVIDENCE_COLUMNS = ("location", "key citation", "citation")
 _ID_RE = re.compile(r"^[A-Z][A-Z-]*-?\d+[a-z]?$")
 _TAXONOMY_RE = re.compile(r"([A-Z])\d+[a-z]?$")
+# Extensions longest-first (tsx before ts, json/jsx before js) plus a
+# trailing guard — otherwise `Foo.tsx:123` matches as `Foo.ts` and the
+# line ref is dropped, corrupting fingerprint identity.
 _PATH_PATTERN = (
-    r"([\w./-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|sh|sql|yaml|yml|md|json))"
-    r"(?::(\d+))?")
+    r"([\w./-]+\.(?:py|tsx|ts|json|jsx|js|go|rs|java|rb|sh|sql|yaml|yml|md))"
+    r"(?!\w)(?::(\d+))?")
 _EVIDENCE_RE = re.compile("`" + _PATH_PATTERN)
 _BARE_PATH_RE = re.compile(_PATH_PATTERN)
 _MARKER_WORDS = "fixed|resolved|superseded|closed|done|wontfix|cleared"
@@ -80,14 +85,22 @@ _EXPLICIT_CLOSED_RE = re.compile(
     rf"(?i:\[[^\]]*(?:{_MARKER_WORDS})[^\]]*\])"
     rf"|\b(?:{_MARKER_WORDS.upper()})\b")
 _CELL_START_CLOSED_RE = re.compile(rf"^(?:{_MARKER_WORDS})\b", re.I)
-_OPENISH_RE = re.compile(r"\bopen|\bpartial", re.I)
+# `\bopen\b` not `\bopen` — "api.openai.com" is not an open signal.
+_OPENISH_RE = re.compile(r"\bopen\b|\bpartial", re.I)
 _NON_FINDING_RE = re.compile(r"\b(?:not a finding|no finding)\b", re.I)
 _HEADING_RE = re.compile(r"^(#{2,4})\s+(.*\S)\s*$")
-_STATUS_LINE_RE = re.compile(r"^[*~\s]*(?:status|severity)\b", re.I)
+_STATUS_LINE_RE = re.compile(r"^[*~\s]*(?:status|severity|resolution)\b", re.I)
+# A Status/Resolution line whose FIRST token after the label is a closed
+# marker is a closure even if later prose says "A-01 remains open" — the
+# "open" refers to a different finding (real corpus pattern).
+_LEADING_CLOSED_RE = re.compile(
+    rf"^[*~\s]*(?:status|resolution)\b(?:\s*\([^)]*\))?[^A-Za-z0-9]*"
+    rf"(?:{_MARKER_WORDS})\b", re.I)
 _SEVERITY_TOKEN_RE = re.compile(
     r"severity\b[^A-Za-z0-9]*([A-Za-z][A-Za-z0-9-]*)", re.I)
 _TAIL_SPLIT_RE = re.compile(r"—|✅")
 _PARENTHETICAL_RE = re.compile(r"\(([^)]*)\)")
+_BRACKET_TAG_RE = re.compile(r"\[([^\]]*)\]")
 
 
 @dataclass
@@ -120,8 +133,9 @@ def _split_row(line: str) -> list[str]:
 
 
 def _clean_id(raw: str) -> str:
-    """`U-05 (new)` -> U-05; `B-02/A-01` -> B-02; `**B-05**` -> B-05."""
-    raw = _PARENTHETICAL_RE.sub("", _clean_cell(raw)).strip()
+    """`U-05 (new)` -> U-05; `B-02 [FIXED]` -> B-02; `B-02/A-01` -> B-02."""
+    raw = _PARENTHETICAL_RE.sub("", _clean_cell(raw))
+    raw = _BRACKET_TAG_RE.sub("", raw).strip()
     return raw.split("/")[0].strip()
 
 
@@ -259,19 +273,32 @@ def _parse_table(lines: list[str], table: _Table, text: str, path: Path,
             path=path, slug=slug, run_id=run_id))
 
 
+def _split_heading(text: str) -> tuple[str, str] | None:
+    """(id_part, title) split on `:` or ` — `; None if no finding ID."""
+    for sep in (":", " — "):
+        head, found, tail = text.partition(sep)
+        if found and _ID_RE.fullmatch(_clean_id(head)):
+            return head, tail.strip()
+    if _ID_RE.fullmatch(_clean_id(text)):
+        return text, text.strip()   # bare `### B-01` heading
+    return None
+
+
 def _iter_finding_headings(lines: list[str]):
-    """Yield (finding_id, id_part, heading_text, body) for `## <ID>: ...`."""
+    """Yield (finding_id, id_part, heading, title, body) for `## <ID>: ...`
+    and `## <ID> — ...` headings."""
     matches = [(i, len(m.group(1)), m.group(2))
                for i, m in ((i, _HEADING_RE.match(line))
                             for i, line in enumerate(lines)) if m]
     for n, (i, level, text) in enumerate(matches):
-        id_part = text.split(":", 1)[0]
-        finding_id = _clean_id(id_part)
-        if not _ID_RE.fullmatch(finding_id):
+        parts = _split_heading(text)
+        if parts is None:
             continue
+        id_part, title = parts
         end = next((j for j, lvl, _ in matches[n + 1:] if lvl <= level),
                    len(lines))
-        yield finding_id, id_part, text, "\n".join(lines[i + 1:end])
+        yield (_clean_id(id_part), id_part, text, title,
+               "\n".join(lines[i + 1:end]))
 
 
 def _heading_is_closed(id_part: str, heading: str, body: str) -> bool:
@@ -279,12 +306,17 @@ def _heading_is_closed(id_part: str, heading: str, body: str) -> bool:
     if paren and _grade(paren.group(1)) is None \
             and _CLOSED_RE.search(paren.group(1)):
         return True   # e.g. `### S-02 (Cleared — verified secure): ...`
+    bracket = _BRACKET_TAG_RE.search(id_part)
+    if bracket and _CLOSED_RE.search(bracket.group(1)):
+        return True   # `### B-02 [FIXED]: ...` (while `[NEW]` stays open)
     tail = _TAIL_SPLIT_RE.split(heading)
     if len(tail) > 1 and _EXPLICIT_CLOSED_RE.search(tail[-1]) \
             and not _OPENISH_RE.search(tail[-1]):
         return True   # `... — FIXED (2026-06-09)` / `... ✅ FIXED`
     status_lines = [line for line in body.splitlines()
                     if _STATUS_LINE_RE.match(line)]
+    if any(_LEADING_CLOSED_RE.match(line) for line in status_lines):
+        return True   # `Status: FIXED — A-01 remains open` is a closure
     if any(_OPENISH_RE.search(line) for line in status_lines):
         return False  # "still open" / "partially fixed" wins over markers
     return any(_CLOSED_RE.search(line) for line in status_lines)
@@ -309,7 +341,8 @@ def _heading_severity(id_part: str,
 def _parse_headings(lines: list[str], path: Path, slug: str, run_id: str,
                     result: ScorecardParse, seen: set[str]) -> bool:
     found = False
-    for finding_id, id_part, heading, body in _iter_finding_headings(lines):
+    for finding_id, id_part, heading, title, body in \
+            _iter_finding_headings(lines):
         found = True
         if finding_id in seen:
             continue   # detail section of a table finding, or duplicate
@@ -327,8 +360,6 @@ def _parse_headings(lines: list[str], path: Path, slug: str, run_id: str,
                 + (f"unknown severity {raw!r}" if raw is not None
                    else "no parsable severity"))
             continue
-        title = heading.split(":", 1)[1].strip() if ":" in heading \
-            else heading.strip()
         ref = _EVIDENCE_RE.search(body)
         ev = (ref.group(1), ref.group(2) or "-") if ref else (str(path), "-")
         result.candidates.append(_make_candidate(

@@ -529,6 +529,145 @@ Body prose.
     assert result.problems == []
 
 
+def test_evidence_path_tsx_jsx_extensions(tmp_path):
+    # Alternation must not truncate `.tsx` -> `.ts` (drops the line ref and
+    # corrupts fingerprint identity for every frontend evidence path).
+    p = tmp_path / "fe.md"
+    p.write_text("""\
+## Findings
+
+### U-01: Component dead-end
+
+**Severity:** Low
+
+**Evidence**
+- `frontend/src/pages/Foo.tsx:123` — dead end.
+
+### U-02: Legacy widget broken
+
+**Severity:** Low
+
+**Evidence**
+- `frontend/src/widgets/Bar.jsx:45` — broken.
+""")
+    result = parse_scorecard(p, slug="fe", run_id="r")
+    assert result.problems == []
+    by_id = {c.blocker_id: c for c in result.candidates}
+    assert by_id["fe:U-01"].path == "frontend/src/pages/Foo.tsx"
+    assert by_id["fe:U-01"].line == "123"
+    assert by_id["fe:U-02"].path == "frontend/src/widgets/Bar.jsx"
+    assert by_id["fe:U-02"].line == "45"
+
+
+def test_bracket_tagged_heading_ids(tmp_path):
+    # `### B-02 [FIXED]: ...` must close; `### B-09 [NEW]: ...` must yield a
+    # candidate. Neither may vanish without a candidate or a problem.
+    p = tmp_path / "br.md"
+    p.write_text("""\
+## Findings
+
+### B-02 [FIXED]: Old defect
+
+**Severity:** High
+
+### B-09 [NEW]: Fresh defect
+
+**Severity:** Med
+""")
+    result = parse_scorecard(p, slug="b", run_id="r")
+    assert result.problems == []
+    assert [c.blocker_id for c in result.candidates] == ["b:B-09"]
+    assert result.candidates[0].title == "Fresh defect"
+
+
+def test_openish_requires_word_boundary(tmp_path):
+    # "api.openai.com" must not count as an open counter-signal.
+    p = tmp_path / "oa.md"
+    p.write_text("""\
+## Findings
+
+### B-01: Connector regression
+
+**Severity:** High
+**Status:** RESOLVED — see api.openai.com migration notes
+""")
+    result = parse_scorecard(p, slug="o", run_id="r")
+    assert result.candidates == []
+    assert result.problems == []
+
+
+def test_resolution_line_closes(tmp_path):
+    # `**Resolution (date):** ...` body lines are closure evidence.
+    p = tmp_path / "res.md"
+    p.write_text("""\
+## Findings
+
+### B-01: Stale banner
+
+**Severity:** Med
+
+**Resolution (2026-06-08):** fixed in commit abc
+
+### B-02: Still broken
+
+**Severity:** Med
+""")
+    result = parse_scorecard(p, slug="r", run_id="r")
+    assert result.problems == []
+    assert [c.blocker_id for c in result.candidates] == ["r:B-02"]
+
+
+def test_em_dash_heading_separator(tmp_path):
+    # `### B-01 (High) — Title` (no colon) must parse; closed variant must
+    # still close via the heading tail.
+    p = tmp_path / "em.md"
+    p.write_text("""\
+## Findings
+
+### B-01 (High) — Outbound close no-op
+
+Body prose.
+
+### B-02 (Med) — Old defect — FIXED (2026-06-10)
+
+Body prose.
+""")
+    result = parse_scorecard(p, slug="e", run_id="r")
+    assert result.problems == []
+    assert [c.blocker_id for c in result.candidates] == ["e:B-01"]
+    assert result.candidates[0].severity == "P1"
+    assert result.candidates[0].title == "Outbound close no-op"
+
+
+def test_status_line_leading_marker_beats_cross_reference_open(tmp_path):
+    # `**Status:** FIXED (...) — note: A-01 remains open` is a closure; the
+    # "open" refers to a DIFFERENT finding (real corpus pattern in
+    # portal-directory-sync B-03 / sox-deficiency-aggregation B-01). But
+    # `**STATUS: PARTIALLY FIXED ...**` must stay open.
+    p = tmp_path / "lead.md"
+    p.write_text("""\
+## Findings
+
+### B-03: Stale-status mirror serves stale resolution
+
+**Severity:** Medium
+**Status:** FIXED (2026-06-09) — auto-recovery remains open (see A-01).
+
+### B-01: Aggregate severity floor
+
+**Severity:** Critical
+**Status:** ✅ RESOLVED (2026-06-08). Worth noting B-02 remains open.
+
+### G-02: Fan-out execution missing
+
+**Severity:** Medium
+**STATUS: PARTIALLY FIXED (2026-06-09).** The stub itself remains open.
+""")
+    result = parse_scorecard(p, slug="x", run_id="r")
+    assert result.problems == []
+    assert [c.blocker_id for c in result.candidates] == ["x:G-02"]
+
+
 # ----------------------------------------------------- real-corpus integration
 
 
@@ -540,6 +679,9 @@ def test_real_corpus_parses_end_to_end():
     all_problems: list[str] = []
     for path in sorted(CORPUS_DIR.glob("*.md")):
         result = parse_scorecard(path, slug=path.stem, run_id="corpus")
+        again = parse_scorecard(path, slug=path.stem, run_id="corpus")
+        assert again.candidates == result.candidates   # parse-twice idempotent
+        assert again.problems == result.problems
         print(f"{path.name}: {len(result.candidates)} candidates, "
               f"{len(result.problems)} problems")
         total += len(result.candidates)

@@ -11,7 +11,7 @@
 **Repo:** /home/pete/cadres/shared/lazy-vibe, branch `feature/register-scope-readiness` off main. Run tests from repo root: `python3 -m pytest tests/register -q` (baseline: 80 passed).
 
 **Grounding facts (re-verified 2026-06-11 against all 50 files; the original one-file generalization was wrong):**
-- Real Meridian scorecards live at `/home/pete/cadres/meridian/docs/scorecards/*.md` (50 files) in TWO layouts. (1) Findings tables (14 files): column order varies, parse by header name; severity column is `Severity` or `Sev`; title column is one of Title/Summary/Finding/Issue/One-line summary/Item; `Status` column is optional — without one, closure is marked by explicit markers (`[FIXED]`, ALL-CAPS `RESOLVED`, cell-leading `Resolved.`), never by prose-case marker words ("never cleared", '"Done" claim' are bug text in open rows). (2) Heading findings (36 files, no findings table): `### <ID>: <title>` sections with `**Severity:** <grade>` body lines or inline `(High)`; closure via explicit marker after `—`/`✅` in the heading, `(Cleared …)` parentheticals, or Status/Severity body lines (`~~High~~ → **FIXED**`); `Med — partially fixed` / `still open` stay open. Severities: Critical/High/Med(ium)/Low plus compound grades (Low-Med→P2, Med-High→P1) and `Informational (no finding)` = verified-clean non-finding. Finding IDs: `B-05`, `CLOUD-B01`, `B-NEW-01 (CODE-ITSM-B01)`, `S-01b`, `U-05 (new)`, compound `B-02/A-01`, `A-01 / Scale`. Detail sections `### B-05: …` contain backticked `path:line` evidence refs; table layouts may carry an Evidence/Location/Key citation column instead. Corpus result: 50/50 files parse, 402 open candidates, 0 problems.
+- Real Meridian scorecards live at `/home/pete/cadres/meridian/docs/scorecards/*.md` (50 files) in TWO layouts. (1) Findings tables (14 files): column order varies, parse by header name; severity column is `Severity` or `Sev`; title column is one of Title/Summary/Finding/Issue/One-line summary/Item; `Status` column is optional — without one, closure is marked by explicit markers (`[FIXED]`, ALL-CAPS `RESOLVED`, cell-leading `Resolved.`), never by prose-case marker words ("never cleared", '"Done" claim' are bug text in open rows). (2) Heading findings (36 files, no findings table): `### <ID>: <title>` sections with `**Severity:** <grade>` body lines or inline `(High)`; closure via explicit marker after `—`/`✅` in the heading, `(Cleared …)` parentheticals, or Status/Severity body lines (`~~High~~ → **FIXED**`); `Med — partially fixed` / `still open` stay open. Severities: Critical/High/Med(ium)/Low plus compound grades (Low-Med→P2, Med-High→P1) and `Informational (no finding)` = verified-clean non-finding. Finding IDs: `B-05`, `CLOUD-B01`, `B-NEW-01 (CODE-ITSM-B01)`, `S-01b`, `U-05 (new)`, compound `B-02/A-01`, `A-01 / Scale`. Detail sections `### B-05: …` contain backticked `path:line` evidence refs; table layouts may carry an Evidence/Location/Key citation column instead. Corpus result: 50/50 files parse, 397 open candidates, 0 problems, 7.3% path fallback (29 findings without an extractable evidence path).
 - Meridian profile: `profiles/meridian/product-profile.md` — backend tests `cd backend && python -m pytest`, frontend `cd frontend && npm run typecheck`.
 
 ## File Structure
@@ -579,10 +579,29 @@ def parse_scorecard(path: Path, *, slug: str, run_id: str) -> ScorecardParse: ..
      `_SIMPLE_TAXONOMY` (imported — single source of truth) map to "G".
   7. **Evidence path**: detail-section backticked ref first, then an
      Evidence/Location/Key-citation table cell, then the scorecard file.
-- [x] **Step 4: Green** — `python3 -m pytest tests/register -q` → 127 passed
-  (126 passed + 1 skipped without the Meridian corpus). Corpus integration:
-  50/50 files, 402 open candidates, 0 problems.
+- [x] **Step 4: Green** — `python3 -m pytest tests/register -q` → 133 passed
+  (132 passed + 1 skipped without the Meridian corpus). Corpus integration:
+  50/50 files, 397 open candidates, 0 problems, parse-twice idempotent.
 - [x] **Step 5: Committed.**
+- [x] **Step 6 (re-review fixes, 2026-06-11):** six corpus-integrity fixes,
+  TDD red-first each: (1) `_PATH_PATTERN` extensions longest-first
+  (`tsx|ts`, `json|jsx|js`) plus `(?!\w)` guard — the old alternation
+  truncated `Foo.tsx:123` to `Foo.ts` with the line dropped, corrupting 59
+  of the corpus' evidence paths (and therefore fingerprint identity);
+  (2) bracket-tagged heading IDs (`### B-02 [FIXED]: …` closes,
+  `### B-09 [NEW]: …` yields a candidate — previously both vanished
+  silently); (3) `_OPENISH_RE` word boundary (`\bopen\b`) so
+  "api.openai.com" is not an open counter-signal (real instance:
+  questionnaires S-04); (4) `**Resolution (date):**` body lines scanned as
+  closure evidence (closed portal-app-access S-02, training B-03);
+  (5) ` — ` accepted as an id/title heading separator alongside `:`;
+  (6) a Status/Resolution line whose leading token is a closed marker
+  closes even when later prose says another finding "remains open"
+  (closed portal-directory-sync B-03, sox-deficiency-aggregation B-01).
+  Exact old→new diff: 0 gained, 5 closed (all verified genuine), 59
+  path/line corrections. Remaining false-open estimate: 0 (the one
+  explicit-marker suspect, connector-framework G-02, is `PARTIALLY FIXED`
+  and correctly open).
 
 ---
 
@@ -911,7 +930,7 @@ def render_readiness(report: ReadinessReport) -> str:
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register/test_readiness.py -v` then full suite — expect 138 passed (137 passed + 1 skipped where the Meridian scorecard corpus is absent).
+Run: `python3 -m pytest tests/register/test_readiness.py -v` then full suite — expect 144 passed (143 passed + 1 skipped where the Meridian scorecard corpus is absent).
 
 - [ ] **Step 5: Commit**
 
@@ -1100,7 +1119,7 @@ lists active risk acceptances and parked counts.
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register -q` — expect 140 passed (139 passed + 1 skipped where the Meridian scorecard corpus is absent).
+Run: `python3 -m pytest tests/register -q` — expect 146 passed (145 passed + 1 skipped where the Meridian scorecard corpus is absent).
 
 - [ ] **Step 5: Commit**
 
@@ -1179,7 +1198,7 @@ python3 -m lazy_vibe.register scorecard-ingest \
   --scope /home/pete/cadres/meridian/docs/audit/register/launch-scope.yaml
 ```
 
-Expected: exit 0, `N new, 0 suppressed, 0 regressed` where N ≈ 402 (corpus-verified 2026-06-11: 50/50 files parse, 402 open candidates, 0 problems; reconcile may merge same-fingerprint duplicates, so N can be slightly lower). Any `warning:` lines on stderr are per-row parse problems — report them verbatim; add `--strict` to refuse ingestion on problems. If a scorecard fails outright (missing file, no findings structure), report the exact file and failure — fix the PARSER only if the format is legitimately common; never edit historical scorecards.
+Expected: exit 0, `N new, 0 suppressed, 0 regressed` where N ≈ 397 (corpus-verified 2026-06-11 after re-review fixes: 50/50 files parse, 397 open candidates, 0 problems; reconcile may merge same-fingerprint duplicates, so N can be slightly lower). Any `warning:` lines on stderr are per-row parse problems — report them verbatim; add `--strict` to refuse ingestion on problems. If a scorecard fails outright (missing file, no findings structure), report the exact file and failure — fix the PARSER only if the format is legitimately common; never edit historical scorecards.
 
 - [ ] **Step 4: Idempotency check on real data**
 
@@ -1215,4 +1234,4 @@ launch-scope.yaml with initial severity bar and test gates."
 
 - **Spec coverage:** §7.1 launch-scope format + scope principle → Tasks 2, 7; §7.2 readiness (bar, gates, exit codes, past-due FAIL, always-list acceptances/parked) → Task 5; §10 scorecards→register → Task 4, 7; §12 scope-edit recompute-as-proposals + `_candidate` blocks readiness → Tasks 3, 5; §14 step 4 → whole plan. **Deferred to Plan 2b:** triage pipeline (§6: verifier packets, triage-policy.yaml engine, queue + `triage` CLI, run-triage.sh dispatch wrapper), severity-review queue consumption, reopen proposals, `close` verb, §11 harness wiring into run-audit/run-remediation, fuzzy confirm/split, §12 collision split.
 - **Placeholder scan:** all code steps carry complete code; Task 7 is operational with exact commands and explicit stop-and-report rules.
-- **Type consistency:** `Candidate.taxonomy` (Task 1) consumed in Task 4 constructor and reconcile `_create_finding`; `Scope`/`Gate`/`Surface` (Task 2) consumed by Tasks 3/5/6 with matching field names (`gate_id`, `gate_type`, `params`); `recompute` returns `list[ScopeProposal]` consumed in `_cmd_scope_recompute`; `evaluate(store, scope, *, today)` matches CLI handler; `ScorecardParse` (Task 4) consumed by Task 6 `_cmd_scorecard_ingest`; expected test counts: 80 → 82 → 91 → 94 → 127 → 138 → 140 (original arithmetic 104/116/118 miscounted Task 4's tests and predates the corpus-hardening rework; subtract 1 passed / add 1 skipped on machines without `/home/pete/cadres/meridian/docs/scorecards`).
+- **Type consistency:** `Candidate.taxonomy` (Task 1) consumed in Task 4 constructor and reconcile `_create_finding`; `Scope`/`Gate`/`Surface` (Task 2) consumed by Tasks 3/5/6 with matching field names (`gate_id`, `gate_type`, `params`); `recompute` returns `list[ScopeProposal]` consumed in `_cmd_scope_recompute`; `evaluate(store, scope, *, today)` matches CLI handler; `ScorecardParse` (Task 4) consumed by Task 6 `_cmd_scorecard_ingest`; expected test counts: 80 → 82 → 91 → 94 → 133 → 144 → 146 (original arithmetic 104/116/118 miscounted Task 4's tests and predates the corpus-hardening rework + re-review fixes; subtract 1 passed / add 1 skipped on machines without `/home/pete/cadres/meridian/docs/scorecards`).
