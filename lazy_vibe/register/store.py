@@ -121,9 +121,13 @@ class RegisterStore:
             for finding in ordered:
                 fh.write(finding.to_json_line() + "\n")
         os.replace(tmp, self.jsonl_path)
-        md_tmp = self.markdown_path.with_suffix(".md.tmp")
-        md_tmp.write_text(self.render_markdown(findings))
-        os.replace(md_tmp, self.markdown_path)
+        self.write_markdown(findings)
+
+    def write_markdown(self, findings: dict[str, Finding]) -> None:
+        """Atomically regenerate register.md from the given findings."""
+        tmp = self.markdown_path.with_suffix(".md.tmp")
+        tmp.write_text(self.render_markdown(findings))
+        os.replace(tmp, self.markdown_path)
 
     @staticmethod
     def next_id(findings: dict[str, Finding]) -> str:

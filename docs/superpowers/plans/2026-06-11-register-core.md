@@ -1192,9 +1192,13 @@ class RegisterStore:
             for finding in ordered:
                 fh.write(finding.to_json_line() + "\n")
         os.replace(tmp, self.jsonl_path)
-        md_tmp = self.markdown_path.with_suffix(".md.tmp")
-        md_tmp.write_text(self.render_markdown(findings))
-        os.replace(md_tmp, self.markdown_path)
+        self.write_markdown(findings)
+
+    def write_markdown(self, findings: dict[str, Finding]) -> None:
+        """Atomically regenerate register.md from the given findings."""
+        tmp = self.markdown_path.with_suffix(".md.tmp")
+        tmp.write_text(self.render_markdown(findings))
+        os.replace(tmp, self.markdown_path)
 
     @staticmethod
     def next_id(findings: dict[str, Finding]) -> str:
@@ -2153,6 +2157,16 @@ def test_missing_themes_yaml_fails_loudly(workspace, tmp_path):
     assert "themes.yaml" in proc.stderr
 
 
+def test_cli_reports_clean_error_on_os_failure(workspace, tmp_path):
+    _, register_dir, run1, _ = workspace
+    proc = cli("backfill", "--register-dir", str(register_dir),
+               "--ledger", str(tmp_path),  # a directory, not a file
+               "--run-id", "x", "--date", "2026-06-10")
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
 def test_report_regenerates_markdown(workspace):
     _, register_dir, run1, _ = workspace
     cli("backfill", "--register-dir", str(register_dir),
@@ -2215,20 +2229,23 @@ def _reconcile_candidates(register_dir: Path, candidates, run_id: str,
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     candidates = read_candidates(Path(args.candidates))
     run_id = candidates[0].run_id if candidates else "empty-run"
+    date = args.date or _today()
     return _reconcile_candidates(Path(args.register_dir), candidates,
-                                 run_id, args.date)
+                                 run_id, date)
 
 
 def _cmd_backfill(args: argparse.Namespace) -> int:
     candidates = parse_ledger(Path(args.ledger), run_id=args.run_id)
+    date = args.date or _today()
     return _reconcile_candidates(Path(args.register_dir), candidates,
-                                 args.run_id, args.date)
+                                 args.run_id, date)
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
     store = RegisterStore(Path(args.register_dir))
-    findings = store.load()
-    store.markdown_path.write_text(store.render_markdown(findings))
+    with store.locked():
+        findings = store.load()
+        store.write_markdown(findings)
     print(f"regenerated {store.markdown_path} ({len(findings)} findings)")
     return 0
 
@@ -2246,14 +2263,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reconcile", help="reconcile candidates against the register")
     p.add_argument("--register-dir", required=True)
     p.add_argument("--candidates", required=True)
-    p.add_argument("--date", default=_today())
+    p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_reconcile)
 
     p = sub.add_parser("backfill", help="ingest + reconcile a ledger in one pass")
     p.add_argument("--register-dir", required=True)
     p.add_argument("--ledger", required=True)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--date", default=_today())
+    p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_backfill)
 
     p = sub.add_parser("report", help="regenerate register.md from register.jsonl")
@@ -2268,6 +2285,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except RegisterError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

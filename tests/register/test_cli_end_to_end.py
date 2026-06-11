@@ -122,6 +122,16 @@ def test_missing_themes_yaml_fails_loudly(workspace, tmp_path):
     assert "themes.yaml" in proc.stderr
 
 
+def test_cli_reports_clean_error_on_os_failure(workspace, tmp_path):
+    _, register_dir, run1, _ = workspace
+    proc = cli("backfill", "--register-dir", str(register_dir),
+               "--ledger", str(tmp_path),  # a directory, not a file
+               "--run-id", "x", "--date", "2026-06-10")
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
 def test_report_regenerates_markdown(workspace):
     _, register_dir, run1, _ = workspace
     cli("backfill", "--register-dir", str(register_dir),

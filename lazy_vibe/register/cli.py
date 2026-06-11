@@ -39,20 +39,23 @@ def _reconcile_candidates(register_dir: Path, candidates, run_id: str,
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     candidates = read_candidates(Path(args.candidates))
     run_id = candidates[0].run_id if candidates else "empty-run"
+    date = args.date or _today()
     return _reconcile_candidates(Path(args.register_dir), candidates,
-                                 run_id, args.date)
+                                 run_id, date)
 
 
 def _cmd_backfill(args: argparse.Namespace) -> int:
     candidates = parse_ledger(Path(args.ledger), run_id=args.run_id)
+    date = args.date or _today()
     return _reconcile_candidates(Path(args.register_dir), candidates,
-                                 args.run_id, args.date)
+                                 args.run_id, date)
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
     store = RegisterStore(Path(args.register_dir))
-    findings = store.load()
-    store.markdown_path.write_text(store.render_markdown(findings))
+    with store.locked():
+        findings = store.load()
+        store.write_markdown(findings)
     print(f"regenerated {store.markdown_path} ({len(findings)} findings)")
     return 0
 
@@ -70,14 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reconcile", help="reconcile candidates against the register")
     p.add_argument("--register-dir", required=True)
     p.add_argument("--candidates", required=True)
-    p.add_argument("--date", default=_today())
+    p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_reconcile)
 
     p = sub.add_parser("backfill", help="ingest + reconcile a ledger in one pass")
     p.add_argument("--register-dir", required=True)
     p.add_argument("--ledger", required=True)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--date", default=_today())
+    p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_backfill)
 
     p = sub.add_parser("report", help="regenerate register.md from register.jsonl")
@@ -92,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except RegisterError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
