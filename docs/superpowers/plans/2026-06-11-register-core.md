@@ -1718,7 +1718,7 @@ from .fingerprint import compute, jaccard, normalize_path, title_tokens
 from .ingest import Candidate
 from .model import (PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Disposition,
                     Finding)
-from .store import RegisterStore
+from .store import RegisterStore, markdown_cell
 from .themes import map_theme
 from .transitions import transition
 
@@ -1871,7 +1871,8 @@ def render_report(result: ReconcileResult, findings: dict[str, Finding],
         lines += ["## Regressions", "",
                   "Previously fixed findings that reappeared — highest signal.", ""]
         for f in result.regressed:
-            lines.append(f"- **{f.finding_id}** {f.severity} {f.title} "
+            lines.append(f"- **{f.finding_id}** {f.severity} "
+                         f"{markdown_cell(f.title)} "
                          f"(regression test: `{f.regression_test}`)")
         lines.append("")
     if result.new:
@@ -1881,14 +1882,15 @@ def render_report(result: ReconcileResult, findings: dict[str, Finding],
                   "|---|---|---|---|---|"]
         for f in result.new:
             lines.append(f"| {f.finding_id} | {f.severity} "
-                         f"| {f.fingerprint_inputs['theme']} | {f.title} "
+                         f"| {f.fingerprint_inputs['theme']} "
+                         f"| {markdown_cell(f.title)} "
                          f"| {fuzzy_of.get(f.finding_id, '-')} |")
         lines.append("")
     if result.suppressed:
         lines += ["## Suppressed", ""]
         for f in result.suppressed:
             lines.append(f"- {f.finding_id} ({f.disposition}, "
-                         f"x{f.occurrences}) {f.title}")
+                         f"x{f.occurrences}) {markdown_cell(f.title)}")
         lines.append("")
     if result.theme_candidates:
         lines += ["## Theme vocabulary candidates", "",
@@ -1901,7 +1903,7 @@ def render_report(result: ReconcileResult, findings: dict[str, Finding],
                   "| id | sev | disposition | title |", "|---|---|---|---|"]
         for f in still_open:
             lines.append(f"| {f.finding_id} | {f.severity} "
-                         f"| {f.disposition} | {f.title} |")
+                         f"| {f.disposition} | {markdown_cell(f.title)} |")
         lines.append("")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines))
