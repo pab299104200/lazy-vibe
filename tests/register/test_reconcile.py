@@ -264,3 +264,28 @@ def test_reconcile_with_scope_keeps_in_scope_new(store, tmp_path):
     f = store.load()[result.new[0].finding_id]
     assert f.in_scope is True
     assert f.disposition == "new"
+
+
+def test_distinct_symbols_same_path_do_not_merge(store):
+    # Two different findings citing the same file in the same run must stay
+    # two register entries — symbol is part of fingerprint identity
+    # (spec §4.1; real case: cloud-connectors B-05 vs B-06).
+    a = cand(blocker_id="cc:B-05", symbol="B-05",
+             title="Multi-account sync runs with no RLS context")
+    b = cand(blocker_id="cc:B-06", symbol="B-06",
+             title="Sweep session misattributes bindings")
+    result = reconcile(store, [a, b], VOCAB, run_id=RUN, date=DATE)
+    assert len(result.new) == 2
+    findings = store.load()
+    assert len(findings) == 2
+    assert len({f.fingerprint for f in findings.values()}) == 2
+    assert {f.fingerprint_inputs["symbol"] for f in findings.values()} == \
+        {"B-05", "B-06"}
+
+
+def test_ledger_candidates_default_symbol_dash(store):
+    # Ledger-sourced candidates carry no symbol; identity stays
+    # (category|theme|path|-) exactly as before.
+    result = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    f = store.load()[result.new[0].finding_id]
+    assert f.fingerprint_inputs["symbol"] == "-"

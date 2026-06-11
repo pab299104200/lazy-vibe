@@ -67,11 +67,21 @@ Expected: FAIL — `Candidate` has no `taxonomy` attribute / unexpected keyword.
 
 - [ ] **Step 3: Implement**
 
-In `lazy_vibe/register/ingest.py`, add to the `Candidate` dataclass as the LAST field (frozen dataclass — defaulted fields must follow non-defaulted):
+In `lazy_vibe/register/ingest.py`, add to the `Candidate` dataclass after the non-defaulted fields (frozen dataclass — defaulted fields must follow non-defaulted):
 
 ```python
     taxonomy: str = "G"
+    # Fingerprint symbol (spec §4.1): the per-source stable finding handle
+    # (scorecard finding ID). "-" for sources without one (blocker ledger).
+    symbol: str = "-"
 ```
+
+(`symbol` was added in the Task 4 identity fix of 2026-06-11: without it,
+distinct scorecard findings citing the same file shared a fingerprint and
+silently merged — 397 candidates collapsed to 264 register entries in the
+first Meridian seed. `reconcile()` and `_create_finding` use
+`candidate.symbol` in the fingerprint compute and `fingerprint_inputs`;
+ledger candidates keep the `"-"` default so ledger identity is unchanged.)
 
 In `lazy_vibe/register/reconcile.py` `_create_finding`, replace the hardcoded taxonomy line (keep the comment, reworded):
 
@@ -619,6 +629,19 @@ def parse_scorecard(path: Path, *, slug: str, run_id: str) -> ScorecardParse: ..
   path/line corrections. Remaining false-open estimate: 0 (the one
   explicit-marker suspect, connector-framework G-02, is `PARTIALLY FIXED`
   and correctly open).
+- [x] **Step 7 (identity fix, 2026-06-11):** wired the per-finding
+  `symbol` the module docstring always promised. `Candidate` gained
+  `symbol: str = "-"`; `scorecard.py` sets `symbol=<finding id>`;
+  `reconcile()` and `_create_finding` use `candidate.symbol` in the
+  fingerprint compute and `fingerprint_inputs` (previously hardcoded
+  `"-"`, which merged distinct findings citing the same file — the first
+  Meridian seed collapsed 397 candidates into 264 entries, e.g.
+  cloud-connectors B-05/B-06 became one entry with occurrences=2).
+  Ledger candidates keep `"-"` so ledger identity is unchanged. New
+  tests: distinct-symbol no-merge, ledger default pin, scorecard symbol
+  field, and a corpus test reconciling all 50 scorecards into a tmp
+  register asserting entries == candidates (397). Suite: 156 passed
+  after Tasks 5–6 (155 + 1 skipped without the corpus).
 
 ---
 
@@ -1278,4 +1301,4 @@ launch-scope.yaml with initial severity bar and test gates."
 
 - **Spec coverage:** §7.1 launch-scope format + scope principle → Tasks 2, 7; §7.2 readiness (bar, gates, exit codes, past-due FAIL, always-list acceptances/parked) → Task 5; §10 scorecards→register → Task 4, 7; §12 scope-edit recompute-as-proposals + `_candidate` blocks readiness → Tasks 3, 5; §14 step 4 → whole plan. **Deferred to Plan 2b:** triage pipeline (§6: verifier packets, triage-policy.yaml engine, queue + `triage` CLI, run-triage.sh dispatch wrapper), severity-review queue consumption, reopen proposals, `close` verb, §11 harness wiring into run-audit/run-remediation, fuzzy confirm/split, §12 collision split.
 - **Placeholder scan:** all code steps carry complete code; Task 7 is operational with exact commands and explicit stop-and-report rules.
-- **Type consistency:** `Candidate.taxonomy` (Task 1) consumed in Task 4 constructor and reconcile `_create_finding`; `Scope`/`Gate`/`Surface` (Task 2) consumed by Tasks 3/5/6 with matching field names (`gate_id`, `gate_type`, `params`); `recompute` returns `list[ScopeProposal]` consumed in `_cmd_scope_recompute`; `evaluate(store, scope, *, today)` matches CLI handler; `ScorecardParse` (Task 4) consumed by Task 6 `_cmd_scorecard_ingest`; expected test counts: 80 → 82 → 91 → 94 → 133 → 144 → 146 (original arithmetic 104/116/118 miscounted Task 4's tests and predates the corpus-hardening rework + re-review fixes; subtract 1 passed / add 1 skipped on machines without `/home/pete/cadres/meridian/docs/scorecards`).
+- **Type consistency:** `Candidate.taxonomy` (Task 1) consumed in Task 4 constructor and reconcile `_create_finding`; `Scope`/`Gate`/`Surface` (Task 2) consumed by Tasks 3/5/6 with matching field names (`gate_id`, `gate_type`, `params`); `recompute` returns `list[ScopeProposal]` consumed in `_cmd_scope_recompute`; `evaluate(store, scope, *, today)` matches CLI handler; `ScorecardParse` (Task 4) consumed by Task 6 `_cmd_scorecard_ingest`; expected test counts: 80 → 82 → 91 → 94 → 133 → … → 156 on the branch tip (original arithmetic 104/116/118 miscounted Task 4's tests; Tasks 5–6 as landed carry more tests than their plan blocks, and the Task 4 identity fix added 4 more; subtract 2 passed / add 2 skipped on machines without `/home/pete/cadres/meridian/docs/scorecards`).

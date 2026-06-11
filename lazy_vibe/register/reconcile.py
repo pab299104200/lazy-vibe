@@ -92,9 +92,11 @@ def _create_finding(findings: dict[str, Finding], candidate: Candidate,
                     theme: str, run_id: str, date: str) -> Finding:
     finding = Finding(
         finding_id=RegisterStore.next_id(findings),
-        fingerprint=compute(candidate.category, theme, candidate.path, "-"),
+        fingerprint=compute(candidate.category, theme, candidate.path,
+                            candidate.symbol),
         fingerprint_inputs={"category": candidate.category, "theme": theme,
-                            "path": normalize_path(candidate.path), "symbol": "-"},
+                            "path": normalize_path(candidate.path),
+                            "symbol": candidate.symbol},
         title=candidate.title,
         description=f"Imported from {candidate.blocker_id} "
                     f"(run {candidate.run_id}). References: {candidate.references}",
@@ -127,7 +129,8 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
             theme = map_theme(candidate.theme_raw, vocab)
             if theme.startswith("_candidate:"):
                 result.theme_candidates.add(theme)
-            fingerprint = compute(candidate.category, theme, candidate.path, "-")
+            fingerprint = compute(candidate.category, theme, candidate.path,
+                                  candidate.symbol)
             existing = index.get(fingerprint)
             # Fingerprint collision splitting (spec §12) requires the
             # verifier machinery — plan 2.

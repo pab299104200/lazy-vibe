@@ -30,6 +30,9 @@ class Candidate:
     references: str
     run_id: str
     taxonomy: str = "G"
+    # Fingerprint symbol (spec §4.1): the per-source stable finding handle
+    # (scorecard finding ID). "-" for sources without one (blocker ledger).
+    symbol: str = "-"
 
 
 def _validate_severity(value: str, where: str) -> None:

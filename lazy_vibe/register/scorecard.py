@@ -224,7 +224,7 @@ def _make_candidate(finding_id: str, severity: str, title: str,
         blocker_id=f"{slug}:{finding_id}", category="product_gap",
         theme_raw=slug, severity=severity, path=ev[0], line=ev[1],
         title=title, references=f"{path}#{finding_id}", run_id=run_id,
-        taxonomy=_taxonomy(finding_id))
+        taxonomy=_taxonomy(finding_id), symbol=finding_id)
 
 
 def _parse_table(lines: list[str], table: _Table, text: str, path: Path,

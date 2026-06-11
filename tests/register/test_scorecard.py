@@ -695,3 +695,31 @@ def test_real_corpus_parses_end_to_end():
         print(f"  problem: {prob}")
     assert total >= 100
     assert all_problems == []
+
+
+def test_candidates_carry_finding_id_as_symbol(scorecard):
+    cands = cands_by_id(scorecard)
+    assert cands["cloud-connectors:B-05"].symbol == "B-05"
+    assert cands["cloud-connectors:G-03"].symbol == "G-03"
+    assert cands["cloud-connectors:M-01"].symbol == "M-01"
+
+
+@pytest.mark.skipif(not CORPUS_DIR.exists(),
+                    reason="Meridian scorecard corpus not present")
+def test_real_corpus_reconciles_without_merging(tmp_path):
+    # End-to-end identity check: every parsed candidate must land as its
+    # own register entry. Without per-finding symbols, distinct findings
+    # citing the same file silently merge (397 -> 264 in the first seed).
+    from lazy_vibe.register.reconcile import reconcile
+    from lazy_vibe.register.store import RegisterStore
+    store = RegisterStore(tmp_path / "register")
+    vocab = {p.stem: [] for p in CORPUS_DIR.glob("*.md")}
+    candidates = []
+    for path in sorted(CORPUS_DIR.glob("*.md")):
+        candidates.extend(
+            parse_scorecard(path, slug=path.stem, run_id="corpus").candidates)
+    result = reconcile(store, candidates, vocab, run_id="corpus",
+                       date="2026-06-11")
+    findings = store.load()
+    assert len(result.new) == len(candidates)
+    assert len(findings) == len(candidates)
