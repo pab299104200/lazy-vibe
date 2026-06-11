@@ -1271,7 +1271,8 @@ import json
 
 import pytest
 
-from lazy_vibe.register.ingest import Candidate, parse_ledger, write_candidates
+from lazy_vibe.register.ingest import (Candidate, parse_ledger,
+                                       read_candidates, write_candidates)
 from lazy_vibe.register.model import RegisterError
 
 HEADER = ("blocker_id\tcategory\ttheme\tseverity\tgroup\tmodel_class\t"
@@ -1349,6 +1350,54 @@ def test_write_candidates_round_trip(ledger, tmp_path):
     assert data["run_id"] == "2026-06-10-1402"
     assert len(data["candidates"]) == 2
     assert data["candidates"][0]["blocker_id"] == "B-0001"
+
+
+def test_read_candidates_round_trip(ledger, tmp_path):
+    candidates = parse_ledger(ledger, run_id="2026-06-10-1402")
+    out = tmp_path / "register-candidates.json"
+    write_candidates(candidates, out, run_id="2026-06-10-1402")
+    assert read_candidates(out) == candidates
+
+
+def test_read_candidates_rejects_corrupt_json(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text("{not json")
+    with pytest.raises(RegisterError, match="corrupt"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_missing_candidates_key(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text('{"run_id": "x"}')
+    with pytest.raises(RegisterError, match="candidates"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_bad_severity(ledger, tmp_path):
+    candidates = parse_ledger(ledger, run_id="x")
+    out = tmp_path / "c.json"
+    write_candidates(candidates, out, run_id="x")
+    path = tmp_path / "tampered.json"
+    path.write_text(out.read_text().replace('"P1"', '"P9"'))
+    with pytest.raises(RegisterError, match="severity"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_missing_field(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text('{"run_id": "x", "candidates": [{"blocker_id": "B-0001"}]}')
+    with pytest.raises(RegisterError, match="candidate 0"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_run_id_mismatch(ledger, tmp_path):
+    candidates = parse_ledger(ledger, run_id="x")
+    out = tmp_path / "c.json"
+    write_candidates(candidates, out, run_id="x")
+    path = tmp_path / "tampered.json"
+    path.write_text(out.read_text().replace('"run_id": "x"', '"run_id": "y"', 1))
+    with pytest.raises(RegisterError, match="run_id"):
+        read_candidates(path)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1361,7 +1410,11 @@ Expected: FAIL with `ModuleNotFoundError`
 Create `lazy_vibe/register/ingest.py`:
 
 ```python
-"""Blocker-ledger TSV -> reconcile candidates (spec §5, §11)."""
+"""Blocker-ledger TSV -> reconcile candidates (spec §5, §11).
+
+``parse_ledger`` is the untrusted-harness boundary; ``read_candidates`` reads
+a regenerable intermediate but enforces the same invariants.
+"""
 from __future__ import annotations
 
 import csv
@@ -1390,6 +1443,11 @@ class Candidate:
     run_id: str
 
 
+def _validate_severity(value: str, where: str) -> None:
+    if value not in SEVERITY_ORDER:
+        raise RegisterError(f"{where}: invalid severity {value!r}")
+
+
 def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
     if not path.exists():
         raise RegisterError(f"blocker ledger not found: {path}")
@@ -1413,9 +1471,7 @@ def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
                 raise RegisterError(f"{path}: line {lineno}: expected "
                                     f"{len(EXPECTED_HEADER)} columns, got {len(row)}")
             record = dict(zip(EXPECTED_HEADER, row))
-            if record["severity"] not in SEVERITY_ORDER:
-                raise RegisterError(f"{path}: line {lineno}: invalid severity "
-                                    f"{record['severity']!r}")
+            _validate_severity(record["severity"], f"{path}: line {lineno}")
             candidates.append(Candidate(
                 blocker_id=record["blocker_id"],
                 category=record["category"],
@@ -1432,6 +1488,8 @@ def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
 
 def write_candidates(candidates: list[Candidate], out_path: Path, *,
                      run_id: str) -> None:
+    """Idempotently overwrite a derived artifact (intentional asymmetry
+    with RegisterStore.save, which guards the durable register)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"run_id": run_id, "candidates": [asdict(c) for c in candidates]}
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
@@ -1440,8 +1498,27 @@ def write_candidates(candidates: list[Candidate], out_path: Path, *,
 def read_candidates(path: Path) -> list[Candidate]:
     if not path.exists():
         raise RegisterError(f"candidates file not found: {path}")
-    data = json.loads(path.read_text())
-    return [Candidate(**c) for c in data["candidates"]]
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise RegisterError(f"{path}: corrupt candidates file: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("candidates"), list):
+        raise RegisterError(f"{path}: expected a 'candidates' list")
+    run_id = data.get("run_id")
+    candidates = []
+    for index, entry in enumerate(data["candidates"]):
+        try:
+            candidate = Candidate(**entry)
+        except TypeError as exc:
+            raise RegisterError(
+                f"{path}: candidate {index}: {exc}") from exc
+        _validate_severity(candidate.severity, f"{path}: candidate {index}")
+        if run_id is not None and candidate.run_id != run_id:
+            raise RegisterError(
+                f"{path}: candidate {index}: run_id {candidate.run_id!r} "
+                f"disagrees with file run_id {run_id!r}")
+        candidates.append(candidate)
+    return candidates
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**

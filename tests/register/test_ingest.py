@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from lazy_vibe.register.ingest import Candidate, parse_ledger, write_candidates
+from lazy_vibe.register.ingest import (Candidate, parse_ledger,
+                                       read_candidates, write_candidates)
 from lazy_vibe.register.model import RegisterError
 
 HEADER = ("blocker_id\tcategory\ttheme\tseverity\tgroup\tmodel_class\t"
@@ -80,3 +81,51 @@ def test_write_candidates_round_trip(ledger, tmp_path):
     assert data["run_id"] == "2026-06-10-1402"
     assert len(data["candidates"]) == 2
     assert data["candidates"][0]["blocker_id"] == "B-0001"
+
+
+def test_read_candidates_round_trip(ledger, tmp_path):
+    candidates = parse_ledger(ledger, run_id="2026-06-10-1402")
+    out = tmp_path / "register-candidates.json"
+    write_candidates(candidates, out, run_id="2026-06-10-1402")
+    assert read_candidates(out) == candidates
+
+
+def test_read_candidates_rejects_corrupt_json(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text("{not json")
+    with pytest.raises(RegisterError, match="corrupt"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_missing_candidates_key(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text('{"run_id": "x"}')
+    with pytest.raises(RegisterError, match="candidates"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_bad_severity(ledger, tmp_path):
+    candidates = parse_ledger(ledger, run_id="x")
+    out = tmp_path / "c.json"
+    write_candidates(candidates, out, run_id="x")
+    path = tmp_path / "tampered.json"
+    path.write_text(out.read_text().replace('"P1"', '"P9"'))
+    with pytest.raises(RegisterError, match="severity"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_missing_field(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text('{"run_id": "x", "candidates": [{"blocker_id": "B-0001"}]}')
+    with pytest.raises(RegisterError, match="candidate 0"):
+        read_candidates(path)
+
+
+def test_read_candidates_rejects_run_id_mismatch(ledger, tmp_path):
+    candidates = parse_ledger(ledger, run_id="x")
+    out = tmp_path / "c.json"
+    write_candidates(candidates, out, run_id="x")
+    path = tmp_path / "tampered.json"
+    path.write_text(out.read_text().replace('"run_id": "x"', '"run_id": "y"', 1))
+    with pytest.raises(RegisterError, match="run_id"):
+        read_candidates(path)

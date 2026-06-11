@@ -1,4 +1,8 @@
-"""Blocker-ledger TSV -> reconcile candidates (spec §5, §11)."""
+"""Blocker-ledger TSV -> reconcile candidates (spec §5, §11).
+
+``parse_ledger`` is the untrusted-harness boundary; ``read_candidates`` reads
+a regenerable intermediate but enforces the same invariants.
+"""
 from __future__ import annotations
 
 import csv
@@ -27,6 +31,11 @@ class Candidate:
     run_id: str
 
 
+def _validate_severity(value: str, where: str) -> None:
+    if value not in SEVERITY_ORDER:
+        raise RegisterError(f"{where}: invalid severity {value!r}")
+
+
 def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
     if not path.exists():
         raise RegisterError(f"blocker ledger not found: {path}")
@@ -50,9 +59,7 @@ def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
                 raise RegisterError(f"{path}: line {lineno}: expected "
                                     f"{len(EXPECTED_HEADER)} columns, got {len(row)}")
             record = dict(zip(EXPECTED_HEADER, row))
-            if record["severity"] not in SEVERITY_ORDER:
-                raise RegisterError(f"{path}: line {lineno}: invalid severity "
-                                    f"{record['severity']!r}")
+            _validate_severity(record["severity"], f"{path}: line {lineno}")
             candidates.append(Candidate(
                 blocker_id=record["blocker_id"],
                 category=record["category"],
@@ -69,6 +76,8 @@ def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
 
 def write_candidates(candidates: list[Candidate], out_path: Path, *,
                      run_id: str) -> None:
+    """Idempotently overwrite a derived artifact (intentional asymmetry
+    with RegisterStore.save, which guards the durable register)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"run_id": run_id, "candidates": [asdict(c) for c in candidates]}
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
@@ -77,5 +86,24 @@ def write_candidates(candidates: list[Candidate], out_path: Path, *,
 def read_candidates(path: Path) -> list[Candidate]:
     if not path.exists():
         raise RegisterError(f"candidates file not found: {path}")
-    data = json.loads(path.read_text())
-    return [Candidate(**c) for c in data["candidates"]]
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise RegisterError(f"{path}: corrupt candidates file: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("candidates"), list):
+        raise RegisterError(f"{path}: expected a 'candidates' list")
+    run_id = data.get("run_id")
+    candidates = []
+    for index, entry in enumerate(data["candidates"]):
+        try:
+            candidate = Candidate(**entry)
+        except TypeError as exc:
+            raise RegisterError(
+                f"{path}: candidate {index}: {exc}") from exc
+        _validate_severity(candidate.severity, f"{path}: candidate {index}")
+        if run_id is not None and candidate.run_id != run_id:
+            raise RegisterError(
+                f"{path}: candidate {index}: run_id {candidate.run_id!r} "
+                f"disagrees with file run_id {run_id!r}")
+        candidates.append(candidate)
+    return candidates
