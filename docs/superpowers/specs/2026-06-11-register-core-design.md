@@ -166,8 +166,11 @@ adjudicated evidence (different file/symbol, or new exploit mechanism stated)
 creates a **reopen proposal** in Pete's queue; identical evidence is suppressed
 silently and counted in the reconcile report.
 
-`risk_accepted` supports optional `review_by` (ISO date); past-due acceptances
-surface in the triage queue and in `readiness` output as warnings (not blockers).
+`risk_accepted` **requires** `review_by` (ISO date). A past-due acceptance
+reverts to blocking: it surfaces in the triage queue and **fails the readiness
+predicate** until Pete re-affirms (new `review_by`) or moves it to `open`.
+Risk acceptances are time-boxed exceptions, never permanent dispositions —
+this is the anti-tech-debt guard.
 
 ### 4.3 Storage
 
@@ -204,6 +207,13 @@ run per product (e.g. portal `2026-06-01-launch-readiness-run`, the meridian
 remediation ledgers) so existing adjudication effort is not lost.
 
 ## 6. Triage pipeline
+
+Triage adjudicates exactly one question per finding: **is it real?** It never
+decides how much effort a real problem deserves. A verified, in-scope finding
+defaults to `open` — the fix queue. There is no disposition for "mitigated" or
+"workaround": the only exits from `open` are a root-cause fix with a permanent
+regression test (`fixed`), or an explicit Pete-only decision (`risk_accepted`,
+time-boxed per §4.2). The remediation standard remains root-cause-or-nothing.
 
 Three stages, in order, for `new` entries only:
 
@@ -280,7 +290,10 @@ readiness`): evaluates severity bar against the register and each gate against
 the latest native artifacts (paths from the product profile). Prints a table —
 each bar/gate, PASS/FAIL, and the exact blocking items (`R-0042 open P1 …`).
 Exit 0 = READY, 1 = NOT READY, 2 = stale evidence (gate artifacts older than
-baseline). No LLM calls. This command's output **is** the release decision input;
+baseline). No LLM calls. Past-due risk acceptances are FAIL (§4.2). The report
+**always** lists active risk acceptances (with review dates) and parked counts,
+so every deferred item is visible at every release decision — deferral never
+means buried. This command's output **is** the release decision input;
 audit job `09-final-decision` is reduced to narrating it, not making it.
 
 ## 8. Differential audit mode
