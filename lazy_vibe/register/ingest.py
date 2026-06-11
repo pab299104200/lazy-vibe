@@ -31,7 +31,9 @@ def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
     if not path.exists():
         raise RegisterError(f"blocker ledger not found: {path}")
     with path.open(newline="") as fh:
-        reader = csv.reader(fh, delimiter="\t")
+        # QUOTE_NONE: the ledger is awk-generated plain TSV, not RFC 4180 —
+        # a literal leading '"' in a field must not trigger quote parsing.
+        reader = csv.reader(fh, delimiter="\t", quoting=csv.QUOTE_NONE)
         try:
             header = next(reader)
         except StopIteration:

@@ -1331,6 +1331,16 @@ def test_parse_ledger_missing_file(tmp_path):
         parse_ledger(tmp_path / "nope.tsv", run_id="x")
 
 
+def test_parse_ledger_handles_leading_quote_in_title(tmp_path):
+    row = ROW1.replace("Evidence list endpoint not tenant-scoped",
+                       '"eval" is dangerous in evidence parser')
+    path = tmp_path / "quoted.tsv"
+    path.write_text(HEADER + row + ROW2)
+    candidates = parse_ledger(path, run_id="x")
+    assert len(candidates) == 2
+    assert candidates[0].title == '"eval" is dangerous in evidence parser'
+
+
 def test_write_candidates_round_trip(ledger, tmp_path):
     candidates = parse_ledger(ledger, run_id="2026-06-10-1402")
     out = tmp_path / "register-candidates.json"
@@ -1384,7 +1394,9 @@ def parse_ledger(path: Path, *, run_id: str) -> list[Candidate]:
     if not path.exists():
         raise RegisterError(f"blocker ledger not found: {path}")
     with path.open(newline="") as fh:
-        reader = csv.reader(fh, delimiter="\t")
+        # QUOTE_NONE: the ledger is awk-generated plain TSV, not RFC 4180 —
+        # a literal leading '"' in a field must not trigger quote parsing.
+        reader = csv.reader(fh, delimiter="\t", quoting=csv.QUOTE_NONE)
         try:
             header = next(reader)
         except StopIteration:
