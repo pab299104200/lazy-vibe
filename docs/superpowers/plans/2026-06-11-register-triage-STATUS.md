@@ -20,7 +20,7 @@
 | T5 triage CLI + close | DONE (789b365) + quality fixes landed 04491b5 — review CLOSED | 04491b5 (suite 257) |
 | T6 scope journeys/claims_doc | DONE (f949c9c) — suite 260 (plan said 261; arithmetic defect: replaced 1 test with 4, net +3 not +4) | f949c9c |
 | T7 run-triage.sh + exports + README | DONE (58de804) + Task 8 sampling fix (`--no-generate`) landed in current fix commit | suite 263 |
-| T8 Meridian dry-run | in progress — interrupted Claude run over-dispatched; out-of-scope results preserved aside | |
+| T8 Meridian dry-run | DONE — Meridian commit 88832bb5; 15 sampled, 12 VERIFIED/opened, 3 UNSUPPORTED/false_positive, 382 queued | 88832bb5 |
 
 ## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Re-review item LANDED in 066f427: duplicate claims bound to the solicited fuzzy candidate (`duplicate_of == _fuzzy_candidate(finding)`), closing both the unsolicited-claim hole AND the nonexistent-id silent fall-through (the residual previously flagged for T4 — now resolved).
 
@@ -45,6 +45,16 @@ Plan test arithmetic re-derived after T5 quality fixes: T2 192, T3 211, T4 236, 
 
 ## After T8
 Final whole-branch adversarial review (cross-module composition, debris, plan/spec/code consistency) → fix minors → merge to main, run suite on merge, delete branch, push. Update spec deferred-items if scope changed.
+
+## T8 dry-run results (2026-06-11/12)
+- Lazy-vibe T7/T8 sampling defect fixed in commit 9bc65ff: `run-triage.sh --no-generate` preserves a caller-bounded packet set. Full register suite after fix: 263 passed; `ruff check .` clean; `bash -n run-triage.sh` clean.
+- Meridian commit: 88832bb5 `chore(register): triage dry-run — verify 5 P0 + 10 P1, starter policy`.
+- Sample: P0 `R-0046`, `R-0200`, `R-0328`, `R-0371`, `R-0374`; P1 `R-0006`, `R-0010`, `R-0011`, `R-0017`, `R-0041`, `R-0052`, `R-0057`, `R-0065`, `R-0072`, `R-0073`.
+- Verifier outcomes: 12 `VERIFIED`, 3 `UNSUPPORTED`, 0 `split`, 0 schema rejections. `UNSUPPORTED`: `R-0328`, `R-0371`, `R-0374`; verifier consumption transitioned them to `false_positive`.
+- Policy outcome after consume: 12 opened, 0 parked, 0 false_positive (already consumed), 0 risk-accept proposed, 382 queued.
+- Queue: `triage-queue.md` has one capped section, `Unverified findings (382)`, with 20 rendered rows and overflow text.
+- Readiness: findings-only evaluation is `NOT READY`, 235 blocking, exit code 1. Full `readiness` command was interrupted because `launch-scope.yaml` runs the full backend pytest gate even though the register already fails; no gate verdict claimed.
+- Anomaly preserved: the interrupted Claude attempt ran before the `--no-generate` fix and produced 20 out-of-scope `R-0001`–`R-0024` results. They were not consumed; they are committed under `triage/results/out_of_scope_20260611_overdispatch/`.
 
 ## Wider context
 - Registers live: meridian (397 findings, commit 35bdd9af) and portal (353, seeded by Pete) at `docs/audit/register/` in each repo.
