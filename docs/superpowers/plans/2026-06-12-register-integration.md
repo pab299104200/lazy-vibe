@@ -142,6 +142,8 @@ Tests:
 
 ## Task 5: Feature-Build Postcheck
 
+**Status:** landed in the eighth Plan 3 code slice.
+
 Wire `run-feature-build.sh` completion into the differential audit pipeline.
 
 Required behavior:
@@ -152,6 +154,20 @@ Required behavior:
 - Run register triage and then remediation for newly opened entries.
 - Preserve branch/worktree safety: no concurrent mutation of the same product
   checkout.
+
+Implementation notes:
+
+- Register-enabled feature builds auto-run `run-audit.sh --differential` after
+  task verification and standard gates, before final success/commit/push/deploy.
+- The postcheck passes through `PROFILE`, `PROFILES_DIR`, `PRODUCT_PROFILE`,
+  `JOBS_FILE`, `REGISTER_DIR`, `REPO_ROOT`, and a feature-scoped audit
+  `RUN_DIR`.
+- Feature-build postchecks set `AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE=1` so the
+  differential scope includes verified task changes before the default
+  auto-commit step.
+- `FEATURE_BUILD_POSTCHECK=0` disables the hook; `FEATURE_BUILD_POSTCHECK_TRIAGE`
+  and `FEATURE_BUILD_POSTCHECK_REMEDIATE` control the follow-on triage and
+  remediation steps.
 
 Tests:
 

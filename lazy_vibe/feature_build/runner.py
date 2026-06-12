@@ -1919,6 +1919,7 @@ def final_gates(args: argparse.Namespace, root: Path, run_dir: Path, state_file:
         if standard_gates_enabled(args):
             run_final_standard_gates(args, root, run_dir)
             record_event(state_file, state, "standard_gates_complete")
+        run_register_postcheck(args, root, run_dir, state_file, state)
         run_post_build_closeout(args, root, run_dir, state_file, state)
 
 
@@ -1969,6 +1970,169 @@ def feature_build_commit_enabled(args: argparse.Namespace) -> bool:
         return False
     raw = os.getenv("FEATURE_BUILD_AUTO_COMMIT", "1").strip().lower()
     return raw not in FALSE_VALUES
+
+
+def feature_build_postcheck_mode() -> str:
+    return os.getenv("FEATURE_BUILD_POSTCHECK", "auto").strip().lower()
+
+
+def feature_build_postcheck_enabled(args: argparse.Namespace, register_dir: Path) -> bool:
+    mode = feature_build_postcheck_mode()
+    if mode in FALSE_VALUES or mode in {"skip", "disabled", "off"}:
+        return False
+    if not args.execute or not args.verify or args.verify_only or args.dry_run:
+        return False
+    if mode in TRUE_VALUES or mode in {"force", "required"}:
+        return True
+    return (register_dir / "baseline.json").exists()
+
+
+def register_dir_for_postcheck(root: Path) -> Path:
+    raw = os.getenv("REGISTER_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return root / "docs" / "audit" / "register"
+
+
+def feature_build_postcheck_run_dir(root: Path, feature: str) -> Path:
+    raw = os.getenv("FEATURE_BUILD_POSTCHECK_RUN_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", feature.strip()).strip("-") or "feature"
+    date = time.strftime("%Y-%m-%d", time.localtime())
+    return root / "docs" / "audit" / f"{date}-{slug}-differential-audit-run"
+
+
+def register_disposition_count(register_dir: Path, dispositions: set[str]) -> int:
+    register_file = register_dir / "register.jsonl"
+    if not register_file.exists():
+        return 0
+    count = 0
+    for line in register_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if str(item.get("disposition") or "").strip() in dispositions:
+            count += 1
+    return count
+
+
+def postcheck_env(root: Path, register_dir: Path, audit_run_dir: Path) -> dict[str, str]:
+    env = {
+        "REPO_ROOT": str(root),
+        "RUN_DIR": str(audit_run_dir),
+        "REGISTER_DIR": str(register_dir),
+        "AUDIT_REGISTER_RECONCILE": os.getenv("AUDIT_REGISTER_RECONCILE", "1"),
+        "AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE": "1",
+    }
+    for key in ("PROFILE", "PROFILES_DIR", "PRODUCT_PROFILE", "SHARED_PROMPT", "JOBS_FILE"):
+        value = os.getenv(key, "").strip()
+        if value:
+            env[key] = value
+    return env
+
+
+def run_register_postcheck(
+    args: argparse.Namespace,
+    root: Path,
+    run_dir: Path,
+    state_file: Path,
+    state: dict[str, Any],
+) -> None:
+    register_dir = register_dir_for_postcheck(root)
+    if not feature_build_postcheck_enabled(args, register_dir):
+        record_event(
+            state_file,
+            state,
+            "register_postcheck_skipped",
+            mode=feature_build_postcheck_mode(),
+            register_dir=str(register_dir),
+        )
+        return
+
+    if not (register_dir / "baseline.json").exists():
+        raise RuntimeError(
+            f"feature-build register postcheck requires {register_dir / 'baseline.json'}; "
+            "run a full audit first or set FEATURE_BUILD_POSTCHECK=0"
+        )
+
+    audit_run_dir = feature_build_postcheck_run_dir(root, args.feature)
+    audit_run_dir.mkdir(parents=True, exist_ok=True)
+    env = postcheck_env(root, register_dir, audit_run_dir)
+    audit_log = run_dir / "logs" / "postcheck-differential-audit.log"
+    command = f"{shlex.quote(str(SCRIPT_ROOT / 'run-audit.sh'))} --differential"
+    print(f"[register-postcheck] differential audit -> {audit_run_dir}")
+    audit = run_shell(command, root, audit_log, env)
+    if audit.returncode != 0:
+        record_event(
+            state_file,
+            state,
+            "register_postcheck_audit_failed",
+            returncode=audit.returncode,
+            log=str(audit_log),
+            audit_run=str(audit_run_dir),
+        )
+        raise RuntimeError(f"differential audit failed ({audit.returncode}); see {audit_log}")
+    record_event(state_file, state, "register_postcheck_audit_complete", audit_run=str(audit_run_dir))
+
+    if os.getenv("FEATURE_BUILD_POSTCHECK_TRIAGE", "1").strip().lower() not in FALSE_VALUES:
+        new_count = register_disposition_count(register_dir, {"new"})
+        if new_count > 0:
+            triage_log = run_dir / "logs" / "postcheck-register-triage.log"
+            triage_command = f"{shlex.quote(str(SCRIPT_ROOT / 'run-triage.sh'))} --register-dir {shlex.quote(str(register_dir))}"
+            print(f"[register-postcheck] triage new={new_count}")
+            triage = run_shell(triage_command, root, triage_log, env)
+            if triage.returncode != 0:
+                record_event(
+                    state_file,
+                    state,
+                    "register_postcheck_triage_failed",
+                    returncode=triage.returncode,
+                    log=str(triage_log),
+                )
+                raise RuntimeError(f"register triage failed ({triage.returncode}); see {triage_log}")
+            record_event(state_file, state, "register_postcheck_triage_complete", new=new_count)
+
+    if os.getenv("FEATURE_BUILD_POSTCHECK_REMEDIATE", "1").strip().lower() not in FALSE_VALUES:
+        open_count = register_disposition_count(register_dir, {"open", "regressed"})
+        if open_count > 0:
+            remediation_log = run_dir / "logs" / "postcheck-register-remediation.log"
+            remediation_dir = os.getenv(
+                "FEATURE_BUILD_POSTCHECK_REMEDIATION_DIR",
+                str(root / "docs" / "audit" / f"{audit_run_dir.name}-remediation-run"),
+            )
+            remediation_env = env | {
+                "REMEDIATION_DIR": remediation_dir,
+                "REMEDIATION_REGISTER_SOURCE": "1",
+            }
+            remediation_command = (
+                f"{shlex.quote(str(SCRIPT_ROOT / 'run-remediation.sh'))} "
+                f"--audit-run {shlex.quote(str(audit_run_dir))} --execute --verify"
+            )
+            print(f"[register-postcheck] remediation open={open_count} -> {remediation_dir}")
+            remediation = run_shell(remediation_command, root, remediation_log, remediation_env)
+            if remediation.returncode != 0:
+                record_event(
+                    state_file,
+                    state,
+                    "register_postcheck_remediation_failed",
+                    returncode=remediation.returncode,
+                    log=str(remediation_log),
+                    remediation_dir=remediation_dir,
+                )
+                raise RuntimeError(
+                    f"register remediation failed ({remediation.returncode}); see {remediation_log}"
+                )
+            record_event(
+                state_file,
+                state,
+                "register_postcheck_remediation_complete",
+                open=open_count,
+                remediation_dir=remediation_dir,
+            )
 
 
 def default_feature_branch(feature: str) -> str:

@@ -95,3 +95,9 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   `artifacts/differential-jobs.tsv` and `artifacts/differential-scope.md`, and
   injects the scoped changed-path contract into selected prompts. `--full`
   bypasses differential selection.
+- Plan 3 eighth slice: feature-build register postcheck is landed. Verified
+  `--execute --verify` feature builds now auto-run differential audit for
+  register-enabled repos before final success/commit/push/deploy, then run
+  register triage and remediation when the register has `new`, `open`, or
+  `regressed` entries. The hook preserves the product-profile environment and
+  can be disabled with `FEATURE_BUILD_POSTCHECK=0`.

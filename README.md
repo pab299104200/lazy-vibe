@@ -340,6 +340,7 @@ Splits the launch-readiness audit into parallel job batches, builds one bounded 
 | `AUDIT_RUNNER` | — | Custom executable wrapper (overrides `RUNNER`). Receives `<prompt_file> <run_dir> <job_id>`. |
 | `AUDIT_DIFFERENTIAL` | `0` | Set to `1` or pass `--differential` to load `docs/audit/register/baseline.json`, compute changed paths from baseline SHA to `HEAD`, and run only the affected audit jobs plus the cheap final gates. |
 | `AUDIT_BASELINE_SHA` | — | Optional explicit baseline SHA for differential mode. Overrides `baseline.json`. |
+| `AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE` | `0` | Include staged, unstaged, and untracked worktree paths in differential job selection. Feature-build postchecks set this automatically because they run before auto-commit. |
 | `MAX_PARALLEL` | `3` | Maximum jobs running in parallel per group. |
 | `AUDIT_MAX_RETRIES` | `2` | Retry attempts per job on non-zero exit. |
 | `VERBOSE` | `0` | Set to `1` to print log size after each job completes. |
@@ -651,6 +652,10 @@ The harness is state-driven:
 | `FEATURE_BUILD_AUTO_BRANCH` | `1` | Create or switch to the feature branch before execute runs. Set to `0` to require caller-managed branches. |
 | `FEATURE_BUILD_BRANCH` | `feature/<feature>` | Branch name used by the default branch step when `--branch` is not provided. |
 | `FEATURE_BUILD_AUTO_COMMIT` | `1` | Commit successful `--execute --verify` builds after final state is written. Set to `0` to leave changes uncommitted by default. |
+| `FEATURE_BUILD_POSTCHECK` | `auto` | After successful `--execute --verify`, run `run-audit.sh --differential` when `docs/audit/register/baseline.json` exists. Set `0` to disable or `1`/`required` to require a register baseline. |
+| `FEATURE_BUILD_POSTCHECK_RUN_DIR` | `$REPO_ROOT/docs/audit/<date>-<feature>-differential-audit-run` | Audit run directory used by the feature-build differential postcheck. |
+| `FEATURE_BUILD_POSTCHECK_TRIAGE` | `1` | Run `run-triage.sh` after the differential audit when the register has `new` findings. |
+| `FEATURE_BUILD_POSTCHECK_REMEDIATE` | `1` | Run `run-remediation.sh --execute --verify` after triage when the register has `open` or `regressed` findings. |
 | `FEATURE_BUILD_POST_BUILD_REVIEW_COMMAND` | — | Optional independent review command after build verification. Receives `FEATURE_BUILD_FEATURE`, `FEATURE_BUILD_RUN_DIR`, `FEATURE_BUILD_SPEC`, and `FEATURE_BUILD_SCORECARD`. |
 | `FEATURE_BUILD_AUTO_REMEDIATE_COMMAND` | — | Optional remediation command run when the post-build review writes a revise/fail decision. Receives the same variables plus `FEATURE_BUILD_REVIEW_ROUND`. |
 | `FEATURE_BUILD_POST_BUILD_ROUNDS` | `1` | Maximum post-build review/remediation rounds. |
@@ -836,7 +841,9 @@ writes `docs/audit/register/baseline.json` with the reconciled run id and git
 sha. If an audit has no non-pass jobs, no ledger is written.
 
 For post-feature checks, `run-audit.sh --differential` reads that
-`baseline.json`, diffs the baseline SHA to `HEAD`, writes
+`baseline.json`, diffs the baseline SHA to `HEAD`, optionally includes staged,
+unstaged, and untracked worktree paths when
+`AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE=1`, writes
 `RUN_DIR/artifacts/differential-scope.md` and
 `RUN_DIR/artifacts/differential-jobs.tsv`, and injects the changed-path scope
 into every selected prompt. Missing, corrupt, or stale baselines fail with an

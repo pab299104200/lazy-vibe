@@ -36,6 +36,7 @@ AUDIT_NODE_TOOLING_DIR="${AUDIT_NODE_TOOLING_DIR:-$RUN_DIR/.audit-tooling/node}"
 AUDIT_DIFFERENTIAL="${AUDIT_DIFFERENTIAL:-0}"
 AUDIT_FULL="${AUDIT_FULL:-0}"
 AUDIT_BASELINE_SHA="${AUDIT_BASELINE_SHA:-}"
+AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE="${AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE:-0}"
 AUDIT_BASE_URL="${AUDIT_BASE_URL:-}"
 AUDIT_BROWSER_BASE_URL="${AUDIT_BROWSER_BASE_URL:-}"
 ACCESSIBILITY_PATHS="${ACCESSIBILITY_PATHS:-/,/login}"
@@ -67,6 +68,8 @@ Environment:
   AUDIT_DIFFERENTIAL   1 to run only jobs affected by paths changed since docs/audit/register/baseline.json.
                        Equivalent to --differential.
   AUDIT_BASELINE_SHA   Optional explicit baseline SHA for --differential. Overrides baseline.json git_sha.
+  AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE
+                       1 to include unstaged, staged, and untracked worktree paths in differential selection.
   JOBS_FILE            Job manifest TSV. Defaults to generic-jobs.tsv alongside the script (or jobs.tsv from the profile dir).
   SHARED_PROMPT        Shared job instructions. Defaults to generic-shared.md. Override with --rules or this env var.
   RUNNER               LLM runner to use: codex (default), claude, or gemini.
@@ -738,6 +741,9 @@ prepare_differential_jobs() {
   )
   if [[ -n "$AUDIT_BASELINE_SHA" ]]; then
     args+=(--baseline-sha "$AUDIT_BASELINE_SHA")
+  fi
+  if [[ "$AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE" == "1" ]]; then
+    args+=(--include-worktree)
   fi
   PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.audit.differential "${args[@]}"
   JOBS_FILE="$filtered_jobs"

@@ -654,4 +654,171 @@ git -C "$auto_repo" status --porcelain | grep -q '^$' &&
 [ -z "$(git -C "$auto_repo" status --porcelain)" ] ||
   fail "auto-committed feature build left tracked changes dirty"
 
+postcheck_jobs="$tmp_root/postcheck-jobs.tsv"
+cat > "$postcheck_jobs" <<'EOF'
+group	job_id	kind	title	output	ref
+00	00-bootstrap	discovery	Bootstrap inventories	00-orchestrator-plan.md	PHASE 0
+17	17-final-decision	final	Final release decision	14-final-release-decision.md	PHASE 17
+EOF
+
+postcheck_runner="$tmp_root/postcheck-audit-runner.sh"
+cat > "$postcheck_runner" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+prompt="$1"
+run_dir="$2"
+job_id="$3"
+{
+  printf 'job_id=%s\n' "$job_id"
+  printf 'REPO_ROOT=%s\n' "${REPO_ROOT:-}"
+  printf 'RUN_DIR=%s\n' "${RUN_DIR:-}"
+  printf 'PROFILE=%s\n' "${PROFILE:-}"
+  printf 'REGISTER_DIR=%s\n' "${REGISTER_DIR:-}"
+} >> "${FEATURE_POSTCHECK_CAPTURE:?missing capture}"
+output="$(sed -n 's/^- Required output: //p' "$prompt" | head -1)"
+output="${output%%#*}"
+mkdir -p "$(dirname "$output")"
+cat > "$output" <<RESULT
+# $job_id
+
+RESULT: PASS
+RESULT
+printf 'RESULT: PASS\n'
+EOF
+chmod +x "$postcheck_runner"
+
+postcheck_repo="$tmp_root/postcheck-repo"
+postcheck_run_dir="$postcheck_repo/docs/plans/fixture"
+postcheck_register="$postcheck_repo/docs/audit/register"
+postcheck_profiles="$tmp_root/postcheck-profiles"
+postcheck_capture="$tmp_root/postcheck-capture.txt"
+mkdir -p "$postcheck_repo/docs/new-feature" "$postcheck_run_dir" "$postcheck_register" \
+  "$postcheck_profiles/fixture-product"
+git -C "$postcheck_repo" init -q
+git -C "$postcheck_repo" config user.email "fixture@example.com"
+git -C "$postcheck_repo" config user.name "Fixture"
+cat > "$postcheck_repo/docs/new-feature/fixture.md" <<'EOF'
+# Fixture
+EOF
+cat > "$postcheck_profiles/fixture-product/product-profile.md" <<EOF
+# Fixture Product
+
+- Repo root: \`$postcheck_repo\`
+EOF
+cat > "$postcheck_run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T09",
+      "title": "Postcheck feature",
+      "task_type": "docs",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "pending",
+      "files_expected": ["postcheck_feature.txt"],
+      "verification_commands": ["test -f postcheck_feature.txt"]
+    }
+  ]
+}
+EOF
+git -C "$postcheck_repo" add docs/new-feature/fixture.md
+git -C "$postcheck_repo" commit -qm "fixture baseline"
+postcheck_baseline="$(git -C "$postcheck_repo" rev-parse HEAD)"
+cat > "$postcheck_register/baseline.json" <<EOF
+{"git_sha": "$postcheck_baseline", "run_id": "baseline", "date": "2026-06-12"}
+EOF
+cat > "$tmp_root/bin-auto-branch/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf 'done\n' > postcheck_feature.txt
+mkdir -p docs/plans/fixture/results
+for task_id in T09 T10; do
+cat > "docs/plans/fixture/results/$task_id.md" <<RESULT
+# $task_id
+
+- Files created/modified: postcheck_feature.txt
+- Verification commands and outputs: test -f postcheck_feature.txt -> pass
+- Issues encountered: none
+- Legacy/superseded/stub cleanup performed, or explicit compatibility contract kept: none
+- Boundary/failure/operability proof, or why not applicable: not applicable
+- Documentation/contract updates, or why not applicable: not applicable
+- Final status: complete
+RESULT
+done
+EOF
+chmod +x "$tmp_root/bin-auto-branch/codex"
+
+PROFILE=fixture-product \
+PROFILES_DIR="$postcheck_profiles" \
+PRODUCT_PROFILE="$postcheck_profiles/fixture-product/product-profile.md" \
+JOBS_FILE="$postcheck_jobs" \
+AUDIT_RUNNER="$postcheck_runner" \
+FEATURE_POSTCHECK_CAPTURE="$postcheck_capture" \
+FEATURE_BUILD_POSTCHECK_TRIAGE=0 \
+FEATURE_BUILD_POSTCHECK_REMEDIATE=0 \
+run_feature_execute_verify_with_fake_agent "$postcheck_repo" "$postcheck_run_dir" \
+  "$tmp_root/postcheck.out" "$tmp_root/bin-auto-branch" ||
+  fail "feature-build postcheck run failed: $(cat "$tmp_root/postcheck.out")"
+grep -q "REPO_ROOT=$postcheck_repo" "$postcheck_capture" ||
+  fail "postcheck audit did not receive product repo root"
+grep -q 'PROFILE=fixture-product' "$postcheck_capture" ||
+  fail "postcheck audit did not receive PROFILE"
+grep -q "REGISTER_DIR=$postcheck_register" "$postcheck_capture" ||
+  fail "postcheck audit did not receive register dir"
+grep -q "$postcheck_repo/docs/audit/" "$postcheck_capture" ||
+  fail "postcheck audit did not receive audit RUN_DIR"
+postcheck_scope="$(find "$postcheck_repo/docs/audit" -path '*differential-audit-run/artifacts/differential-scope.md' | head -1)"
+grep -q 'postcheck_feature.txt' "$postcheck_scope" ||
+  fail "feature-build postcheck differential scope did not include uncommitted feature output"
+
+failing_postcheck_runner="$tmp_root/failing-postcheck-audit-runner.sh"
+cat > "$failing_postcheck_runner" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'RESULT: FAIL\n'
+exit 7
+EOF
+chmod +x "$failing_postcheck_runner"
+failing_repo="$tmp_root/failing-postcheck-repo"
+failing_run_dir="$failing_repo/docs/plans/fixture"
+failing_register="$failing_repo/docs/audit/register"
+mkdir -p "$failing_repo/docs/new-feature" "$failing_run_dir" "$failing_register"
+git -C "$failing_repo" init -q
+git -C "$failing_repo" config user.email "fixture@example.com"
+git -C "$failing_repo" config user.name "Fixture"
+printf '# Fixture\n' > "$failing_repo/docs/new-feature/fixture.md"
+cat > "$failing_run_dir/tasks.json" <<'EOF'
+{
+  "tasks": [
+    {
+      "task_id": "T10",
+      "title": "Failing postcheck feature",
+      "task_type": "docs",
+      "depends_on": [],
+      "model_class": "balanced",
+      "status": "pending",
+      "files_expected": ["postcheck_feature.txt"],
+      "verification_commands": ["test -f postcheck_feature.txt"]
+    }
+  ]
+}
+EOF
+git -C "$failing_repo" add docs/new-feature/fixture.md
+git -C "$failing_repo" commit -qm "fixture baseline"
+failing_baseline="$(git -C "$failing_repo" rev-parse HEAD)"
+cat > "$failing_register/baseline.json" <<EOF
+{"git_sha": "$failing_baseline", "run_id": "baseline", "date": "2026-06-12"}
+EOF
+if JOBS_FILE="$postcheck_jobs" \
+  AUDIT_RUNNER="$failing_postcheck_runner" \
+  FEATURE_BUILD_POSTCHECK_TRIAGE=0 \
+  FEATURE_BUILD_POSTCHECK_REMEDIATE=0 \
+  run_feature_execute_verify_with_fake_agent "$failing_repo" "$failing_run_dir" \
+    "$tmp_root/failing-postcheck.out" "$tmp_root/bin-auto-branch"; then
+  fail "feature build passed despite failing differential audit"
+fi
+grep -q 'differential audit failed' "$tmp_root/failing-postcheck.out" ||
+  fail "failing differential audit did not block with an explicit error"
+
 printf 'PASS feature-build fixture gates\n'

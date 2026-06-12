@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--out-jobs-file", required=True)
     parser.add_argument("--baseline-sha", default="")
+    parser.add_argument("--include-worktree", action="store_true")
     return parser.parse_args()
 
 
@@ -72,7 +73,19 @@ def load_baseline(register_dir: Path, override_sha: str) -> str:
     return sha
 
 
-def changed_paths(repo_root: Path, baseline_sha: str) -> tuple[str, list[str]]:
+def worktree_changed_paths(repo_root: Path) -> list[str]:
+    paths: list[str] = []
+    for args in (
+        ("diff", "--name-only"),
+        ("diff", "--cached", "--name-only"),
+        ("ls-files", "--others", "--exclude-standard"),
+    ):
+        output = run_git(repo_root, *args)
+        paths.extend(line.strip() for line in output.splitlines() if line.strip())
+    return paths
+
+
+def changed_paths(repo_root: Path, baseline_sha: str, include_worktree: bool) -> tuple[str, list[str]]:
     run_git(repo_root, "rev-parse", "--verify", f"{baseline_sha}^{{commit}}")
     head_sha = run_git(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
     merge_base = run_git(repo_root, "merge-base", baseline_sha, "HEAD")
@@ -83,6 +96,9 @@ def changed_paths(repo_root: Path, baseline_sha: str) -> tuple[str, list[str]]:
         )
     output = run_git(repo_root, "diff", "--name-only", f"{baseline_sha}..HEAD")
     paths = [line.strip() for line in output.splitlines() if line.strip()]
+    if include_worktree:
+        paths.extend(worktree_changed_paths(repo_root))
+    paths = sorted(dict.fromkeys(paths))
     return head_sha, paths
 
 
@@ -233,7 +249,7 @@ def main() -> int:
     repo_root = Path(args.repo_root)
     run_dir = Path(args.run_dir)
     baseline_sha = load_baseline(Path(args.register_dir), args.baseline_sha)
-    head_sha, paths = changed_paths(repo_root, baseline_sha)
+    head_sha, paths = changed_paths(repo_root, baseline_sha, args.include_worktree)
     header, jobs = read_jobs(Path(args.jobs_file))
     selected_jobs, tokens = select_jobs(jobs, paths)
     write_jobs(Path(args.out_jobs_file), header, selected_jobs)
