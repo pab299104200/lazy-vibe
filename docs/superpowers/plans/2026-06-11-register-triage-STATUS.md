@@ -14,7 +14,7 @@
 | Task | Status | Commit |
 |---|---|---|
 | T1 packet generation | DONE, reviewed/approved | 1e7fd81 |
-| T2 result consumption | DONE (d93cd72) + hardening landed, re-review pending | dec32e0 (suite 189) |
+| T2 result consumption | DONE (d93cd72) + hardening (dec32e0) + candidate binding landed 066f427 — re-review CLOSED | 066f427 (suite 192) |
 | T3 policy engine | not started | |
 | T4 queue render | not started | |
 | T5 triage CLI + close | not started | |
@@ -22,8 +22,11 @@
 | T7 run-triage.sh + exports + README | not started | |
 | T8 Meridian dry-run | not started | |
 
-## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Plan test arithmetic re-derived: T3 203, T4 213, T5 220, T6 224, T7/final 225.
-Residual flagged for T4 review: duplicate_of naming a NONEXISTENT finding silently falls through to verified — consider surfacing loudly alongside the M3 markdown_cell check.
+## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Re-review item LANDED in 066f427: duplicate claims bound to the solicited fuzzy candidate (`duplicate_of == _fuzzy_candidate(finding)`), closing both the unsolicited-claim hole AND the nonexistent-id silent fall-through (the residual previously flagged for T4 — now resolved). Plan test arithmetic re-derived: T2 192, T3 206, T4 216, T5 223, T6 227, T7/final 228.
+
+## Review carry-forwards from T2 re-review (NOTE comments in verify.py)
+- **T5:** VerifyOutcome buckets are per-run deltas, not a register census — verify-consume CLI summary must not present them as totals.
+- **T7:** `_archive_result` os.replace overwrites a prior consumed result on re-verification — consider run_id suffix or refuse-overwrite for per-run auditability.
 
 ## Review carry-forwards (hold later tasks to these)
 - **T4 (queue):** every free-text cell AND evidence ref rendered into triage-queue.md must go through `store.markdown_cell` (verifier-supplied refs may contain `|`/newlines — injection vector flagged in T2 review).
