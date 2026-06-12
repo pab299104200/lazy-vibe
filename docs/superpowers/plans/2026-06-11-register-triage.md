@@ -1697,16 +1697,30 @@ def render_queue(items: list[QueueItem], *, product: str) -> str:
                   "| id | sev | recommendation | detail | title |",
                   "|---|---|---|---|---|"]
         for i in group:
+            # DEVIATION from original plan: recommendation is also passed
+            # through markdown_cell. The original plan rendered i.recommendation
+            # raw, but the T2-review carry-forward requires EVERY free-text
+            # cell to be escaped. recommendation is a free-text field and must
+            # be sanitised at the same choke-point as title and detail.
             lines.append(
-                f"| {i.finding_id} | {i.severity} | {i.recommendation} "
+                f"| {i.finding_id} | {i.severity} | {markdown_cell(i.recommendation)} "
                 f"| {markdown_cell(i.detail)} | {markdown_cell(i.title)} |")
         lines.append("")
     return "\n".join(lines)
 ```
 
+> **Plan deviation (T4 implementation):** the original plan rendered
+> `i.recommendation` raw in the table row. The T2-review carry-forward
+> explicitly requires EVERY free-text value rendered into triage-queue.md to
+> go through `markdown_cell`. `recommendation` is a free-text field —
+> it was corrected to use `markdown_cell(i.recommendation)` in the
+> implementation, and a test (`test_render_escapes_pipe_in_recommendation`)
+> was added red-first to prove the fix. The plan code block above has been
+> updated to match the shipped implementation.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **216 passed**.
+Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **227 passed** (211 baseline + 16 new queue tests; 6 extra tests beyond the plan's 10 cover cell-escaping, determinism, and pure-projection guarantees).
 
 - [ ] **Step 5: Commit**
 
