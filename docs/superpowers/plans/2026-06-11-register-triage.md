@@ -887,6 +887,8 @@ git commit -m "feat(register): consume schema-validated verifier results"
 
 `triage-policy.yaml` — ordered rules, first-match-wins, over `new` findings only. Match keys: `severity`, `taxonomy`, `in_scope`, `verified` (true requires the last `verification` event be VERIFIED), `theme`, `path_prefix`. Actions: `open` / `park` / `false_positive` (only if the last verification was UNSUPPORTED) / `propose_risk_accept` / `queue`. A `default` action is required. Hard-error on malformed policy at load time (like `scope.py`).
 
+> **Quality-review fixes (post-implementation, red-first):** policy.yaml is operator-authored but mistakes must fail loudly, and policy must not defeat readiness. (C1) findings with an unresolved `_candidate:` theme are NOT adjudicable — readiness's vocabulary-gap guard (spec §12) only blocks `new` findings, so any policy disposition (even park) would silently drop them from blocking; `apply_policy` skips rule matching entirely and reports them in `PolicyOutcome.vocabulary_gaps`. (I1) match values are type-validated at load: `severity` must be a string in `SEVERITY_ORDER` (a list silently never matches), `taxonomy`/`theme`/`path_prefix` must be strings, `in_scope`/`verified` must be real YAML booleans (`in_scope: "false"` bool-coerces truthy and matches the OPPOSITE set); `_matches` therefore compares without coercion. (I2) `propose_risk_accept` is idempotent — a finding whose history already carries a `risk_accept_proposed` event (any rule) is skipped, so policy re-runs do not stack duplicate proposals. (M1) an empty/omitted `match` block is a load-time hard error ("use the 'default' action for catch-all") instead of matching everything. (M2) the dead `findings` param was dropped from `_act`. (M3) the `risk_accept_proposed` event carries a displayable `reason` (`proposed by policy:<rule-id>`) for the Task 4 queue render.
+
 **Files:**
 - Create: `lazy_vibe/register/policy.py`
 - Test: `tests/register/test_policy.py`
@@ -1011,7 +1013,11 @@ def test_propose_risk_accept_queues_not_transitions(store, tmp_path):
     outcome = apply_policy(store, policy, date="2026-06-11")
     f2 = store.load()["R-0001"]
     assert f2.disposition == "new"  # proposals never auto-transition (§4.2)
-    assert any(h.get("event") == "risk_accept_proposed" for h in f2.history)
+    events = [h for h in f2.history
+              if h.get("event") == "risk_accept_proposed"]
+    assert len(events) == 1
+    # the queue render (Task 4) needs a displayable reason on the event
+    assert events[0].get("reason") == "proposed by policy:ra"
     assert "R-0001" in outcome.proposed_risk_accept
 
 
@@ -1069,6 +1075,86 @@ def test_bad_match_key_is_hard_error(tmp_path):
                  "default: queue\n")
     with pytest.raises(RegisterError, match="match key"):
         load_policy(p)
+
+
+# ---------------------------------------------------------------------------
+# Quality-review fixes: candidate-theme guard, typed match validation,
+# idempotent proposals, non-empty match (C1/I1/I2/M1)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_theme_is_not_adjudicable(store, tmp_path):  # C1
+    # spec §12: vocabulary gaps cannot leak findings. Readiness's _candidate
+    # guard only blocks `new` findings — if a catch-all park rule adjudicates
+    # one, it vanishes from blocking. Policy must refuse to match it at all.
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: park-all\n    match: {in_scope: true}\n"
+                 "    action: park\ndefault: queue\n")
+    policy = load_policy(p)
+    f = _new("R-0001", in_scope=True, verdict="VERIFIED")
+    f.fingerprint_inputs["theme"] = "_candidate:weird"
+    store.save({f.finding_id: f})
+    outcome = apply_policy(store, policy, date="2026-06-11")
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"  # never parked past the readiness guard
+    assert outcome.vocabulary_gaps == ["R-0001"]
+    assert outcome.parked == []
+    # readiness still blocks it
+    from lazy_vibe.register.readiness import evaluate
+    from lazy_vibe.register.scope import load_scope
+    sp = tmp_path / "launch-scope.yaml"
+    sp.write_text("product: meridian\ndefault_in_scope: true\nsurfaces: []\n"
+                  "severity_bar:\n  P0: zero_open\n")
+    report = evaluate(store, load_scope(sp), today="2026-06-11")
+    assert report.ready is False
+    assert any("_candidate" in item for item in report.blocking)
+
+
+def test_list_severity_match_value_is_hard_error(tmp_path):  # I1
+    # severity: [P0, P1] would silently never match (string != list)
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: x\n    match: {severity: [P0, P1]}\n"
+                 "    action: open\ndefault: queue\n")
+    with pytest.raises(RegisterError, match=r"severity.*\['P0', 'P1'\]"):
+        load_policy(p)
+
+
+def test_string_bool_match_value_is_hard_error(tmp_path):  # I1
+    # in_scope: "false" bool-coerces truthy and matches the OPPOSITE set
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: x\n    match: {in_scope: 'false'}\n"
+                 "    action: park\ndefault: queue\n")
+    with pytest.raises(RegisterError, match="in_scope.*'false'"):
+        load_policy(p)
+
+
+def test_propose_risk_accept_is_idempotent(store, tmp_path):  # I2
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: ra\n    match: {severity: P1}\n"
+                 "    action: propose_risk_accept\ndefault: queue\n")
+    policy = load_policy(p)
+    f = _new("R-0001", severity="P1", verdict="VERIFIED")
+    store.save({f.finding_id: f})
+    first = apply_policy(store, policy, date="2026-06-11")
+    second = apply_policy(store, policy, date="2026-06-12")
+    events = [h for h in store.load()["R-0001"].history
+              if h.get("event") == "risk_accept_proposed"]
+    assert len(events) == 1  # second run did not re-append
+    assert first.proposed_risk_accept == ["R-0001"]
+    assert second.proposed_risk_accept == []  # per-run delta, not re-listed
+
+
+def test_empty_match_is_hard_error(tmp_path):  # M1
+    # an empty/omitted match block would match everything; catch-all intent
+    # must be expressed through the explicit 'default' action
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: x\n    match: {}\n    action: open\n"
+                 "default: queue\n")
+    with pytest.raises(RegisterError, match="empty match"):
+        load_policy(p)
+    p.write_text("rules:\n  - id: x\n    action: open\ndefault: queue\n")
+    with pytest.raises(RegisterError, match="empty match"):
+        load_policy(p)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1090,6 +1176,12 @@ Pete-only) but append a `risk_accept_proposed` event for the queue. The
 `false_positive` action is only legal when the last verification verdict is
 UNSUPPORTED (spec §6); using it otherwise is a hard error so policy authors
 cannot silently suppress real findings.
+
+Findings whose theme is an unresolved `_candidate:` vocabulary gap are not
+adjudicable by policy at all (spec §12): readiness's vocabulary-gap guard
+only blocks `new` findings, so any policy disposition (even park) would move
+the finding past that guard and silently drop it from blocking. They stay
+`new` and are reported in `PolicyOutcome.vocabulary_gaps`.
 """
 from __future__ import annotations
 
@@ -1099,7 +1191,7 @@ from pathlib import Path
 import yaml
 
 from .fingerprint import normalize_path
-from .model import Disposition, Finding, RegisterError
+from .model import SEVERITY_ORDER, Disposition, Finding, RegisterError
 from .transitions import transition
 from .verify import last_verification
 
@@ -1107,6 +1199,11 @@ _VALID_ACTIONS = {"open", "park", "false_positive", "propose_risk_accept",
                   "queue"}
 _VALID_MATCH_KEYS = {"severity", "taxonomy", "in_scope", "verified", "theme",
                      "path_prefix"}
+# Match-value types are validated at load time so a mistyped policy fails
+# loudly instead of silently never matching (severity: [P0, P1]) or matching
+# the OPPOSITE set (in_scope: "false" is a truthy string under bool()).
+_STR_MATCH_KEYS = ("taxonomy", "theme", "path_prefix")
+_BOOL_MATCH_KEYS = ("in_scope", "verified")
 
 
 @dataclass(frozen=True)
@@ -1129,10 +1226,56 @@ class PolicyOutcome:
     false_positive: list[str] = field(default_factory=list)
     proposed_risk_accept: list[str] = field(default_factory=list)
     queued: list[str] = field(default_factory=list)
+    vocabulary_gaps: list[str] = field(default_factory=list)  # spec §12
 
 
 def _now(date: str) -> str:
     return f"{date}T00:00:00+00:00"
+
+
+def _validate_match_values(path: Path, rule_id: str, match: dict) -> None:
+    """Hard-reject mistyped match values at load time (see module doc)."""
+    if "severity" in match:
+        sev = match["severity"]
+        if not isinstance(sev, str) or sev not in SEVERITY_ORDER:
+            raise RegisterError(
+                f"{path}: rule {rule_id!r}: match key 'severity' must be one "
+                f"of {sorted(SEVERITY_ORDER)}, got {sev!r}")
+    for key in _STR_MATCH_KEYS:
+        if key in match and not isinstance(match[key], str):
+            raise RegisterError(
+                f"{path}: rule {rule_id!r}: match key {key!r} must be a "
+                f"string, got {match[key]!r}")
+    for key in _BOOL_MATCH_KEYS:
+        if key in match and not isinstance(match[key], bool):
+            raise RegisterError(
+                f"{path}: rule {rule_id!r}: match key {key!r} must be a YAML "
+                f"boolean (true/false), got {match[key]!r}")
+
+
+def _load_rule(path: Path, index: int, raw) -> Rule:
+    if not isinstance(raw, dict) or not raw.get("id"):
+        raise RegisterError(f"{path}: rule {index}: missing 'id'")
+    action = raw.get("action")
+    if action not in _VALID_ACTIONS:
+        raise RegisterError(
+            f"{path}: rule {raw['id']!r}: action {action!r} invalid "
+            f"(valid: {sorted(_VALID_ACTIONS)})")
+    match = raw.get("match") or {}
+    if not isinstance(match, dict):
+        raise RegisterError(f"{path}: rule {raw['id']!r}: 'match' must be "
+                            f"a mapping")
+    if not match:
+        raise RegisterError(
+            f"{path}: rule {raw['id']!r}: empty match — use the 'default' "
+            f"action for catch-all")
+    unknown = set(match) - _VALID_MATCH_KEYS
+    if unknown:
+        raise RegisterError(
+            f"{path}: rule {raw['id']!r}: unknown match key(s) "
+            f"{sorted(unknown)} (valid: {sorted(_VALID_MATCH_KEYS)})")
+    _validate_match_values(path, raw["id"], match)
+    return Rule(rule_id=raw["id"], match=dict(match), action=action)
 
 
 def load_policy(path: Path) -> Policy:
@@ -1147,25 +1290,8 @@ def load_policy(path: Path) -> Policy:
         raise RegisterError(
             f"{path}: a top-level 'default' action is required "
             f"(valid: {sorted(_VALID_ACTIONS)})")
-    rules = []
-    for index, raw in enumerate(data.get("rules") or []):
-        if not isinstance(raw, dict) or not raw.get("id"):
-            raise RegisterError(f"{path}: rule {index}: missing 'id'")
-        action = raw.get("action")
-        if action not in _VALID_ACTIONS:
-            raise RegisterError(
-                f"{path}: rule {raw['id']!r}: action {action!r} invalid "
-                f"(valid: {sorted(_VALID_ACTIONS)})")
-        match = raw.get("match") or {}
-        if not isinstance(match, dict):
-            raise RegisterError(f"{path}: rule {raw['id']!r}: 'match' must be "
-                                f"a mapping")
-        unknown = set(match) - _VALID_MATCH_KEYS
-        if unknown:
-            raise RegisterError(
-                f"{path}: rule {raw['id']!r}: unknown match key(s) "
-                f"{sorted(unknown)} (valid: {sorted(_VALID_MATCH_KEYS)})")
-        rules.append(Rule(rule_id=raw["id"], match=dict(match), action=action))
+    rules = [_load_rule(path, index, raw)
+             for index, raw in enumerate(data.get("rules") or [])]
     return Policy(rules=tuple(rules), default=data["default"])
 
 
@@ -1175,25 +1301,30 @@ def _verified(finding: Finding) -> bool:
 
 
 def _matches(finding: Finding, match: dict) -> bool:
+    # match values are type-validated at load time; compare without coercion
     for key, want in match.items():
         if key == "severity" and finding.severity != want:
             return False
         if key == "taxonomy" and finding.taxonomy != want:
             return False
-        if key == "in_scope" and finding.in_scope != bool(want):
+        if key == "in_scope" and finding.in_scope != want:
             return False
-        if key == "verified" and _verified(finding) != bool(want):
+        if key == "verified" and _verified(finding) != want:
             return False
         if key == "theme" and finding.fingerprint_inputs.get("theme") != want:
             return False
         if key == "path_prefix" and not normalize_path(
-                finding.fingerprint_inputs.get("path", "")).startswith(str(want)):
+                finding.fingerprint_inputs.get("path", "")).startswith(want):
             return False
     return True
 
 
-def _act(findings, finding, action, rule_id, now,
-         outcome: PolicyOutcome) -> None:
+def _already_proposed(finding: Finding) -> bool:
+    return any(h.get("event") == "risk_accept_proposed"
+               for h in finding.history)
+
+
+def _act(finding, action, rule_id, now, outcome: PolicyOutcome) -> None:
     by = f"policy:{rule_id}"
     if action == "open":
         transition(finding, Disposition.OPEN, by=by,
@@ -1215,8 +1346,11 @@ def _act(findings, finding, action, rule_id, now,
                    reason=f"auto false_positive by {rule_id}", now=now)
         outcome.false_positive.append(finding.finding_id)
     elif action == "propose_risk_accept":
+        if _already_proposed(finding):
+            return  # idempotent: a proposal is already pending Pete's decision
         finding.history.append({"ts": now, "event": "risk_accept_proposed",
-                                "by": by, "rule": rule_id})
+                                "by": by, "rule": rule_id,
+                                "reason": f"proposed by {by}"})
         outcome.proposed_risk_accept.append(finding.finding_id)
     else:  # queue
         outcome.queued.append(finding.finding_id)
@@ -1230,6 +1364,13 @@ def apply_policy(store, policy: Policy, *, date: str) -> PolicyOutcome:
         for finding in sorted(findings.values(), key=lambda f: f.finding_id):
             if finding.disposition != "new":
                 continue
+            if finding.fingerprint_inputs.get("theme", "").startswith(
+                    "_candidate:"):
+                # spec §12: vocabulary gaps cannot leak findings — readiness
+                # only blocks _candidate themes while `new`, so policy must
+                # not adjudicate them (a park would drop them from blocking).
+                outcome.vocabulary_gaps.append(finding.finding_id)
+                continue
             action = policy.default
             for rule in policy.rules:
                 if _matches(finding, rule.match):
@@ -1238,7 +1379,7 @@ def apply_policy(store, policy: Policy, *, date: str) -> PolicyOutcome:
                     break
             else:
                 rule_id = "default"
-            _act(findings, finding, action, rule_id, now, outcome)
+            _act(finding, action, rule_id, now, outcome)
         store.save(findings)
     return outcome
 ```
@@ -1264,7 +1405,7 @@ def test_verified_match_requires_verified_event(store, policy):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytest tests/register -q` — expect **206 passed**.
+Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytest tests/register -q` — expect **211 passed** (192 from Task 2 + 19 policy tests: 14 original + 5 quality-review fixes; downstream task totals below are shifted +5 accordingly).
 
 - [ ] **Step 5: Commit**
 
@@ -1272,6 +1413,10 @@ Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytes
 git add lazy_vibe/register/policy.py tests/register/test_policy.py
 git commit -m "feat(register): deterministic triage-policy engine"
 ```
+
+> The quality-review fixes (C1/I1/I2/M1/M2/M3 above) landed red-first in a
+> follow-up commit: `fix(register): policy engine — candidate-theme guard,
+> typed match validation, idempotent proposals`.
 
 ---
 

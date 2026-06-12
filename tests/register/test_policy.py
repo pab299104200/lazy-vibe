@@ -107,7 +107,11 @@ def test_propose_risk_accept_queues_not_transitions(store, tmp_path):
     outcome = apply_policy(store, policy, date="2026-06-11")
     f2 = store.load()["R-0001"]
     assert f2.disposition == "new"  # proposals never auto-transition (§4.2)
-    assert any(h.get("event") == "risk_accept_proposed" for h in f2.history)
+    events = [h for h in f2.history
+              if h.get("event") == "risk_accept_proposed"]
+    assert len(events) == 1
+    # the queue render (Task 4) needs a displayable reason on the event
+    assert events[0].get("reason") == "proposed by policy:ra"
     assert "R-0001" in outcome.proposed_risk_accept
 
 
@@ -164,4 +168,84 @@ def test_bad_match_key_is_hard_error(tmp_path):
     p.write_text("rules:\n  - id: x\n    match: {wat: 1}\n    action: open\n"
                  "default: queue\n")
     with pytest.raises(RegisterError, match="match key"):
+        load_policy(p)
+
+
+# ---------------------------------------------------------------------------
+# Quality-review fixes: candidate-theme guard, typed match validation,
+# idempotent proposals, non-empty match (C1/I1/I2/M1)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_theme_is_not_adjudicable(store, tmp_path):  # C1
+    # spec §12: vocabulary gaps cannot leak findings. Readiness's _candidate
+    # guard only blocks `new` findings — if a catch-all park rule adjudicates
+    # one, it vanishes from blocking. Policy must refuse to match it at all.
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: park-all\n    match: {in_scope: true}\n"
+                 "    action: park\ndefault: queue\n")
+    policy = load_policy(p)
+    f = _new("R-0001", in_scope=True, verdict="VERIFIED")
+    f.fingerprint_inputs["theme"] = "_candidate:weird"
+    store.save({f.finding_id: f})
+    outcome = apply_policy(store, policy, date="2026-06-11")
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"  # never parked past the readiness guard
+    assert outcome.vocabulary_gaps == ["R-0001"]
+    assert outcome.parked == []
+    # readiness still blocks it
+    from lazy_vibe.register.readiness import evaluate
+    from lazy_vibe.register.scope import load_scope
+    sp = tmp_path / "launch-scope.yaml"
+    sp.write_text("product: meridian\ndefault_in_scope: true\nsurfaces: []\n"
+                  "severity_bar:\n  P0: zero_open\n")
+    report = evaluate(store, load_scope(sp), today="2026-06-11")
+    assert report.ready is False
+    assert any("_candidate" in item for item in report.blocking)
+
+
+def test_list_severity_match_value_is_hard_error(tmp_path):  # I1
+    # severity: [P0, P1] would silently never match (string != list)
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: x\n    match: {severity: [P0, P1]}\n"
+                 "    action: open\ndefault: queue\n")
+    with pytest.raises(RegisterError, match=r"severity.*\['P0', 'P1'\]"):
+        load_policy(p)
+
+
+def test_string_bool_match_value_is_hard_error(tmp_path):  # I1
+    # in_scope: "false" bool-coerces truthy and matches the OPPOSITE set
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: x\n    match: {in_scope: 'false'}\n"
+                 "    action: park\ndefault: queue\n")
+    with pytest.raises(RegisterError, match="in_scope.*'false'"):
+        load_policy(p)
+
+
+def test_propose_risk_accept_is_idempotent(store, tmp_path):  # I2
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: ra\n    match: {severity: P1}\n"
+                 "    action: propose_risk_accept\ndefault: queue\n")
+    policy = load_policy(p)
+    f = _new("R-0001", severity="P1", verdict="VERIFIED")
+    store.save({f.finding_id: f})
+    first = apply_policy(store, policy, date="2026-06-11")
+    second = apply_policy(store, policy, date="2026-06-12")
+    events = [h for h in store.load()["R-0001"].history
+              if h.get("event") == "risk_accept_proposed"]
+    assert len(events) == 1  # second run did not re-append
+    assert first.proposed_risk_accept == ["R-0001"]
+    assert second.proposed_risk_accept == []  # per-run delta, not re-listed
+
+
+def test_empty_match_is_hard_error(tmp_path):  # M1
+    # an empty/omitted match block would match everything; catch-all intent
+    # must be expressed through the explicit 'default' action
+    p = tmp_path / "triage-policy.yaml"
+    p.write_text("rules:\n  - id: x\n    match: {}\n    action: open\n"
+                 "default: queue\n")
+    with pytest.raises(RegisterError, match="empty match"):
+        load_policy(p)
+    p.write_text("rules:\n  - id: x\n    action: open\ndefault: queue\n")
+    with pytest.raises(RegisterError, match="empty match"):
         load_policy(p)
