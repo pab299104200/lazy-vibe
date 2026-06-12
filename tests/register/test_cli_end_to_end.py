@@ -345,3 +345,28 @@ def test_close_requires_open_or_remediation(workspace):
     assert proc.returncode == 1  # R-0001 is `new`, not open
     assert "error:" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_close_rejects_malformed_test_format(workspace):
+    # quality-review I2: --test must be 'path::test_name'; free text would
+    # persist an unrerunnable regression link on the fixed state.
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    from lazy_vibe.register.store import RegisterStore as RS
+    from lazy_vibe.register.transitions import transition
+    from lazy_vibe.register.model import Disposition
+    store = RS(register_dir)
+    findings = store.load()
+    transition(findings["R-0001"], Disposition.OPEN, by="pete", reason="real",
+               now="2026-06-10T00:00:00+00:00", verified=True)
+    store.save(findings)
+    proc = cli("close", "--register-dir", str(register_dir),
+               "--finding", "R-0001", "--test", "garbage")
+    assert proc.returncode == 1
+    assert "path::test_name" in proc.stderr
+    assert "Traceback" not in proc.stderr
+    f = RS(register_dir).load()["R-0001"]
+    assert f.disposition == "open"  # untouched — rejected before any transition
+    assert f.regression_test is None

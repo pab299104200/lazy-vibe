@@ -50,6 +50,18 @@ def test_in_remediation_to_fixed_requires_regression_test():
     assert f.regression_test == "tests/test_evidence.py::test_tenant_scope"
 
 
+def test_fixed_rejects_malformed_regression_test_format():
+    # a closing regression test must be 'path::test_name' — free text would
+    # make the fixed state unauditable and unrerunnable (quality-review I2)
+    for bad in ("garbage", "tests/test_x.py", "::test_y", "tests/x.py::",
+                "  ::  "):
+        f = make_finding(disposition="open")
+        t(f, "in_remediation", by="harness")
+        with pytest.raises(TransitionError, match="path::test_name"):
+            t(f, "fixed", by="harness", regression_test=bad)
+        assert f.disposition == "in_remediation"  # rejected before mutation
+
+
 def test_fixed_to_regressed_is_reconciler_only():
     f = make_finding(disposition="fixed",
                      regression_test="tests/test_x.py::test_y")

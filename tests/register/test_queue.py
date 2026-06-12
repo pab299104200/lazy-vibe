@@ -410,4 +410,194 @@ def test_run_triage_accept_all_applies_recommendations(store):
     run_triage(store, scope_proposals=[
         ScopeProposal("R-0001", "park", "left scope")],
         date="2026-06-11", stdin=_stdin(""), accept_all=True)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "parked"
+    # reason comes from the proposal, not an invented placeholder
+    assert "left scope" in f2.disposition_reason
+
+
+# ---------------------------------------------------------------------------
+# Quality-review fixes (C1/I3/M1/M3): accept-all honors human authority,
+# drift guard, one decision per finding per walk, EOF aborts the item.
+# ---------------------------------------------------------------------------
+
+
+def test_accept_all_skips_unverified_new(store):  # C1a
+    # accept-all must NEVER open an unverified finding: new->open requires
+    # verification (spec §4.2) and accept-all cannot invent it.
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "new"
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_skips_reopen_of_false_positive(store):  # C1b
+    # a reopen proposal against a protected state is Pete's call, never
+    # accept-all's — reopening false_positive forges a human decision.
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2", "ref": "backend/core/other.py:9"})
+    store.save({fp.finding_id: fp})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "false_positive"
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_skips_reopen_of_parked(store):  # C1c
+    parked = with_history(make_finding(finding_id="R-0001",
+                                       disposition="parked",
+                                       disposition_by="pete"))
+    parked.history.append({"ts": "t", "event": "suppressed_occurrence",
+                           "run_id": "run2", "ref": "backend/core/other.py:9"})
+    store.save({parked.finding_id: parked})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
     assert store.load()["R-0001"].disposition == "parked"
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_skips_past_due_risk_review(store):  # C1d
+    # a past-due risk acceptance needs Pete to reaffirm-or-open; accept-all
+    # force-opening it would override his prior adjudication unattended.
+    f = _risk_accepted(review_by="2026-01-01")
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "risk_accepted"
+    assert store.load()["R-0001"].review_by == "2026-01-01"  # untouched
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_applies_scope_unpark(store):  # C1 positive
+    parked = with_history(make_finding(finding_id="R-0001",
+                                       disposition="parked",
+                                       disposition_by="scope"))
+    store.save({parked.finding_id: parked})
+    out = run_triage(store, scope_proposals=[
+        ScopeProposal("R-0001", "unpark", "rejoined launch scope")],
+        date="2026-06-11", stdin=_stdin(""), accept_all=True)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "open"
+    assert "rejoined launch scope" in f2.disposition_reason
+    assert out.decided == 1
+
+
+def test_accept_all_decision_unsupported_fp(store):  # C1 positive (unit)
+    # a false-positive proposal is auto-applicable ONLY when the live
+    # finding's last verification is UNSUPPORTED; the reason cites the
+    # verifier's disproof rather than inventing one.
+    from lazy_vibe.register.queue import _accept_all_decision
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "UNSUPPORTED", "by": "agent:verifier",
+                      "evidence": ["x.py:9 route is tenant-scoped"]})
+    item = QueueItem("R-0001", "fp_proposal", "P2", "t", "verifier disproof",
+                     recommendation="false-positive",
+                     source_disposition="new")
+    decision = _accept_all_decision(item, f)
+    assert decision is not None
+    choice, reason = decision
+    assert choice == "f"
+    assert "x.py:9" in reason
+
+
+def test_accept_all_decision_rejects_fp_without_unsupported(store):  # C1 neg
+    from lazy_vibe.register.queue import _accept_all_decision
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "VERIFIED", "by": "agent:verifier",
+                      "evidence": ["x.py:9"]})
+    item = QueueItem("R-0001", "fp_proposal", "P2", "t", "d",
+                     recommendation="false-positive",
+                     source_disposition="new")
+    assert _accept_all_decision(item, f) is None
+
+
+def test_interactive_open_unverified_rejected(store, capsys):  # C1 fix 2
+    # even interactively, "o" on an unverified new finding is rejected with
+    # an actionable message — new->open REQUIRES verification (spec §4.2).
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "new"
+    assert out.decided == 0
+    assert out.skipped == 1
+    err = capsys.readouterr().err
+    assert "unverified" in err and "verify-packets" in err
+
+
+def test_interactive_reopen_of_false_positive_stays(store):  # C1 path stays
+    # Pete CAN reopen a protected state interactively (by="pete" guard).
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2", "ref": "backend/core/other.py:9"})
+    store.save({fp.finding_id: fp})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "open"
+    assert store.load()["R-0001"].disposition_by == "pete"
+    assert out.decided == 1
+
+
+def test_run_triage_skips_drifted_item(store, monkeypatch):  # I3
+    # the register changed between queue build and decision application —
+    # the stale item must not be applied; it lands in the drifted bucket.
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    stale = [QueueItem("R-0001", "risk_review", "P1", "t",
+                       "review_by 2026-01-01 is past due",
+                       recommendation="reaffirm or open",
+                       source_disposition="risk_accepted")]
+    monkeypatch.setattr("lazy_vibe.register.queue.build_queue",
+                        lambda *a, **k: stale)
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert out.drifted == 1
+    assert out.decided == 0
+    assert store.load()["R-0001"].disposition == "new"
+
+
+def test_one_decision_per_finding_per_walk(store, capsys):  # M1
+    # a finding with two queue items (past-due review + severity review):
+    # the first decision wins; the second item is skipped, not re-applied.
+    f = _risk_accepted(review_by="2026-01-01")
+    f.history.append({"ts": "t", "event": "severity_review_proposed",
+                      "current": "P2", "proposed": "P0", "run_id": "run2"})
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "open"
+    assert out.decided == 1
+    assert out.skipped == 1
+    assert "already decided this walk" in capsys.readouterr().err
+
+
+def test_run_triage_eof_mid_risk_accept_aborts_item(store):  # M3
+    # stdin closes after review_by but before reason: the item must abort
+    # with NO transition — never persist a sentinel reason.
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "VERIFIED", "by": "agent:verifier"})
+    f.history.append({"ts": "t", "event": "risk_accept_proposed",
+                      "by": "policy:x", "rule": "x"})
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("r\n2026-12-01\n"),  # EOF before reason
+                     accept_all=False)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"  # aborted, untouched
+    assert f2.review_by is None
+    assert out.decided == 0
+    assert out.skipped == 1

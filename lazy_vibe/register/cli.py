@@ -18,7 +18,7 @@ from .scope import load_scope, recompute
 from .scorecard import parse_scorecard
 from .store import RegisterStore
 from .themes import load_vocabulary
-from .transitions import transition
+from .transitions import transition, validate_regression_test
 from .verify import consume_results, generate_packets
 
 
@@ -162,14 +162,23 @@ def _cmd_triage(args: argparse.Namespace) -> int:
     # regenerate queue after decisions
     remaining = build_queue(store, scope_proposals=[], today=date)
     queue_path.write_text(render_queue(remaining, product=product))
-    print(f"triaged {result.decided}, {result.skipped} skipped — "
-          f"{len(remaining)} remain in {queue_path}")
+    summary = f"triaged {result.decided}, {result.skipped} skipped"
+    if result.requires_human:
+        summary += (f", {result.requires_human} items require interactive "
+                    f"decisions (re-run without --accept-all)")
+    if result.drifted:
+        summary += f", {result.drifted} drifted (register changed — re-run)"
+    print(f"{summary} — {len(remaining)} remain in {queue_path}")
     return 0
 
 
 def _cmd_close(args: argparse.Namespace) -> int:
     store = RegisterStore(Path(args.register_dir))
     now = f"{args.date or _today()}T00:00:00+00:00"
+    # Fail fast on a malformed --test BEFORE any transition: _guard_fixed
+    # re-checks at the fixed edge, but validating up front keeps the
+    # open->in_remediation step from ever running with a doomed close.
+    validate_regression_test(args.finding, args.test)
     with store.locked():
         findings = store.load()
         if args.finding not in findings:

@@ -2065,10 +2065,13 @@ git commit -m "feat(register): triage queue projection and render"
 
 The interactive `triage` walk prompts per item: `[a]ccept recommendation / [o]pen / [f]alse-positive / [r]isk-accept / [p]ark / [s]kip`. `risk-accept` additionally prompts for `review_by` and `reason`. `--accept-all` runs every recommendation non-interactively. Every decision is stamped `by="pete"` through `transition()` / `reaffirm_risk()`. Non-interactive tests feed stdin (the e2e subprocess pattern). Plus the `verify-packets`, `verify-consume`, `triage`, and `close` CLI verbs.
 
+> **Quality-review fixes (post-implementation, red-first):** the first-landed walk forged human authority under `--accept-all`. (C1) `_recommendation_choice` fell through to `"o"` for unverified/fuzzy_confirm/reopen/risk_review/severity_review items and `_apply_decision` hardcoded `verified=True` — accept-all opened unverified findings, reopened protected states, and force-opened past-due risk acceptances unattended. Fixed: accept-all routes through `_accept_all_decision`, which may ONLY apply decisions fully specified by register state — `scope` proposals (park/unpark, reason from the proposal) and false-positive proposals whose finding's last verification verdict is UNSUPPORTED (reason cites the verifier disproof); every other kind lands untouched in a distinct `TriageOutcome.requires_human` bucket, summarized by the CLI ("N items require interactive decisions"). `_apply_decision` derives `verified` from the finding's actual last `verification` event; interactive `o` on an unverified `new` finding is rejected with "unverified — run verify-packets / run-triage.sh first" (spec §4.2). Interactive reopen of protected states stays (by="pete"), unreachable from accept-all. Production probe: on the live Meridian register accept-all now applies 0 of 397 items (all `requires_human`) where the pre-fix code would have force-opened all 397. (I2) `validate_regression_test` (transitions.py, mirrors `_require_iso_date`) requires `path::test_name` with non-empty halves; used by `_guard_fixed` AND validated up-front by the `close` verb. (I3) `QueueItem` is stamped with `source_disposition` at build; `_apply_decision` raises `QueueDrift` if the live disposition has drifted — the item lands in `TriageOutcome.drifted`, never applied. (M1) one decision per finding per walk: later items for an already-decided finding skip with "already decided this walk". (M3) the interactive `prompt` raises `EOFError` on exhausted stdin instead of substituting a sentinel `"s"` line — EOF mid-risk-accept aborts the item with nothing applied (no sentinel review dates/reasons), stops the walk, and saves only decisions completed before the EOF; KeyboardInterrupt persists nothing (module docstring documents the abort contract).
+
 **Files:**
 - Modify: `lazy_vibe/register/queue.py` (add `run_triage`)
 - Modify: `lazy_vibe/register/cli.py`
-- Test: `tests/register/test_queue.py`, `tests/register/test_cli_end_to_end.py`
+- Modify: `lazy_vibe/register/transitions.py` (`validate_regression_test`, quality-review I2)
+- Test: `tests/register/test_queue.py`, `tests/register/test_cli_end_to_end.py`, `tests/register/test_transitions.py`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2133,7 +2136,210 @@ def test_run_triage_accept_all_applies_recommendations(store):
     run_triage(store, scope_proposals=[
         ScopeProposal("R-0001", "park", "left scope")],
         date="2026-06-11", stdin=_stdin(""), accept_all=True)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "parked"
+    # reason comes from the proposal, not an invented placeholder
+    assert "left scope" in f2.disposition_reason
+```
+
+Quality-review fix tests (C1/I3/M1/M3, red-first; `import io` and the
+`run_triage` import live at the top of the file per E402):
+
+```python
+def test_accept_all_skips_unverified_new(store):  # C1a
+    # accept-all must NEVER open an unverified finding: new->open requires
+    # verification (spec §4.2) and accept-all cannot invent it.
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "new"
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_skips_reopen_of_false_positive(store):  # C1b
+    # a reopen proposal against a protected state is Pete's call, never
+    # accept-all's — reopening false_positive forges a human decision.
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2", "ref": "backend/core/other.py:9"})
+    store.save({fp.finding_id: fp})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "false_positive"
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_skips_reopen_of_parked(store):  # C1c
+    parked = with_history(make_finding(finding_id="R-0001",
+                                       disposition="parked",
+                                       disposition_by="pete"))
+    parked.history.append({"ts": "t", "event": "suppressed_occurrence",
+                           "run_id": "run2", "ref": "backend/core/other.py:9"})
+    store.save({parked.finding_id: parked})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
     assert store.load()["R-0001"].disposition == "parked"
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_skips_past_due_risk_review(store):  # C1d
+    # a past-due risk acceptance needs Pete to reaffirm-or-open; accept-all
+    # force-opening it would override his prior adjudication unattended.
+    f = _risk_accepted(review_by="2026-01-01")
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "risk_accepted"
+    assert store.load()["R-0001"].review_by == "2026-01-01"  # untouched
+    assert out.requires_human == 1
+    assert out.decided == 0
+
+
+def test_accept_all_applies_scope_unpark(store):  # C1 positive
+    parked = with_history(make_finding(finding_id="R-0001",
+                                       disposition="parked",
+                                       disposition_by="scope"))
+    store.save({parked.finding_id: parked})
+    out = run_triage(store, scope_proposals=[
+        ScopeProposal("R-0001", "unpark", "rejoined launch scope")],
+        date="2026-06-11", stdin=_stdin(""), accept_all=True)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "open"
+    assert "rejoined launch scope" in f2.disposition_reason
+    assert out.decided == 1
+
+
+def test_accept_all_decision_unsupported_fp(store):  # C1 positive (unit)
+    # a false-positive proposal is auto-applicable ONLY when the live
+    # finding's last verification is UNSUPPORTED; the reason cites the
+    # verifier's disproof rather than inventing one.
+    from lazy_vibe.register.queue import _accept_all_decision
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "UNSUPPORTED", "by": "agent:verifier",
+                      "evidence": ["x.py:9 route is tenant-scoped"]})
+    item = QueueItem("R-0001", "fp_proposal", "P2", "t", "verifier disproof",
+                     recommendation="false-positive",
+                     source_disposition="new")
+    decision = _accept_all_decision(item, f)
+    assert decision is not None
+    choice, reason = decision
+    assert choice == "f"
+    assert "x.py:9" in reason
+
+
+def test_accept_all_decision_rejects_fp_without_unsupported(store):  # C1 neg
+    from lazy_vibe.register.queue import _accept_all_decision
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "VERIFIED", "by": "agent:verifier",
+                      "evidence": ["x.py:9"]})
+    item = QueueItem("R-0001", "fp_proposal", "P2", "t", "d",
+                     recommendation="false-positive",
+                     source_disposition="new")
+    assert _accept_all_decision(item, f) is None
+
+
+def test_interactive_open_unverified_rejected(store, capsys):  # C1 fix 2
+    # even interactively, "o" on an unverified new finding is rejected with
+    # an actionable message — new->open REQUIRES verification (spec §4.2).
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "new"
+    assert out.decided == 0
+    assert out.skipped == 1
+    err = capsys.readouterr().err
+    assert "unverified" in err and "verify-packets" in err
+
+
+def test_interactive_reopen_of_false_positive_stays(store):  # C1 path stays
+    # Pete CAN reopen a protected state interactively (by="pete" guard).
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2", "ref": "backend/core/other.py:9"})
+    store.save({fp.finding_id: fp})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "open"
+    assert store.load()["R-0001"].disposition_by == "pete"
+    assert out.decided == 1
+
+
+def test_run_triage_skips_drifted_item(store, monkeypatch):  # I3
+    # the register changed between queue build and decision application —
+    # the stale item must not be applied; it lands in the drifted bucket.
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    stale = [QueueItem("R-0001", "risk_review", "P1", "t",
+                       "review_by 2026-01-01 is past due",
+                       recommendation="reaffirm or open",
+                       source_disposition="risk_accepted")]
+    monkeypatch.setattr("lazy_vibe.register.queue.build_queue",
+                        lambda *a, **k: stale)
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert out.drifted == 1
+    assert out.decided == 0
+    assert store.load()["R-0001"].disposition == "new"
+
+
+def test_one_decision_per_finding_per_walk(store, capsys):  # M1
+    # a finding with two queue items (past-due review + severity review):
+    # the first decision wins; the second item is skipped, not re-applied.
+    f = _risk_accepted(review_by="2026-01-01")
+    f.history.append({"ts": "t", "event": "severity_review_proposed",
+                      "current": "P2", "proposed": "P0", "run_id": "run2"})
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "open"
+    assert out.decided == 1
+    assert out.skipped == 1
+    assert "already decided this walk" in capsys.readouterr().err
+
+
+def test_run_triage_eof_mid_risk_accept_aborts_item(store):  # M3
+    # stdin closes after review_by but before reason: the item must abort
+    # with NO transition — never persist a sentinel reason.
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "VERIFIED", "by": "agent:verifier"})
+    f.history.append({"ts": "t", "event": "risk_accept_proposed",
+                      "by": "policy:x", "rule": "x"})
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("r\n2026-12-01\n"),  # EOF before reason
+                     accept_all=False)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"  # aborted, untouched
+    assert f2.review_by is None
+    assert out.decided == 0
+    assert out.skipped == 1
+```
+
+And to `tests/register/test_transitions.py` (I2):
+
+```python
+def test_fixed_rejects_malformed_regression_test_format():
+    # a closing regression test must be 'path::test_name' — free text would
+    # make the fixed state unauditable and unrerunnable (quality-review I2)
+    for bad in ("garbage", "tests/test_x.py", "::test_y", "tests/x.py::",
+                "  ::  "):
+        f = make_finding(disposition="open")
+        t(f, "in_remediation", by="harness")
+        with pytest.raises(TransitionError, match="path::test_name"):
+            t(f, "fixed", by="harness", regression_test=bad)
+        assert f.disposition == "in_remediation"  # rejected before mutation
 ```
 
 Append to `tests/register/test_cli_end_to_end.py` (the `cli`, `workspace`, fixtures already exist):
@@ -2219,6 +2425,31 @@ def test_close_requires_open_or_remediation(workspace):
     assert proc.returncode == 1  # R-0001 is `new`, not open
     assert "error:" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_close_rejects_malformed_test_format(workspace):
+    # quality-review I2: --test must be 'path::test_name'; free text would
+    # persist an unrerunnable regression link on the fixed state.
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    from lazy_vibe.register.store import RegisterStore as RS
+    from lazy_vibe.register.transitions import transition
+    from lazy_vibe.register.model import Disposition
+    store = RS(register_dir)
+    findings = store.load()
+    transition(findings["R-0001"], Disposition.OPEN, by="pete", reason="real",
+               now="2026-06-10T00:00:00+00:00", verified=True)
+    store.save(findings)
+    proc = cli("close", "--register-dir", str(register_dir),
+               "--finding", "R-0001", "--test", "garbage")
+    assert proc.returncode == 1
+    assert "path::test_name" in proc.stderr
+    assert "Traceback" not in proc.stderr
+    f = RS(register_dir).load()["R-0001"]
+    assert f.disposition == "open"  # untouched — rejected before any transition
+    assert f.regression_test is None
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2228,6 +2459,34 @@ Expected: FAIL — `run_triage` undefined; argparse invalid choice for new verbs
 
 - [ ] **Step 3: Implement**
 
+In `lazy_vibe/register/transitions.py` (quality-review I2), add next to
+`_require_iso_date` and call it from `_guard_fixed`:
+
+```python
+def validate_regression_test(finding_id: str, value: str) -> None:
+    """Shared guard: a closing regression test must be ``path::test_name``
+    with a non-empty path and test name, so the fixed state stays rerunnable
+    (mirrors ``_require_iso_date``; used by ``_guard_fixed`` and the close
+    CLI verb)."""
+    path, sep, name = (value or "").partition("::")
+    if not (sep and path.strip() and name.strip()):
+        raise TransitionError(
+            f"{finding_id}: regression_test must be 'path::test_name' "
+            f"(e.g. tests/test_x.py::test_y), got {value!r}")
+
+
+def _guard_fixed(finding: Finding, by: str, kw: dict) -> None:
+    if not kw.get("regression_test"):
+        raise TransitionError(f"{finding.finding_id}: fixed requires regression_test")
+    validate_regression_test(finding.finding_id, kw["regression_test"])
+```
+
+In `lazy_vibe/register/queue.py`: `QueueItem` gains
+`source_disposition: str = ""` (the disposition the finding had when the
+queue was built — quality-review I3); every build site (`_finding_items`,
+`_reopen_items`, the scope-proposal loop in `build_queue`) stamps it from
+the live finding.
+
 Append to `lazy_vibe/register/queue.py` (add imports `import sys`, `from .model import Disposition, RegisterError`, `from .transitions import reaffirm_risk, transition` to the top):
 
 ```python
@@ -2235,28 +2494,99 @@ Append to `lazy_vibe/register/queue.py` (add imports `import sys`, `from .model 
 class TriageOutcome:
     decided: int = 0
     skipped: int = 0
+    # Items --accept-all refused to decide because they need a human (C1).
+    requires_human: int = 0
+    # Items whose finding's disposition changed between queue build and
+    # decision application — never applied, re-run triage (I3).
+    drifted: int = 0
+
+
+class QueueDrift(RegisterError):
+    """The register changed between queue build and decision application."""
 
 
 _PROMPT = ("[a]ccept rec / [o]pen / [f]alse-positive / [r]isk-accept / "
            "[p]ark / [s]kip > ")
 
 
+def _recommendation_choice(item: QueueItem) -> str:
+    """Map an item's recommendation to a choice for INTERACTIVE accept ('a').
+
+    Only reachable from a human keypress; ``--accept-all`` routes through
+    ``_accept_all_decision`` instead, which refuses anything underspecified.
+    """
+    rec = item.recommendation.lower()
+    if item.kind == "scope":
+        return "p" if rec == "park" else "o"  # unpark -> open
+    if "risk" in rec:
+        return "r"
+    if "false" in rec:
+        return "f"
+    if "park" in rec:
+        return "p"
+    return "o"
+
+
+def _accept_all_decision(item: QueueItem,
+                         finding: Finding) -> tuple[str, str] | None:
+    """The only decisions ``--accept-all`` may apply are those fully
+    specified by register state, never inventing data on Pete's behalf (C1):
+
+    - ``scope`` proposals: park/unpark with the proposal's own reason;
+    - false-positive proposals whose finding's LAST verification verdict is
+      UNSUPPORTED: the reason cites the verifier's disproof.
+
+    Everything else — unverified findings, fuzzy confirms, reopens of
+    protected states, past-due risk acceptances, severity reviews,
+    risk-accept proposals — needs an interactive human decision: return
+    ``None`` and let the caller count it in ``requires_human``.
+    """
+    if item.kind == "scope":
+        choice = "p" if item.recommendation.lower() == "park" else "o"
+        return choice, f"scope proposal accepted: {item.detail}"
+    if "false" in item.recommendation.lower():
+        ev = _last_event(finding, "verification")
+        if ev and ev.get("verdict") == "UNSUPPORTED":
+            disproof = "; ".join(ev.get("evidence", []))[:200]
+            return "f", f"verifier UNSUPPORTED: {disproof}"
+    return None
+
+
 def _apply_decision(findings, item: QueueItem, choice: str, *, date: str,
-                    prompt_fn) -> bool:
-    """Apply a single decision stamped pete. Returns True if it changed state."""
+                    prompt_fn, reason: str | None = None) -> bool:
+    """Apply a single decision stamped pete. Returns True if it changed state.
+
+    Raises ``QueueDrift`` if the live finding no longer has the disposition
+    the queue item was built from (I3) — the decision context is stale.
+    Raises ``EOFError`` out of ``prompt_fn`` if stdin closes mid-decision —
+    the item is aborted with nothing applied (M3).
+    ``verified`` is derived from the finding's actual last verification
+    event, never assumed (spec §4.2: new->open requires verification).
+    """
     now = f"{date}T00:00:00+00:00"
     finding = findings[item.finding_id]
+    if finding.disposition != item.source_disposition:
+        raise QueueDrift(
+            f"{item.finding_id}: register changed since the queue was built "
+            f"({item.source_disposition!r} -> {finding.disposition!r}) — "
+            f"re-run triage")
     if choice == "a":
         choice = _recommendation_choice(item)
     if choice == "o":
+        ev = _last_event(finding, "verification")
+        verified = bool(ev and ev.get("verdict") == "VERIFIED")
+        if finding.disposition == "new" and not verified:
+            raise RegisterError(
+                f"{finding.finding_id}: unverified — run verify-packets / "
+                f"run-triage.sh first")
         transition(finding, Disposition.OPEN, by="pete",
-                   reason="triaged open", now=now, verified=True)
+                   reason=reason or "triaged open", now=now, verified=verified)
     elif choice == "f":
         transition(finding, Disposition.FALSE_POSITIVE, by="pete",
-                   reason="triaged false_positive", now=now)
+                   reason=reason or "triaged false_positive", now=now)
     elif choice == "p":
         transition(finding, Disposition.PARKED, by="pete",
-                   reason="triaged parked", now=now)
+                   reason=reason or "triaged parked", now=now)
     elif choice == "r":
         review_by = prompt_fn("review_by (YYYY-MM-DD): ").strip()
         reason = prompt_fn("reason: ").strip() or "risk accepted via triage"
@@ -2271,61 +2601,108 @@ def _apply_decision(findings, item: QueueItem, choice: str, *, date: str,
     return True
 
 
-def _recommendation_choice(item: QueueItem) -> str:
-    rec = item.recommendation.lower()
-    if item.kind == "scope":
-        return "p" if rec == "park" else "o"  # unpark -> open
-    if "risk" in rec:
-        return "r"
-    if "false" in rec:
-        return "f"
-    if "park" in rec:
-        return "p"
-    return "o"
+def _choose(item: QueueItem, finding: Finding, *, accept_all: bool,
+            prompt) -> tuple[str, str | None] | None:
+    """Pick the (choice, reason) for one item.
+
+    ``None`` means accept-all refused it (requires a human). Raises
+    ``EOFError`` if stdin is exhausted at the choice prompt.
+    """
+    if accept_all:
+        return _accept_all_decision(item, finding)
+    print(f"{item.finding_id} {item.severity} [{item.kind}] "
+          f"{item.title}\n  rec: {item.recommendation} — {item.detail}")
+    return (prompt(_PROMPT).strip().lower()[:1] or "s"), None
+
+
+def _decide_one(findings, item: QueueItem, *, accept_all: bool, prompt,
+                date: str, outcome: TriageOutcome) -> bool | None:
+    """Decide and apply one item, mapping failures onto outcome buckets.
+
+    Returns True if the finding changed (caller counts ``decided``), False
+    if it was refused/skipped (already counted here), or None if the walk
+    must stop because stdin is exhausted (caller counts the remainder).
+    """
+    try:
+        decision = _choose(item, findings[item.finding_id],
+                           accept_all=accept_all, prompt=prompt)
+        if decision is None:
+            outcome.requires_human += 1
+            return False
+        choice, reason = decision
+        if _apply_decision(findings, item, choice, date=date,
+                           prompt_fn=lambda t: prompt(t).strip(),
+                           reason=reason):
+            return True
+        outcome.skipped += 1
+        return False
+    except QueueDrift as exc:
+        print(f"  drifted: {exc}", file=sys.stderr)
+        outcome.drifted += 1
+        return False
+    except EOFError:
+        print(f"  stdin closed — stopping the walk; nothing applied for "
+              f"{item.finding_id}", file=sys.stderr)
+        return None
+    except RegisterError as exc:
+        print(f"  skipped {item.finding_id}: {exc}", file=sys.stderr)
+        outcome.skipped += 1
+        return False
 
 
 def run_triage(store: RegisterStore, *, scope_proposals: list[ScopeProposal],
                date: str, stdin=None, accept_all: bool = False) -> TriageOutcome:
-    """Walk the queue and write pete-stamped dispositions. Non-interactive
-    when accept_all=True or when stdin is exhausted (skips remaining)."""
+    """Walk the queue and write pete-stamped dispositions.
+
+    ``accept_all=True`` is non-interactive and applies ONLY decisions fully
+    specified by register state (``_accept_all_decision``); everything else
+    lands in ``requires_human`` untouched. One decision per finding per walk
+    (M1). EOF aborts the in-flight item with nothing applied (M3), stops the
+    walk, and saves only the decisions completed before it; a
+    KeyboardInterrupt persists nothing. Full abort contract: module
+    docstring.
+    """
     stdin = stdin or sys.stdin
     outcome = TriageOutcome()
     items = build_queue(store, scope_proposals=scope_proposals, today=date)
 
     def prompt(text: str) -> str:
+        print(text, end="", flush=True)
         line = stdin.readline()
-        return line if line else "s\n"
+        if not line:
+            raise EOFError
+        return line
 
+    decided_ids: set[str] = set()
     with store.locked():
         findings = store.load()
-        for item in items:
+        for index, item in enumerate(items):
             if item.finding_id not in findings:
                 continue
-            if accept_all:
-                choice = "a"
-            else:
-                print(f"{item.finding_id} {item.severity} [{item.kind}] "
-                      f"{item.title}\n  rec: {item.recommendation} — "
-                      f"{item.detail}")
-                choice = prompt(_PROMPT).strip().lower()[:1] or "s"
-            try:
-                changed = _apply_decision(findings, item, choice, date=date,
-                                          prompt_fn=lambda t: prompt(t).strip())
-            except RegisterError as exc:
-                print(f"  skipped {item.finding_id}: {exc}", file=sys.stderr)
+            if item.finding_id in decided_ids:
+                print(f"  {item.finding_id}: already decided this walk — "
+                      f"skipping [{item.kind}] item", file=sys.stderr)
                 outcome.skipped += 1
                 continue
+            changed = _decide_one(findings, item, accept_all=accept_all,
+                                  prompt=prompt, date=date, outcome=outcome)
+            if changed is None:  # stdin exhausted: count the rest, stop
+                outcome.skipped += len(items) - index
+                break
             if changed:
                 outcome.decided += 1
-            else:
-                outcome.skipped += 1
+                decided_ids.add(item.finding_id)
         store.save(findings)
     return outcome
 ```
 
-> **Note:** the `prompt` closure reads one line per call; `_apply_decision`'s
+> **Note:** the `prompt` closure prints its prompt text, reads one line per
+> call, and raises `EOFError` on exhausted stdin; `_apply_decision`'s
 > risk-accept branch consumes the next two lines (review_by, reason) — so the
 > stdin fixtures feed `r\n<date>\n<reason>\n`. `accept_all` never reads stdin.
+> The module docstring documents the abort contract: a single `store.save`
+> at the end of the walk; EOF saves only completed decisions, never a
+> half-applied item; KeyboardInterrupt persists nothing.
 
 In `lazy_vibe/register/cli.py` add imports:
 
@@ -2348,11 +2725,14 @@ def _cmd_verify_packets(args: argparse.Namespace) -> int:
 
 def _cmd_verify_consume(args: argparse.Namespace) -> int:
     store = RegisterStore(Path(args.register_dir))
+    # NOTE(T5): VerifyOutcome buckets are per-run deltas, not register totals.
+    # A re-run after full consumption legitimately returns all-empty buckets.
+    # Present them as "this run found/changed X", never as register census.
     outcome = consume_results(store, date=args.date or _today())
-    print(f"{len(outcome.verified)} verified, "
+    print(f"this run: {len(outcome.verified)} verified, "
           f"{len(outcome.false_positive)} false_positive, "
           f"{len(outcome.split)} split, "
-          f"{len(outcome.unverified)} unverified")
+          f"{len(outcome.unverified)} unverified (no result yet)")
     return 0
 
 
@@ -2384,14 +2764,23 @@ def _cmd_triage(args: argparse.Namespace) -> int:
     # regenerate queue after decisions
     remaining = build_queue(store, scope_proposals=[], today=date)
     queue_path.write_text(render_queue(remaining, product=product))
-    print(f"triaged {result.decided}, {result.skipped} skipped — "
-          f"{len(remaining)} remain in {queue_path}")
+    summary = f"triaged {result.decided}, {result.skipped} skipped"
+    if result.requires_human:
+        summary += (f", {result.requires_human} items require interactive "
+                    f"decisions (re-run without --accept-all)")
+    if result.drifted:
+        summary += f", {result.drifted} drifted (register changed — re-run)"
+    print(f"{summary} — {len(remaining)} remain in {queue_path}")
     return 0
 
 
 def _cmd_close(args: argparse.Namespace) -> int:
     store = RegisterStore(Path(args.register_dir))
     now = f"{args.date or _today()}T00:00:00+00:00"
+    # Fail fast on a malformed --test BEFORE any transition: _guard_fixed
+    # re-checks at the fixed edge, but validating up front keeps the
+    # open->in_remediation step from ever running with a doomed close.
+    validate_regression_test(args.finding, args.test)
     with store.locked():
         findings = store.load()
         if args.finding not in findings:
@@ -2412,8 +2801,9 @@ def _cmd_close(args: argparse.Namespace) -> int:
     return 0
 ```
 
-Add `from .model import Disposition` and `from .transitions import transition`
-to `cli.py`'s imports (top of file). Add the subparsers in `build_parser`:
+Add `from .model import Disposition` and `from .transitions import
+transition, validate_regression_test` to `cli.py`'s imports (top of file).
+Add the subparsers in `build_parser`:
 
 ```python
     p = sub.add_parser("verify-packets",
@@ -2454,7 +2844,7 @@ to `cli.py`'s imports (top of file). Add the subparsers in `build_parser`:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py tests/register/test_cli_end_to_end.py -v` then `python3 -m pytest tests/register -q` — expect **223 passed**.
+Run: `python3 -m pytest tests/register/test_queue.py tests/register/test_cli_end_to_end.py -v` then `python3 -m pytest tests/register -q` — expect **223 passed** (printed value; actual on-branch totals after the T2–T4 quality rounds: T5 first landed **243**, and the T5 quality-fix round (C1/I2/I3/M1/M3 above, +14 tests incl. `test_transitions.py`) brings the suite to **257**; downstream totals shift accordingly: T6 → 261, T7/final → 262).
 
 - [ ] **Step 5: Commit**
 
@@ -2463,6 +2853,11 @@ git add lazy_vibe/register/queue.py lazy_vibe/register/cli.py \
         tests/register/test_queue.py tests/register/test_cli_end_to_end.py
 git commit -m "feat(register): interactive triage walk + verify/triage/close CLI verbs"
 ```
+
+> Landed as `789b365` (suite 243). The quality-review fixes (C1/I2/I3/M1/M3
+> above) landed red-first in a follow-up commit: `fix(register): accept-all
+> honors human authority, regression-test format, drift guards` (suite 257,
+> includes `transitions.py` + `test_transitions.py`).
 
 ---
 
@@ -2771,18 +3166,21 @@ In `lazy_vibe/register/__init__.py`, add the new public symbols and update
 
 ```python
 from .policy import Policy, PolicyOutcome, Rule, apply_policy, load_policy
-from .queue import (QueueItem, TriageOutcome, build_queue, render_queue,
-                    run_triage)
+from .queue import (QueueDrift, QueueItem, TriageOutcome, build_queue,
+                    render_queue, run_triage)
 from .verify import (RESULT_SCHEMA_VERSION, VerifyOutcome, consume_results,
                      consumed_result_path, generate_packets,
                      last_verification, packet_path, result_path)
 ```
 
-and add to `__all__`: `"Policy", "PolicyOutcome", "QueueItem",
+and add to `__all__`: `"Policy", "PolicyOutcome", "QueueDrift", "QueueItem",
 "RESULT_SCHEMA_VERSION", "Rule", "TriageOutcome", "VerifyOutcome",
 "apply_policy", "build_queue", "consume_results", "consumed_result_path",
 "generate_packets", "last_verification", "load_policy", "packet_path",
 "render_queue", "result_path", "run_triage"` (re-sort the full list).
+(`validate_regression_test` stays a `transitions` import for the close verb;
+export it alongside `transition`/`reaffirm_risk` if those are already in
+`__all__`, matching however Plan 1 exported them.)
 
 In `README.md`, after the Plan 2a paragraph (line ~799), append:
 

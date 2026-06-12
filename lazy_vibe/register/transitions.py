@@ -20,6 +20,18 @@ def _require_iso_date(finding: Finding, value: str) -> None:
                               f"ISO date (YYYY-MM-DD), got {value!r}") from None
 
 
+def validate_regression_test(finding_id: str, value: str) -> None:
+    """Shared guard: a closing regression test must be ``path::test_name``
+    with a non-empty path and test name, so the fixed state stays rerunnable
+    (mirrors ``_require_iso_date``; used by ``_guard_fixed`` and the close
+    CLI verb)."""
+    path, sep, name = (value or "").partition("::")
+    if not (sep and path.strip() and name.strip()):
+        raise TransitionError(
+            f"{finding_id}: regression_test must be 'path::test_name' "
+            f"(e.g. tests/test_x.py::test_y), got {value!r}")
+
+
 def _require_pete_or_policy(finding: Finding, by: str, kw: dict) -> None:
     if not (by == "pete" or by.startswith("policy:")):
         raise TransitionError(f"{finding.finding_id}: authority 'pete' or "
@@ -54,6 +66,7 @@ def _guard_risk_accept(finding: Finding, by: str, kw: dict) -> None:
 def _guard_fixed(finding: Finding, by: str, kw: dict) -> None:
     if not kw.get("regression_test"):
         raise TransitionError(f"{finding.finding_id}: fixed requires regression_test")
+    validate_regression_test(finding.finding_id, kw["regression_test"])
 
 
 def _guard_regressed(finding: Finding, by: str, kw: dict) -> None:
