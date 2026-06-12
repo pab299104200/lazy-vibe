@@ -177,9 +177,7 @@ Tests:
 
 ## Task 6: Prompt Calibration And Skill Consolidation
 
-**Status:** prompt calibration landed in the fifth Plan 3 code slice; compact
-register prompt context landed in the ninth Plan 3 code slice; Meridian skill
-retirement/rewiring remains.
+**Status:** landed across the fifth, ninth, and tenth Plan 3 code slices.
 
 Remove finding-count incentives and make accurate dispositions the central
 prompt contract.
@@ -193,6 +191,14 @@ Required behavior:
   not runtime authority.
 - In Meridian, retire or rewire `.claude/skills` per spec §10 after verifying
   equivalent harness coverage.
+
+Meridian follow-through:
+
+- `feature-review` and `feature-ux-audit` skill entrypoints were removed.
+- `feature-remediation` now delegates to register-backed `run-remediation.sh`.
+- `feature-build`, `feature-acceptance`, `feature-design`, and
+  `feature-marketresearch` now point at `run-audit.sh --differential` and
+  register-backed remediation instead of retired scorecard-era skills.
 
 Tests:
 

@@ -105,4 +105,8 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   writes `artifacts/register-context.md` from in-scope active and adjudicated
   register entries and injects it into every audit prompt so agents do not
   re-report known open/suppressed findings without materially different current
-  evidence. Meridian skill rewiring still remains.
+  evidence.
+- Plan 3 tenth slice: Meridian skill consolidation is landed in Meridian commit
+  `90aefc95`. `feature-review` and `feature-ux-audit` were retired, and the
+  remaining feature skills now route audit/remediation through the register-backed
+  lazy-vibe harnesses.
