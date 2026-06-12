@@ -798,6 +798,19 @@ Plan 2a adds: `scorecard-ingest` (feature-review scorecards -> register),
 READY / 1 NOT READY / 2 stale gate evidence). The readiness report always
 lists active risk acceptances and parked counts.
 
+Plan 2b adds the triage pipeline: `verify-packets` (write per-finding
+verification packets for `new` findings), `verify-consume` (fold
+schema-validated verifier results back — VERIFIED stays `new` for
+policy/Pete, UNSUPPORTED proposes `false_positive`, confirmed duplicates
+absorb into the original, `split` queues a manual item), `triage` (apply
+`triage-policy.yaml`, render `triage-queue.md`, and walk it interactively as
+Pete — `--accept-all` for batch, `--render-only` to just regenerate the
+queue), and `close` (harness: `open`/`in_remediation` -> `fixed` with a
+linked regression test). `run-triage.sh` dispatches a verifier agent
+(`TRIAGE_AGENT`, default `claude`; `MAX_PARALLEL`, default 3) over the packets
+and consumes the results. Policy auto-dispositions are stamped
+`policy:<rule-id>`; every Pete decision is stamped `pete`.
+
 ---
 
 ## Progress display

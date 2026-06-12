@@ -422,3 +422,40 @@ def test_consume_rejects_pinned_candidate_missing_from_register(store):
     with pytest.raises(RegisterError, match="not in register"):
         consume_results(store)
     assert store.load()["R-0001"].disposition == "new"
+
+
+# ---------------------------------------------------------------------------
+# T7 carry-forward: _archive_result must not silently lose a prior consumed
+# result on re-verification. When the destination already exists, suffix with
+# a UTC timestamp so both verifier outputs are preserved.
+# ---------------------------------------------------------------------------
+
+def test_archive_result_timestamps_collision(store):
+    """_archive_result: when the consumed destination already exists the new
+    result is suffixed R-NNNN.<ts>.json rather than silently overwriting the
+    previous one, ensuring per-run auditability."""
+    from lazy_vibe.register.verify import _archive_result, consumed_result_path
+    # Seed the consumed directory with a "prior run" result.
+    dst = consumed_result_path(store, "R-0001")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text('{"prior": true}')
+
+    # Place a fresh result in the pending location.
+    r = result_path(store, "R-0001")
+    r.parent.mkdir(parents=True, exist_ok=True)
+    r.write_text('{"fresh": true}')
+
+    _archive_result(store, "R-0001")
+
+    # The original consumed file must still exist (not overwritten).
+    assert dst.exists()
+    assert json.loads(dst.read_text()) == {"prior": True}
+
+    # A new timestamped sibling must have been created.
+    siblings = list(dst.parent.glob("R-0001.*.json"))
+    assert len(siblings) == 1
+    fresh_text = json.loads(siblings[0].read_text())
+    assert fresh_text == {"fresh": True}
+
+    # The pending result must be gone.
+    assert not r.exists()

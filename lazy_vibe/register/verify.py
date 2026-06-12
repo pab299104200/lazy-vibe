@@ -13,9 +13,12 @@ Result-file lifecycle: a verifier writes `triage/results/R-NNNN.json`.
 `consume_results` schema-validates the file, applies the verdict, saves the
 register, and only then moves the file to `triage/results/consumed/
 R-NNNN.json` (os.replace) — re-runs find no pending results, making
-consumption idempotent. A result that fails validation stays in place to be
-fixed and re-consumed; any validation or authority error aborts the whole
-batch before save, so nothing is persisted and nothing is archived.
+consumption idempotent. If a prior consumed result already exists (i.e. the
+same finding is re-verified on a later run), the new file is archived with a
+UTC timestamp suffix — `R-NNNN.<unix_ts>.json` — so no prior verifier output
+is ever overwritten. A result that fails validation stays in place to be fixed
+and re-consumed; any validation or authority error aborts the whole batch
+before save, so nothing is persisted and nothing is archived.
 """
 from __future__ import annotations
 
@@ -249,12 +252,19 @@ def _absorb_duplicate_evidence(original, dup_result: dict, run_id: str) -> None:
 
 
 def _archive_result(store: RegisterStore, finding_id: str) -> None:
-    # NOTE(Task 7): os.replace overwrites a previously consumed result on
-    # re-verification — the prior verifier output is lost. When run-triage.sh
-    # lands, consider a run_id suffix (R-NNNN.<run_id>.json) or
-    # refuse-overwrite so consumed results stay auditable per run.
+    """Move a pending result to the consumed directory.
+
+    If a previous consumed result already exists (re-verification of the same
+    finding on a subsequent run), the new result is archived with a UTC
+    timestamp suffix — ``R-NNNN.<unix_ts>.json`` — so both verifier outputs
+    are preserved and no prior audit evidence is lost.
+    """
+    import time as _time
     dst = consumed_result_path(store, finding_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        ts = int(_time.time())
+        dst = dst.parent / f"{finding_id}.{ts}.json"
     os.replace(result_path(store, finding_id), dst)
 
 
