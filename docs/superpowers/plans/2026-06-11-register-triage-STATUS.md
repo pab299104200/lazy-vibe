@@ -10,19 +10,23 @@
 3. Keep the plan file truthful: any code change made after review must be reflected in the plan's code blocks.
 4. Commit per task with the plan's commit message.
 
-## State (2026-06-11 ~20:30 ET)
+## State (2026-06-11 ~21:15 ET)
 | Task | Status | Commit |
 |---|---|---|
 | T1 packet generation | DONE, reviewed/approved | 1e7fd81 |
 | T2 result consumption | DONE (d93cd72) + hardening (dec32e0) + candidate binding landed 066f427 — re-review CLOSED | 066f427 (suite 192) |
-| T3 policy engine | not started | |
+| T3 policy engine | DONE (ca7de37) + quality fixes landed 123d843 — review CLOSED | 123d843 (suite 211) |
 | T4 queue render | not started | |
 | T5 triage CLI + close | not started | |
 | T6 scope journeys/claims_doc | not started | |
 | T7 run-triage.sh + exports + README | not started | |
 | T8 Meridian dry-run | not started | |
 
-## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Re-review item LANDED in 066f427: duplicate claims bound to the solicited fuzzy candidate (`duplicate_of == _fuzzy_candidate(finding)`), closing both the unsolicited-claim hole AND the nonexistent-id silent fall-through (the residual previously flagged for T4 — now resolved). Plan test arithmetic re-derived: T2 192, T3 206, T4 216, T5 223, T6 227, T7/final 228.
+## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Re-review item LANDED in 066f427: duplicate claims bound to the solicited fuzzy candidate (`duplicate_of == _fuzzy_candidate(finding)`), closing both the unsolicited-claim hole AND the nonexistent-id silent fall-through (the residual previously flagged for T4 — now resolved).
+
+## T3 quality fixes: LANDED in 123d843 (red-first per fix). C1: `_candidate:`-themed findings are NOT adjudicable by policy — readiness's vocabulary-gap guard only blocks `new` findings, so a park rule would leak them past readiness (spec §12); they stay `new` and land in `PolicyOutcome.vocabulary_gaps`. I1: load-time type validation of match values (severity must be a string in SEVERITY_ORDER — a list silently never matched; in_scope/verified must be real YAML booleans — `"false"` bool-coerced truthy and matched the OPPOSITE set); `_matches` compares without coercion. I2: `propose_risk_accept` skips findings whose history already carries a `risk_accept_proposed` event, so policy re-runs do not stack duplicate proposals. M1: empty/omitted `match` is a load-time hard error (catch-all intent goes through `default`). M2: dead `findings` param dropped from `_act`. M3: `risk_accept_proposed` events carry a displayable `reason` for the T4 queue render.
+
+Plan test arithmetic re-derived after T3 fixes (+5): T2 192, T3 211, T4 221, T5 228, T6 232, T7/final 233.
 
 ## Review carry-forwards from T2 re-review (NOTE comments in verify.py)
 - **T5:** VerifyOutcome buckets are per-run deltas, not a register census — verify-consume CLI summary must not present them as totals.
