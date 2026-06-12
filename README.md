@@ -808,7 +808,12 @@ Pete — `--accept-all` for batch, `--render-only` to just regenerate the
 queue), and `close` (harness: `open`/`in_remediation` -> `fixed` with a
 linked regression test). `run-triage.sh` dispatches a verifier agent
 (`TRIAGE_AGENT`, default `claude`; `MAX_PARALLEL`, default 3) over the packets
-and consumes the results. Policy auto-dispositions are stamped
+and consumes the results. It follows the same product-profile contract as
+audit/remediation: set `PROFILE=meridian` (or `PRODUCT_PROFILE=/path/to/product-profile.md`)
+and it reads the profile's `Repo root`, defaults the register to
+`<repo>/docs/audit/register` when `--register-dir` is omitted, and runs verifier
+agents from the product repo so bare evidence refs resolve against the right
+checkout. Policy auto-dispositions are stamped
 `policy:<rule-id>`; every Pete decision is stamped `pete`.
 
 ---

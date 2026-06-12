@@ -59,4 +59,10 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
 ## Wider context
 - Registers live: meridian (397 findings, commit 35bdd9af) and portal (353, seeded by Pete) at `docs/audit/register/` in each repo.
 - Meridian readiness (findings side): NOT READY, 238 blocking (5 P0 + 59 P1 + 174 untriaged P2). Gate runs (backend pytest) intentionally not yet executed to completion.
-- Plan 3 (not yet written): run-remediation.sh register wiring, differential audit mode (spec §8), prompt calibration + skill retirement (§9/§10), collision auto-split.
+- Plan 3 is now `docs/superpowers/plans/2026-06-12-register-integration.md`.
+  Its first prerequisite slice is landed in lazy-vibe: `run-triage.sh` honors
+  `PROFILE`/`PRODUCT_PROFILE`, infers the register from product `Repo root`,
+  and runs Codex from the product repo so bare evidence refs resolve correctly.
+  Remaining Plan 3 work: run-remediation.sh register wiring, differential audit
+  mode (spec §8), prompt calibration + skill retirement (§9/§10), collision
+  auto-split.

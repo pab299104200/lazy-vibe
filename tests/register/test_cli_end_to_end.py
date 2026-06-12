@@ -392,6 +392,20 @@ def _write_verified_stub(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def _write_codex_stub(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\n"
+        "packet=$(cat)\n"
+        "fid=$(printf '%s' \"$packet\" | grep -oE 'R-[0-9]{4}' | head -1)\n"
+        "out=$(printf '%s' \"$packet\" | grep -oE '/[^ ]*results/[^ ]*.json' "
+        "| head -1)\n"
+        "printf '{\"schema_version\":1,\"finding_id\":\"%s\",\"verdict\":"
+        "\"VERIFIED\",\"evidence\":[\"x.py:1\"],\"mechanism\":\"m\","
+        "\"duplicate_of\":null,\"split_paths\":[]}' \"$fid\" > \"$out\"\n")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
 def test_run_triage_sh_dispatches_stub_agent(workspace, tmp_path):
     """run-triage.sh: stub TRIAGE_AGENT writes a VERIFIED result per packet,
     then verify-consume folds it in."""
@@ -433,6 +447,51 @@ def test_run_triage_sh_no_generate_preserves_bounded_packet_set(workspace, tmp_p
         cwd=REPO_ROOT, capture_output=True, text=True, env=env)
 
     assert proc.returncode == 0, proc.stderr
+    findings = RegisterStore(register_dir).load()
+    assert "verification" in [h.get("event") for h in findings["R-0001"].history]
+    assert "verification" not in [
+        h.get("event") for h in findings["R-0002"].history
+    ]
+
+
+def test_run_triage_sh_profile_sets_register_and_codex_cwd(workspace, tmp_path):
+    """PROFILE keeps register triage on the same product-profile contract as
+    audit/remediation and runs Codex in the product repo."""
+    product_root, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    cli("verify-packets", "--register-dir", str(register_dir))
+    (register_dir / "triage" / "packets" / "R-0002.md").unlink()
+
+    profiles = tmp_path / "profiles"
+    profile_dir = profiles / "product"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "product-profile.md").write_text(
+        "# Product\n\n- Repo root: `" + str(product_root) + "`\n")
+    codex = tmp_path / "codex"
+    args_path = tmp_path / "codex-args.txt"
+    _write_codex_stub(codex)
+
+    env = dict(os.environ)
+    env.update(
+        CAPTURE_ARGS=str(args_path),
+        MAX_PARALLEL="1",
+        PATH=str(tmp_path) + os.pathsep + env["PATH"],
+        PROFILE="product",
+        PROFILES_DIR=str(profiles),
+        TRIAGE_AGENT="codex",
+    )
+    env.pop("PRODUCT_PROFILE", None)
+    env.pop("PRODUCT_REPO_ROOT", None)
+    proc = subprocess.run(
+        ["bash", str(REPO_ROOT / "run-triage.sh"), "--no-generate"],
+        cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    args = args_path.read_text().splitlines()
+    assert "-C" in args
+    assert args[args.index("-C") + 1] == str(product_root)
     findings = RegisterStore(register_dir).load()
     assert "verification" in [h.get("event") for h in findings["R-0001"].history]
     assert "verification" not in [
