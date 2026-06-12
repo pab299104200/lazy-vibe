@@ -147,9 +147,16 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
                 _bump_seen(existing, run_id, date)
                 if existing.disposition in {d.value for d in PROTECTED_DISPOSITIONS} \
                         or existing.disposition == Disposition.PARKED.value:
-                    existing.history.append({"ts": _now(date),
-                                             "event": "suppressed_occurrence",
-                                             "run_id": run_id})
+                    # The occurrence's evidence ref rides on the event so the
+                    # triage queue can compare it against existing evidence:
+                    # a NOVEL ref against a protected/parked state becomes a
+                    # reopen proposal; an identical ref stays silent (§4.2).
+                    existing.history.append({
+                        "ts": _now(date),
+                        "event": "suppressed_occurrence",
+                        "run_id": run_id,
+                        "ref": f"{normalize_path(candidate.path)}:"
+                               f"{candidate.line}"})
                     result.suppressed.append(existing)
                 elif existing.disposition == Disposition.FIXED.value:
                     transition(existing, Disposition.REGRESSED, by="reconciler",

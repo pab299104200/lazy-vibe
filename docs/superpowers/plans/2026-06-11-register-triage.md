@@ -1425,15 +1425,21 @@ git commit -m "feat(register): deterministic triage-policy engine"
 Render `<register-dir>/triage-queue.md` with sections, each derived deterministically from register state (no recomputation of reconciler signals — the events already exist):
 
 1. **Proposed risk acceptances** — findings with a `risk_accept_proposed` history event (from policy), still `new`.
-2. **Severity reviews** — `severity_review_proposed` events on adjudicated entries.
-3. **Reopen proposals** — `suppressed_occurrence` events whose run evidence ref differs from all existing evidence refs (materially-different evidence against a protected/parked state; identical-evidence suppression is silent per spec §4.2).
-4. **Scope proposals** — produced by `scope.recompute`, passed in.
-5. **Unverified findings** — `new` findings with no `verification` history event (spec §12: verifier failure stays `new`, surfaces here).
-6. **Fuzzy confirms pending** — `new` findings with a `fuzzy_match_candidate` event but no `verification` event yet.
+2. **Past-due risk acceptances** — `risk_accepted` findings whose `review_by` is before `today` (mirrors readiness's past-due check; recommendation "reaffirm or open").
+3. **Severity reviews** — `severity_review_proposed` events on adjudicated entries.
+4. **Reopen proposals** — `suppressed_occurrence` events whose run evidence ref differs from all existing evidence refs (materially-different evidence against a protected/parked state; identical-evidence suppression is silent per spec §4.2). One row per DISTINCT novel ref; historical events without a `ref` are skipped.
+5. **Scope proposals** — produced by `scope.recompute`, passed in.
+6. **Unverified findings** — `new` findings with no `verification` history event (spec §12: verifier failure stays `new`, surfaces here). Render caps this section at the first 20 by severity plus an overflow line (real registers hold hundreds).
+7. **Fuzzy confirms pending** — `new` findings with a `fuzzy_match_candidate` event but no `verification` event yet.
+
+> **Cell-escaping deviation (T4 implementation):** the original plan rendered `i.recommendation` raw in the table row. The T2-review carry-forward requires EVERY free-text value rendered into triage-queue.md to go through `markdown_cell` — title, detail, AND recommendation. Corrected in the implementation; `test_render_escapes_pipe_in_recommendation` proves it red-first.
+>
+> **Quality-review fixes (post-implementation, red-first):** (C1) the reconciler's suppression branch wrote `suppressed_occurrence` events with NO `ref`, so the queue's reopen gate could never fire on production data — `reconcile.py` now stamps `"ref": f"{normalize_path(candidate.path)}:{candidate.line}"` on the event; the queue keeps the novelty comparison and TOLERATES historical events without a ref (skips them — existing meridian/portal registers carry them). Proven by integration tests driving the real reconcile→build_queue cycle with no hand-fabricated events. (C2) past-due risk acceptances were invisible to the queue: `build_queue` gains a required ISO `today` parameter (malformed → `RegisterError`, mirroring `readiness.evaluate`) and emits `risk_review` items for `risk_accepted` findings with `review_by < today` (detail shows the review_by date; recommendation "reaffirm or open"). (I1) reopen rows dedup by distinct novel ref within a finding — repeated suppressions citing the same novel evidence are one decision, not one row per run. (M1) the unverified section renders at most 20 rows (severity-sorted) then `…and N more — run verify-packets / run-triage.sh` — 397 rows on the real Meridian register is a re-run signal, not a decision list. (M2) dead `QueueItem.extra` dropped. (M3) `build_queue` docstring corrected: it acquires the exclusive register lock for a consistent snapshot but writes nothing.
 
 **Files:**
 - Create: `lazy_vibe/register/queue.py`
-- Test: `tests/register/test_queue.py`
+- Modify: `lazy_vibe/register/reconcile.py` (C1 — stamp `ref` on `suppressed_occurrence`)
+- Test: `tests/register/test_queue.py`; `tests/register/test_reconcile.py` pins the event ref
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1442,7 +1448,11 @@ Create `tests/register/test_queue.py`:
 ```python
 import pytest
 
+from lazy_vibe.register.fingerprint import compute
+from lazy_vibe.register.ingest import Candidate
+from lazy_vibe.register.model import RegisterError
 from lazy_vibe.register.queue import QueueItem, build_queue, render_queue
+from lazy_vibe.register.reconcile import reconcile
 from lazy_vibe.register.scope import ScopeProposal
 from lazy_vibe.register.store import RegisterStore
 from tests.register.helpers import with_history
@@ -1464,7 +1474,7 @@ def test_risk_accept_proposal_section(store):
     f.history.append({"ts": "t", "event": "risk_accept_proposed",
                       "by": "policy:dev-dep", "rule": "dev-dep"})
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     kinds = {i.kind for i in items}
     assert "risk_accept" in kinds
 
@@ -1476,7 +1486,7 @@ def test_severity_review_section(store):
     f.history.append({"ts": "t", "event": "severity_review_proposed",
                       "current": "P2", "proposed": "P0", "run_id": "run2"})
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     assert any(i.kind == "severity_review" and i.finding_id == "R-0001"
                for i in items)
 
@@ -1490,7 +1500,7 @@ def test_reopen_proposal_on_materially_different_evidence(store):
                        "run_id": "run2",
                        "ref": "backend/core/other.py:9"})  # new ref
     store.save({fp.finding_id: fp})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     assert any(i.kind == "reopen" for i in items)
 
 
@@ -1502,7 +1512,7 @@ def test_no_reopen_on_identical_evidence(store):
                        "run_id": "run2",
                        "ref": "backend/routers/evidence.py:118"})  # identical
     store.save({fp.finding_id: fp})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     assert not any(i.kind == "reopen" for i in items)
 
 
@@ -1510,14 +1520,14 @@ def test_scope_proposals_section(store):
     f = _new("R-0001")
     store.save({f.finding_id: f})
     items = build_queue(store, scope_proposals=[
-        ScopeProposal("R-0001", "park", "left scope")])
+        ScopeProposal("R-0001", "park", "left scope")], today="2026-06-11")
     assert any(i.kind == "scope" for i in items)
 
 
 def test_unverified_section(store):
     f = _new("R-0001")  # new, no verification event
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     assert any(i.kind == "unverified" and i.finding_id == "R-0001"
                for i in items)
 
@@ -1527,7 +1537,7 @@ def test_verified_new_not_in_unverified(store):
     f.history.append({"ts": "t", "event": "verification",
                       "verdict": "VERIFIED", "by": "agent:verifier"})
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     assert not any(i.kind == "unverified" for i in items)
 
 
@@ -1536,7 +1546,7 @@ def test_fuzzy_confirm_pending_section(store):
     f.history.append({"ts": "t", "event": "fuzzy_match_candidate",
                       "candidate_of": "R-0001", "run_id": "run1"})
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     assert any(i.kind == "fuzzy_confirm" for i in items)
 
 
@@ -1545,7 +1555,7 @@ def test_render_queue_groups_sections(store):
     f.history.append({"ts": "t", "event": "risk_accept_proposed",
                       "by": "policy:x", "rule": "x"})
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     md = render_queue(items, product="meridian")
     assert "Triage queue" in md
     assert "Proposed risk acceptances" in md
@@ -1553,17 +1563,275 @@ def test_render_queue_groups_sections(store):
 
 
 def test_render_empty_queue(store):
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     md = render_queue(items, product="meridian")
     assert "no items" in md.lower()
+
+
+# ---------------------------------------------------------------------------
+# Cell-escaping: every free-text value rendered into table cells must go
+# through markdown_cell (hard requirement from T2 review carry-forward).
+# Verifier-supplied evidence refs may contain | and newlines — injection
+# vectors flagged in NOTE(M3) in verify.py.
+# ---------------------------------------------------------------------------
+
+def test_render_escapes_pipe_in_title(store):
+    """Title with | must not break the markdown table."""
+    f = _new("R-0001", title="foo | bar | baz")
+    store.save({f.finding_id: f})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    md = render_queue(items, product="meridian")
+    # Unescaped | would create extra columns; check the title cell is escaped
+    assert "foo \\| bar \\| baz" in md
+
+
+def test_render_escapes_newline_in_detail(store):
+    """Detail containing newline must be collapsed to a single line."""
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    # ref with embedded newline — verifier-supplied injection vector
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2",
+                       "ref": "backend/core/evil.py:9\nINJECTED"})
+    store.save({fp.finding_id: fp})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    md = render_queue(items, product="meridian")
+    # The newline must not survive into the rendered table
+    assert "INJECTED\n" not in md
+
+
+def test_render_escapes_pipe_in_reopen_detail(store):
+    """Reopen detail built from verifier-supplied ref must escape pipes."""
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2",
+                       "ref": "backend/core/evil.py:9 | malicious"})
+    store.save({fp.finding_id: fp})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    md = render_queue(items, product="meridian")
+    assert "\\|" in md
+
+
+def test_render_escapes_pipe_in_recommendation(store):
+    """Recommendation field is free-text and must go through markdown_cell."""
+    # Simulate a scope proposal whose reason/kind contains a pipe — any
+    # free-text that reaches the table must be escaped.
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    # ScopeProposal.kind can be "park" or "open" (literal) but the
+    # QueueItem.recommendation is built from it; any free-text value must
+    # be escaped. We inject directly into a QueueItem to test render isolation.
+    item = QueueItem("R-0001", "scope", "P1", "safe title",
+                     "safe detail", recommendation="park | INJECTED")
+    md = render_queue([item], product="meridian")
+    assert "park \\| INJECTED" in md
+
+
+def test_render_is_deterministic(store):
+    """Same register state produces byte-identical output on repeated calls."""
+    f1 = _new("R-0001")
+    f2 = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    f1.history.append({"ts": "t", "event": "risk_accept_proposed",
+                       "by": "policy:x", "rule": "x"})
+    store.save({f1.finding_id: f1, f2.finding_id: f2})
+    items_a = build_queue(store, scope_proposals=[], today="2026-06-11")
+    items_b = build_queue(store, scope_proposals=[], today="2026-06-11")
+    assert render_queue(items_a, product="meridian") == \
+        render_queue(items_b, product="meridian")
+
+
+def test_build_queue_does_not_mutate_register(store):
+    """build_queue is a pure projection — no store.save, no history events."""
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    # record the history length before
+    before = store.load()["R-0001"].history[:]
+    build_queue(store, scope_proposals=[], today="2026-06-11")
+    after = store.load()["R-0001"].history
+    assert before == after
+
+
+# ---------------------------------------------------------------------------
+# C1 — reopen proposals must fire on REAL reconciler output, not only on
+# hand-fabricated events: reconcile's suppression branch must stamp the
+# occurrence's evidence ref on the suppressed_occurrence event so the
+# queue's novelty comparison has something to compare.
+# ---------------------------------------------------------------------------
+
+_VOCAB = {"tenant_scope_missing": ["tenant scope"]}
+
+
+def _risk_accepted_existing():
+    """Register entry whose fingerprint matches _cand() exactly."""
+    fp = compute("product_gap", "tenant_scope_missing",
+                 "backend/routers/evidence.py", "-")
+    return with_history(make_finding(
+        fingerprint=fp, disposition="risk_accepted", disposition_by="pete",
+        review_by="2026-12-01"))
+
+
+def _cand(line="118"):
+    return Candidate(blocker_id="B-0001", category="product_gap",
+                     theme_raw="tenant_scope_missing", severity="P1",
+                     path="backend/routers/evidence.py", line=line,
+                     title="Evidence list endpoint not tenant-scoped",
+                     references=f"backend/routers/evidence.py:{line}",
+                     run_id="run2")
+
+
+def test_reconcile_novel_ref_suppression_yields_one_reopen(store):
+    """Full cycle: reconcile a candidate matching a risk_accepted finding at
+    a NOVEL line -> the queue must show exactly one reopen item."""
+    f = _risk_accepted_existing()  # existing evidence ref ...evidence.py:118
+    store.save({f.finding_id: f})
+    reconcile(store, [_cand(line="999")], _VOCAB,
+              run_id="run2", date="2026-06-11")
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    reopen = [i for i in items if i.kind == "reopen"]
+    assert len(reopen) == 1
+    assert reopen[0].finding_id == "R-0001"
+    assert "backend/routers/evidence.py:999" in reopen[0].detail
+
+
+def test_reconcile_same_ref_suppression_yields_no_reopen(store):
+    """Full cycle: suppression at the SAME ref as existing evidence is
+    silent (spec §4.2) — no reopen item."""
+    f = _risk_accepted_existing()
+    store.save({f.finding_id: f})
+    reconcile(store, [_cand(line="118")], _VOCAB,
+              run_id="run2", date="2026-06-11")
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    assert not any(i.kind == "reopen" for i in items)
+
+
+def test_historical_suppression_event_without_ref_is_skipped(store):
+    """Pre-C1 registers (meridian/portal) carry suppressed_occurrence events
+    with no ref — the queue must tolerate them, not crash or false-flag."""
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                       "run_id": "run2"})  # no ref key (historical shape)
+    store.save({fp.finding_id: fp})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    assert not any(i.kind == "reopen" for i in items)
+
+
+def test_reopen_rows_dedup_by_distinct_novel_ref(store):  # I1
+    """Two suppressions citing the SAME novel ref -> one reopen row."""
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    for run in ("run2", "run3"):
+        fp.history.append({"ts": "t", "event": "suppressed_occurrence",
+                           "run_id": run, "ref": "backend/core/other.py:9"})
+    store.save({fp.finding_id: fp})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    reopen = [i for i in items if i.kind == "reopen"]
+    assert len(reopen) == 1
+
+
+# ---------------------------------------------------------------------------
+# C2 — past-due risk acceptances surface in the queue. build_queue takes a
+# required ISO `today` (mirrors readiness.evaluate); risk_accepted findings
+# whose review_by is in the past get a risk_review item.
+# ---------------------------------------------------------------------------
+
+def _risk_accepted(fid="R-0001", review_by="2026-01-01"):
+    return with_history(make_finding(finding_id=fid,
+                                     disposition="risk_accepted",
+                                     disposition_by="pete",
+                                     review_by=review_by))
+
+
+def test_past_due_risk_review_appears_once(store):
+    f = _risk_accepted(review_by="2026-01-01")
+    store.save({f.finding_id: f})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    reviews = [i for i in items if i.kind == "risk_review"]
+    assert len(reviews) == 1
+    assert reviews[0].finding_id == "R-0001"
+    assert "2026-01-01" in reviews[0].detail  # review_by date is displayed
+    assert reviews[0].recommendation == "reaffirm or open"
+
+
+def test_future_dated_risk_review_not_queued(store):
+    f = _risk_accepted(review_by="2026-12-01")
+    store.save({f.finding_id: f})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    assert not any(i.kind == "risk_review" for i in items)
+
+
+def test_build_queue_rejects_malformed_today(store):
+    with pytest.raises(RegisterError, match="ISO"):
+        build_queue(store, scope_proposals=[], today="June 11th 2026")
+
+
+def test_render_shows_risk_review_section(store):
+    f = _risk_accepted(review_by="2026-01-01")
+    store.save({f.finding_id: f})
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    md = render_queue(items, product="meridian")
+    assert "Past-due risk acceptances" in md
+    assert "2026-01-01" in md
+
+
+# ---------------------------------------------------------------------------
+# M1 — the unverified section is capped at 20 rows (397 on real data):
+# total count in the heading, first 20 by severity, then an overflow line.
+# ---------------------------------------------------------------------------
+
+def test_unverified_section_caps_at_20_rows(store):
+    findings = {}
+    for i in range(1, 26):  # 25 unverified new findings
+        fid = f"R-{i:04d}"
+        findings[fid] = _new(fid, fingerprint=f"sha256:{i:016x}")
+    store.save(findings)
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    md = render_queue(items, product="meridian")
+    assert "## Unverified findings (25)" in md  # heading keeps the total
+    section = md.split("## Unverified findings")[1]
+    rows = [ln for ln in section.splitlines() if ln.startswith("| R-")]
+    assert len(rows) == 20  # capped
+    assert "…and 5 more — run verify-packets / run-triage.sh" in md
+```
+
+Also pin the event ref in `tests/register/test_reconcile.py` (`test_match_on_protected_disposition_suppresses`):
+
+```python
+    assert loaded.history[-1]["event"] == "suppressed_occurrence"
+    # the event must carry the occurrence's evidence ref so the triage queue
+    # can compare it against existing evidence for reopen proposals (C1)
+    assert loaded.history[-1]["ref"] == "backend/routers/evidence.py:118"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python3 -m pytest tests/register/test_queue.py -v`
-Expected: FAIL with `ModuleNotFoundError`.
+Expected: FAIL with `ModuleNotFoundError`. (Quality-review red runs: C1 integration `assert 0 == 1` — no reopen item from real reconciler output; I1 `assert 2 == 1`; C2/M1 `TypeError: build_queue() got an unexpected keyword argument 'today'`.)
 
 - [ ] **Step 3: Implement**
+
+In `lazy_vibe/register/reconcile.py`, stamp the occurrence's evidence ref on the suppression event (C1):
+
+```python
+                if existing.disposition in {d.value for d in PROTECTED_DISPOSITIONS} \
+                        or existing.disposition == Disposition.PARKED.value:
+                    # The occurrence's evidence ref rides on the event so the
+                    # triage queue can compare it against existing evidence:
+                    # a NOVEL ref against a protected/parked state becomes a
+                    # reopen proposal; an identical ref stays silent (§4.2).
+                    existing.history.append({
+                        "ts": _now(date),
+                        "event": "suppressed_occurrence",
+                        "run_id": run_id,
+                        "ref": f"{normalize_path(candidate.path)}:"
+                               f"{candidate.line}"})
+                    result.suppressed.append(existing)
+```
 
 Create `lazy_vibe/register/queue.py`:
 
@@ -1575,18 +1843,26 @@ to a history event already written by verify/policy/reconcile/scope. Building
 the queue never mutates the register; only the interactive `triage` walk
 (part 2) writes dispositions, always stamped `pete` through transition() /
 reaffirm_risk().
+
+Cell-escaping rule: every free-text value rendered into triage-queue.md table
+cells — titles, reasons, evidence refs, theme names, recommendations — goes
+through ``markdown_cell`` from store.py. Verifier-supplied evidence refs may
+contain ``|`` and newlines (injection vector flagged in NOTE(M3) in verify.py).
+``render_queue`` is the sole choke-point: it calls ``markdown_cell`` on
+``title``, ``detail``, AND ``recommendation`` before writing any cell.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
+import datetime as _dt
+from dataclasses import dataclass
 
-from .model import PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Finding
+from .model import PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Finding, RegisterError
 from .scope import ScopeProposal
 from .store import RegisterStore, markdown_cell
 
 _SECTIONS = [
     ("risk_accept", "Proposed risk acceptances"),
+    ("risk_review", "Past-due risk acceptances"),
     ("severity_review", "Severity reviews"),
     ("reopen", "Reopen proposals (protected/parked, new evidence)"),
     ("scope", "Scope proposals"),
@@ -1594,6 +1870,9 @@ _SECTIONS = [
     ("fuzzy_confirm", "Fuzzy duplicate confirms pending"),
 ]
 _PROTECTED = {d.value for d in PROTECTED_DISPOSITIONS} | {"parked"}
+# The unverified section is a bulk re-run signal, not a per-item decision
+# list — on real registers it would render hundreds of rows (meridian: 397).
+_UNVERIFIED_RENDER_CAP = 20
 
 
 @dataclass
@@ -1604,7 +1883,6 @@ class QueueItem:
     title: str
     detail: str
     recommendation: str = ""
-    extra: dict = field(default_factory=dict)
 
 
 def _has_event(finding: Finding, event: str) -> bool:
@@ -1626,48 +1904,80 @@ def _reopen_items(finding: Finding) -> list[QueueItem]:
     if finding.disposition not in _PROTECTED:
         return []
     refs = _existing_refs(finding)
-    items = []
+    # One row per DISTINCT novel ref: repeated suppressions citing the same
+    # novel evidence are one decision for Pete, not one row per run.
+    # Historical events without a ref (pre-C1 registers) are skipped — there
+    # is nothing to compare for novelty.
+    novel: list[str] = []
     for h in finding.history:
         if h.get("event") != "suppressed_occurrence":
             continue
         ref = h.get("ref")
-        if ref and ref not in refs:
-            items.append(QueueItem(
-                finding.finding_id, "reopen", finding.severity,
-                finding.title,
-                f"new evidence {ref} differs from adjudicated "
-                f"({finding.disposition})",
-                recommendation="review reopen"))
+        if ref and ref not in refs and ref not in novel:
+            novel.append(ref)
+    return [QueueItem(
+        finding.finding_id, "reopen", finding.severity, finding.title,
+        f"new evidence {ref} differs from adjudicated "
+        f"({finding.disposition})",
+        recommendation="review reopen") for ref in novel]
+
+
+def _finding_items(f: Finding, today_date: _dt.date) -> list[QueueItem]:
+    items: list[QueueItem] = []
+    if f.disposition == "new" and _has_event(f, "risk_accept_proposed"):
+        ev = _last_event(f, "risk_accept_proposed")
+        items.append(QueueItem(f.finding_id, "risk_accept", f.severity,
+                               f.title, f"proposed by {ev.get('by')}",
+                               recommendation="risk-accept (set review_by)"))
+    if (f.disposition == "risk_accepted"
+            and _dt.date.fromisoformat(f.review_by) < today_date):
+        # review_by is guaranteed ISO by Finding.validate (risk_accepted
+        # requires it); mirrors readiness.evaluate's past-due check.
+        items.append(QueueItem(
+            f.finding_id, "risk_review", f.severity, f.title,
+            f"risk acceptance review_by {f.review_by} is past due",
+            recommendation="reaffirm or open"))
+    sev_ev = _last_event(f, "severity_review_proposed")
+    if sev_ev:
+        items.append(QueueItem(
+            f.finding_id, "severity_review", f.severity, f.title,
+            f"run proposes {sev_ev.get('proposed')} vs current "
+            f"{sev_ev.get('current')}",
+            recommendation=f"review severity {sev_ev.get('proposed')}"))
+    items.extend(_reopen_items(f))
+    if f.disposition == "new" and not _has_event(f, "verification"):
+        kind = ("fuzzy_confirm" if _has_event(f, "fuzzy_match_candidate")
+                else "unverified")
+        detail = ("verifier never returned a result — re-run verify"
+                  if kind == "unverified"
+                  else "probable duplicate; verifier confirm pending")
+        items.append(QueueItem(f.finding_id, kind, f.severity, f.title,
+                               detail, recommendation="re-run verify"))
     return items
 
 
-def build_queue(store: RegisterStore,
-                *, scope_proposals: list[ScopeProposal]) -> list[QueueItem]:
+def build_queue(store: RegisterStore, *,
+                scope_proposals: list[ScopeProposal],
+                today: str) -> list[QueueItem]:
+    """Project register state into a sorted list of triage items.
+
+    Acquires the exclusive register lock to take a consistent snapshot, but
+    writes nothing: no store.save, no history events. The register is
+    byte-identical after this call.
+
+    ``today`` (ISO YYYY-MM-DD) drives the past-due risk-review check;
+    malformed dates are a hard error (mirrors readiness.evaluate).
+    """
+    try:
+        today_date = _dt.date.fromisoformat(today)
+    except (ValueError, TypeError) as exc:
+        raise RegisterError(
+            f"queue date must be ISO (YYYY-MM-DD), got {today!r}") from exc
     with store.locked():
         findings = store.load()
     items: list[QueueItem] = []
     for f in findings.values():
-        if f.disposition == "new" and _has_event(f, "risk_accept_proposed"):
-            ev = _last_event(f, "risk_accept_proposed")
-            items.append(QueueItem(f.finding_id, "risk_accept", f.severity,
-                                   f.title, f"proposed by {ev.get('by')}",
-                                   recommendation="risk-accept (set review_by)"))
-        sev_ev = _last_event(f, "severity_review_proposed")
-        if sev_ev:
-            items.append(QueueItem(
-                f.finding_id, "severity_review", f.severity, f.title,
-                f"run proposes {sev_ev.get('proposed')} vs current "
-                f"{sev_ev.get('current')}",
-                recommendation=f"review severity {sev_ev.get('proposed')}"))
-        items.extend(_reopen_items(f))
-        if f.disposition == "new" and not _has_event(f, "verification"):
-            kind = ("fuzzy_confirm" if _has_event(f, "fuzzy_match_candidate")
-                    else "unverified")
-            detail = ("verifier never returned a result — re-run verify"
-                      if kind == "unverified"
-                      else "probable duplicate; verifier confirm pending")
-            items.append(QueueItem(f.finding_id, kind, f.severity, f.title,
-                                   detail, recommendation="re-run verify"))
+        items.extend(_finding_items(f, today_date))
     by_id = {f.finding_id: f for f in findings.values()}
     for proposal in scope_proposals:
         f = by_id.get(proposal.finding_id)
@@ -1679,7 +1989,32 @@ def build_queue(store: RegisterStore,
     return items
 
 
+def _section_rows(group: list[QueueItem], kind: str) -> tuple[list[str], int]:
+    """Table rows for one section; unverified is capped (see module doc).
+
+    Every free-text cell — recommendation, detail, title — goes through
+    ``markdown_cell``. Finding IDs and severities are controlled-format
+    strings (R-NNNN / P0-P3) and need no escaping.
+    """
+    shown = group
+    if kind == "unverified" and len(group) > _UNVERIFIED_RENDER_CAP:
+        shown = sorted(group, key=lambda i: (SEVERITY_ORDER.get(i.severity, 9),
+                                             i.finding_id))
+        shown = shown[:_UNVERIFIED_RENDER_CAP]
+    rows = [
+        f"| {i.finding_id} | {i.severity} | {markdown_cell(i.recommendation)} "
+        f"| {markdown_cell(i.detail)} | {markdown_cell(i.title)} |"
+        for i in shown]
+    return rows, len(group) - len(shown)
+
+
 def render_queue(items: list[QueueItem], *, product: str) -> str:
+    """Render queue items as a markdown table file.
+
+    This is the sole choke-point for markdown injection — every free-text
+    cell is escaped in ``_section_rows``; no caller should interpolate raw
+    item fields into table rows.
+    """
     lines = [f"# Triage queue — {product}", "",
              "<!-- generated by lazy_vibe.register — work via `triage` CLI -->",
              ""]
@@ -1693,34 +2028,24 @@ def render_queue(items: list[QueueItem], *, product: str) -> str:
         group = by_kind.get(kind)
         if not group:
             continue
-        lines += [f"## {heading} ({len(group)})", "",
-                  "| id | sev | recommendation | detail | title |",
+        rows, overflow = _section_rows(group, kind)
+        lines += [f"## {heading} ({len(group)})", ""]
+        if overflow:
+            lines += [f"{len(group)} unverified findings — showing the first "
+                      f"{len(rows)} by severity.", ""]
+        lines += ["| id | sev | recommendation | detail | title |",
                   "|---|---|---|---|---|"]
-        for i in group:
-            # DEVIATION from original plan: recommendation is also passed
-            # through markdown_cell. The original plan rendered i.recommendation
-            # raw, but the T2-review carry-forward requires EVERY free-text
-            # cell to be escaped. recommendation is a free-text field and must
-            # be sanitised at the same choke-point as title and detail.
-            lines.append(
-                f"| {i.finding_id} | {i.severity} | {markdown_cell(i.recommendation)} "
-                f"| {markdown_cell(i.detail)} | {markdown_cell(i.title)} |")
+        lines += rows
+        if overflow:
+            lines += ["", f"…and {overflow} more — run verify-packets / "
+                          f"run-triage.sh"]
         lines.append("")
     return "\n".join(lines)
 ```
 
-> **Plan deviation (T4 implementation):** the original plan rendered
-> `i.recommendation` raw in the table row. The T2-review carry-forward
-> explicitly requires EVERY free-text value rendered into triage-queue.md to
-> go through `markdown_cell`. `recommendation` is a free-text field —
-> it was corrected to use `markdown_cell(i.recommendation)` in the
-> implementation, and a test (`test_render_escapes_pipe_in_recommendation`)
-> was added red-first to prove the fix. The plan code block above has been
-> updated to match the shipped implementation.
-
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **227 passed** (211 baseline + 16 new queue tests; 6 extra tests beyond the plan's 10 cover cell-escaping, determinism, and pure-projection guarantees).
+Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **236 passed** (211 baseline + 25 queue tests; the reconcile ref pin folds into the existing suppression test). Downstream task totals below are shifted **+20** vs their printed values: T5 → 243, T6 → 247, T7/final → 248.
 
 - [ ] **Step 5: Commit**
 
@@ -1728,6 +2053,11 @@ Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest
 git add lazy_vibe/register/queue.py tests/register/test_queue.py
 git commit -m "feat(register): triage queue projection and render"
 ```
+
+> Landed as `4009584` (suite 227). The quality-review fixes (C1/C2/I1/M1/M2/M3
+> above) landed red-first in a follow-up commit: `fix(register): live reopen
+> proposals, past-due risk reviews in queue` (suite 236, includes the
+> reconcile.py change).
 
 ---
 
@@ -1759,7 +2089,7 @@ def test_run_triage_open_decision(store):
     f.history.append({"ts": "t", "event": "verification",
                       "verdict": "VERIFIED", "by": "agent:verifier"})
     store.save({f.finding_id: f})
-    items = build_queue(store, scope_proposals=[])
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
     # unverified is empty (verified); force an item via risk_accept proposal
     f.history.append({"ts": "t", "event": "risk_accept_proposed",
                       "by": "policy:x", "rule": "x"})
@@ -1960,7 +2290,7 @@ def run_triage(store: RegisterStore, *, scope_proposals: list[ScopeProposal],
     when accept_all=True or when stdin is exhausted (skips remaining)."""
     stdin = stdin or sys.stdin
     outcome = TriageOutcome()
-    items = build_queue(store, scope_proposals=scope_proposals)
+    items = build_queue(store, scope_proposals=scope_proposals, today=date)
 
     def prompt(text: str) -> str:
         line = stdin.readline()
@@ -2041,7 +2371,7 @@ def _cmd_triage(args: argparse.Namespace) -> int:
     if args.scope and args.recompute_scope:
         scope_proposals = recompute(store, load_scope(Path(args.scope)),
                                     date=date)
-    items = build_queue(store, scope_proposals=scope_proposals)
+    items = build_queue(store, scope_proposals=scope_proposals, today=date)
     product = (load_scope(Path(args.scope)).product if args.scope
                else "product")
     queue_path = store.register_dir / "triage-queue.md"
@@ -2052,7 +2382,7 @@ def _cmd_triage(args: argparse.Namespace) -> int:
     result = run_triage(store, scope_proposals=scope_proposals, date=date,
                         accept_all=args.accept_all)
     # regenerate queue after decisions
-    remaining = build_queue(store, scope_proposals=[])
+    remaining = build_queue(store, scope_proposals=[], today=date)
     queue_path.write_text(render_queue(remaining, product=product))
     print(f"triaged {result.decided}, {result.skipped} skipped — "
           f"{len(remaining)} remain in {queue_path}")

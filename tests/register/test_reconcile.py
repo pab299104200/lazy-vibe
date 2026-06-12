@@ -65,6 +65,9 @@ def test_match_on_protected_disposition_suppresses(store):
     assert loaded.occurrences == 2
     assert loaded.last_seen == {"run_id": RUN, "date": DATE}
     assert loaded.history[-1]["event"] == "suppressed_occurrence"
+    # the event must carry the occurrence's evidence ref so the triage queue
+    # can compare it against existing evidence for reopen proposals (C1)
+    assert loaded.history[-1]["ref"] == "backend/routers/evidence.py:118"
 
 
 def test_match_on_open_merges_evidence(store):
