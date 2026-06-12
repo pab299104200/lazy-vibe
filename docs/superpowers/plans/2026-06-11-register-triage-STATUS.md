@@ -67,15 +67,12 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   register-enabled repos, builds packets from `open`/`regressed` register rows,
   writes `00-register-px-map.tsv`, starts register remediation through the CLI
   when implementation units begin, and closes accepted units through
-  `lazy_vibe.register close` with the verifier's regression test. Remaining
-  Plan 3 work: audit ingest/reconcile hook, differential audit mode (spec §8),
-  feature-build postcheck, prompt calibration + skill retirement (§9/§10),
-  collision auto-split.
+  `lazy_vibe.register close` with the verifier's regression test. The remaining
+  Plan 3 items listed at this checkpoint landed in later slices below.
 - Plan 3 third slice: `run-audit.sh` now resolves `REGISTER_DIR` and reconciles
   `RUN_DIR/00-blocker-ledger.tsv` into the product register when that ledger is
-  present, then writes `baseline.json`. This is the safe hook point; audit-native
-  blocker-ledger generation remains to be implemented before every audit run can
-  reconcile without a remediation-generated ledger.
+  present, then writes `baseline.json`. Audit-native blocker-ledger generation
+  landed later in the sixth slice.
 - Plan 3 fourth slice: reconciler collision auto-split is landed. Same
   fingerprint plus materially divergent evidence/title now creates a new split
   finding with a `collision` history event, and rerunning the same collision is
