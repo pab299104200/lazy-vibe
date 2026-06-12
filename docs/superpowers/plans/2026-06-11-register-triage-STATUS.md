@@ -18,7 +18,7 @@
 | T3 policy engine | DONE (ca7de37) + quality fixes landed 123d843 — review CLOSED | 123d843 (suite 211) |
 | T4 queue render | DONE (4009584) + quality fixes landed 2aad3d7 — review CLOSED | 2aad3d7 (suite 236) |
 | T5 triage CLI + close | DONE (789b365) + quality fixes landed 04491b5 — review CLOSED | 04491b5 (suite 257) |
-| T6 scope journeys/claims_doc | not started | |
+| T6 scope journeys/claims_doc | DONE (f949c9c) — suite 260 (plan said 261; arithmetic defect: replaced 1 test with 4, net +3 not +4) | f949c9c |
 | T7 run-triage.sh + exports + README | not started | |
 | T8 Meridian dry-run | not started | |
 
