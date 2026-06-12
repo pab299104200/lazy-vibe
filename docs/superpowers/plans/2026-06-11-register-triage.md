@@ -261,6 +261,8 @@ If the finding's evidence points at two materially different file sets that
 are not the same defect, return verdict `split` and list the divergent
 `split_paths` — a human will adjudicate (auto-split is not yet built).
 
+schema_version: {RESULT_SCHEMA_VERSION}
+
 Write EXACTLY this JSON object to `{out}` and nothing else:
 
     {{
@@ -465,6 +467,8 @@ Run: `python3 -m pytest tests/register/test_verify.py -v`
 Expected: FAIL — `consume_results` / `last_verification` not defined.
 
 - [ ] **Step 3: Implement**
+
+> **Note (Task 1 review):** The consumption implementation (`VerifyOutcome`, `_now`, `last_verification`, `_validate_result`, `_absorb_duplicate_evidence`, `consume_results`, `_apply_verdict`) landed in `lazy_vibe/register/verify.py` as part of Task 1's commit. This step verifies it is correct via the tests above — no new code should be required.
 
 Append to `lazy_vibe/register/verify.py` (add `import json`, `from dataclasses import dataclass, field`, `from .model import RegisterError`, `from .transitions import transition` at the top; add `_now` helper):
 
