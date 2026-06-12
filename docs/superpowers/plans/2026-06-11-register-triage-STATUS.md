@@ -85,3 +85,7 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   unsupported suspicions must stay out of findings, and every severity needs the
   closest severity anchor. Meridian skill rewiring and suppressed-register
   prompt context remain.
+- Plan 3 sixth slice: audit-native blocker-ledger generation is landed.
+  `lazy_vibe.audit.ledger` derives `RUN_DIR/00-blocker-ledger.tsv` from non-pass
+  audit summary rows, logs, and output artifacts before the register backfill
+  hook runs.

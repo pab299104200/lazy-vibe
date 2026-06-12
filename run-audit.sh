@@ -2585,6 +2585,14 @@ write_run_summary() {
     --audit-runner "${AUDIT_RUNNER:-}"
 }
 
+write_audit_blocker_ledger() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.audit.ledger \
+    --run-dir "$RUN_DIR" \
+    --summary-file "$RUN_DIR/00-run-summary.tsv" \
+    --out "$RUN_DIR/00-blocker-ledger.tsv"
+}
+
 audit_register_date() {
   basename "$RUN_DIR" | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || date +%F
 }
@@ -2733,5 +2741,6 @@ done
 
   write_ux_browser_gate_summary || true
 write_run_summary
+write_audit_blocker_ledger
 reconcile_audit_register
 printf 'Audit launcher complete. Run directory: %s\n' "$RUN_DIR"

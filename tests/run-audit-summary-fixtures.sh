@@ -126,15 +126,26 @@ audit_jobs="$tmp_root/register-jobs.tsv"
 mkdir -p "$audit_run" "$audit_register"
 cat > "$audit_jobs" <<'EOF'
 group	job_id	kind	title	output	ref
+01	01a-tenant	discovery	Tenant scope	01-domain/01a-tenant.md	PHASE 1A
+EOF
+cat > "$audit_run/completed-jobs.txt" <<'EOF'
+01a-tenant
+EOF
+mkdir -p "$audit_run/logs" "$audit_run/artifacts/01-domain"
+cat > "$audit_run/logs/01a-tenant.log" <<'EOF'
+RESULT: INCOMPLETE
+EOF
+cat > "$audit_run/artifacts/01-domain/01a-tenant.md" <<'EOF'
+# P1 Tenant data is not scoped
+
+RESULT: INCOMPLETE
+
+backend/a.py:10 returns rows without tenant scope.
 EOF
 cat > "$audit_register/themes.yaml" <<'EOF'
 themes:
   tenant_scope_missing:
     patterns: ["tenant"]
-EOF
-cat > "$audit_run/00-blocker-ledger.tsv" <<'EOF'
-blocker_id	category	theme	severity	group	model_class	finding_count	representative_source	representative_line	representative_title	raw_px_ids	references
-B-0001	product_gap	tenant_scope_missing	P1	security-auth	high-risk	1	backend/a.py	10	Tenant data is not scoped	P1-0001	01a:backend/a.py:10
 EOF
 
 REPO_ROOT="$audit_repo" \
@@ -148,6 +159,7 @@ MAX_PARALLEL=1 \
   fail "audit register reconcile hook failed"
 }
 
+[[ -s "$audit_run/00-blocker-ledger.tsv" ]] || fail "audit hook did not generate blocker ledger"
 [[ -s "$audit_register/register.jsonl" ]] || fail "audit hook did not write register.jsonl"
 [[ -s "$audit_register/baseline.json" ]] || fail "audit hook did not write baseline.json"
 grep -q 'Tenant data is not scoped' "$audit_register/register.md" || fail "audit hook register report missing finding"

@@ -826,11 +826,12 @@ authoritative `R-*` finding. When a verifier accepts a unit, the harness
 requires a `Regression test: path::test_name` line and closes the mapped
 register finding through `python3 -m lazy_vibe.register close`.
 
-`run-audit.sh` also has a post-summary register hook. When
-`RUN_DIR/00-blocker-ledger.tsv` exists, it resolves the product register, runs
+`run-audit.sh` also has a post-summary register hook. It generates
+`RUN_DIR/00-blocker-ledger.tsv` from non-pass audit summary rows plus job
+logs/artifacts, resolves the product register, runs
 `python3 -m lazy_vibe.register backfill`, regenerates the register report, and
 writes `docs/audit/register/baseline.json` with the reconciled run id and git
-sha. Current audit runs that do not emit a blocker ledger skip this hook.
+sha. If an audit has no non-pass jobs, no ledger is written.
 
 ---
 

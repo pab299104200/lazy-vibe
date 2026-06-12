@@ -84,7 +84,7 @@ Tests:
 
 ## Task 3: Audit Ingest/Reconcile Hook
 
-**Status:** partially landed in the third Plan 3 code slice.
+**Status:** landed across the third and sixth Plan 3 code slices.
 
 After launch-readiness summary generation, reconcile findings into the product
 register automatically.
@@ -93,24 +93,18 @@ Required behavior:
 
 - Resolve register dir through `REGISTER_DIR`, product profile `Repo root`, or
   `<REPO_ROOT>/docs/audit/register`.
-- When `RUN_DIR/00-blocker-ledger.tsv` exists, generate candidates through the
-  register ingest path and reconcile with run id `basename "$RUN_DIR"` and the
-  run date.
+- Generate `RUN_DIR/00-blocker-ledger.tsv` from audit summary/log/artifact
+  evidence, then generate candidates through the register ingest path and
+  reconcile with run id `basename "$RUN_DIR"` and the run date.
 - Update `baseline.json` after a successful reconcile.
 - Render `register.md` and a reconcile report in the product repo.
 - Fail loudly on corrupt register data, missing themes, or unmapped in-scope
   vocabulary gaps.
 
-Remaining work in this task:
-
-- Make `run-audit.sh` or the audit summary engine emit
-  `RUN_DIR/00-blocker-ledger.tsv` natively. The landed hook consumes that file
-  when present; it does not yet replace remediation's legacy ledger generator.
-
 Tests:
 
-- Audit summary fixture with a fake blocker ledger writes candidates,
-  reconciles, and writes `baseline.json`.
+- Audit summary fixture generates a blocker ledger from audit output, writes
+  candidates, reconciles, and writes `baseline.json`.
 - Existing summary fixtures stay green.
 
 ## Task 4: Differential Audit Mode
