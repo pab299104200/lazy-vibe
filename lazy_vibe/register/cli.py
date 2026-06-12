@@ -1,5 +1,6 @@
 """CLI: python -m lazy_vibe.register {ingest,reconcile,backfill,report,
-scorecard-ingest,scope-recompute,readiness} (spec §11)."""
+scorecard-ingest,scope-recompute,readiness,verify-packets,verify-consume,
+triage,close} (spec §11)."""
 from __future__ import annotations
 
 import argparse
@@ -8,13 +9,17 @@ import sys
 from pathlib import Path
 
 from .ingest import parse_ledger, read_candidates, write_candidates
-from .model import RegisterError
+from .model import Disposition, RegisterError
+from .policy import apply_policy, load_policy
+from .queue import build_queue, render_queue, run_triage
 from .readiness import evaluate, render_readiness
 from .reconcile import reconcile, render_report
 from .scope import load_scope, recompute
 from .scorecard import parse_scorecard
 from .store import RegisterStore
 from .themes import load_vocabulary
+from .transitions import transition
+from .verify import consume_results, generate_packets
 
 
 def _today() -> str:
@@ -108,6 +113,83 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+def _cmd_verify_packets(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    written = generate_packets(store)
+    print(f"wrote {len(written)} verification packets to "
+          f"{store.register_dir / 'triage' / 'packets'}")
+    return 0
+
+
+def _cmd_verify_consume(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    # NOTE(T5): VerifyOutcome buckets are per-run deltas, not register totals.
+    # A re-run after full consumption legitimately returns all-empty buckets.
+    # Present them as "this run found/changed X", never as register census.
+    outcome = consume_results(store, date=args.date or _today())
+    print(f"this run: {len(outcome.verified)} verified, "
+          f"{len(outcome.false_positive)} false_positive, "
+          f"{len(outcome.split)} split, "
+          f"{len(outcome.unverified)} unverified (no result yet)")
+    return 0
+
+
+def _cmd_triage(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    date = args.date or _today()
+    if args.policy:
+        policy = load_policy(Path(args.policy))
+        outcome = apply_policy(store, policy, date=date)
+        print(f"policy: {len(outcome.opened)} opened, "
+              f"{len(outcome.parked)} parked, "
+              f"{len(outcome.false_positive)} false_positive, "
+              f"{len(outcome.proposed_risk_accept)} risk-accept proposed, "
+              f"{len(outcome.queued)} queued")
+    scope_proposals = []
+    if args.scope and args.recompute_scope:
+        scope_proposals = recompute(store, load_scope(Path(args.scope)),
+                                    date=date)
+    items = build_queue(store, scope_proposals=scope_proposals, today=date)
+    product = (load_scope(Path(args.scope)).product if args.scope
+               else "product")
+    queue_path = store.register_dir / "triage-queue.md"
+    queue_path.write_text(render_queue(items, product=product))
+    if args.render_only:
+        print(f"{len(items)} queue items — {queue_path}")
+        return 0
+    result = run_triage(store, scope_proposals=scope_proposals, date=date,
+                        accept_all=args.accept_all)
+    # regenerate queue after decisions
+    remaining = build_queue(store, scope_proposals=[], today=date)
+    queue_path.write_text(render_queue(remaining, product=product))
+    print(f"triaged {result.decided}, {result.skipped} skipped — "
+          f"{len(remaining)} remain in {queue_path}")
+    return 0
+
+
+def _cmd_close(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    now = f"{args.date or _today()}T00:00:00+00:00"
+    with store.locked():
+        findings = store.load()
+        if args.finding not in findings:
+            raise RegisterError(f"unknown finding {args.finding}")
+        finding = findings[args.finding]
+        reason = args.reason or f"closed by harness with {args.test}"
+        if finding.disposition == "open":
+            transition(finding, Disposition.IN_REMEDIATION, by="harness",
+                       reason=reason, now=now)
+        if finding.disposition != "in_remediation":
+            raise RegisterError(
+                f"{args.finding}: close requires open/in_remediation, is "
+                f"{finding.disposition}")
+        transition(finding, Disposition.FIXED, by="harness", reason=reason,
+                   now=now, regression_test=args.test)
+        store.save(findings)
+    print(f"{args.finding} -> fixed (test {args.test})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lazy_vibe.register")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -162,6 +244,39 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", required=True)
     p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_readiness)
+
+    p = sub.add_parser("verify-packets",
+                       help="write verification packets for new findings")
+    p.add_argument("--register-dir", required=True)
+    p.set_defaults(func=_cmd_verify_packets)
+
+    p = sub.add_parser("verify-consume",
+                       help="consume verifier result JSON into the register")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=_cmd_verify_consume)
+
+    p = sub.add_parser("triage",
+                       help="apply policy, render the queue, walk it as Pete")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--scope", default=None)
+    p.add_argument("--date", default=None)
+    p.add_argument("--accept-all", action="store_true")
+    p.add_argument("--render-only", action="store_true",
+                   help="apply policy + render queue, no interactive walk")
+    p.add_argument("--recompute-scope", action="store_true",
+                   help="run scope.recompute and include proposals")
+    p.set_defaults(func=_cmd_triage)
+
+    p = sub.add_parser("close",
+                       help="harness: open/in_remediation -> fixed with test")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--finding", required=True)
+    p.add_argument("--test", required=True)
+    p.add_argument("--reason", default=None)
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=_cmd_close)
 
     return parser
 

@@ -12,15 +12,26 @@ through ``markdown_cell`` from store.py. Verifier-supplied evidence refs may
 contain ``|`` and newlines (injection vector flagged in NOTE(M3) in verify.py).
 ``render_queue`` is the sole choke-point: it calls ``markdown_cell`` on
 ``title``, ``detail``, AND ``recommendation`` before writing any cell.
+
+``run_triage`` abort behaviour: decisions are collected into the in-memory
+findings dict and written via a single ``store.save`` at the end of the walk
+(inside ``store.locked()``). An EOF / KeyboardInterrupt mid-walk means the
+save never happens and all in-progress decisions are lost — the register is
+left byte-identical to its state before ``run_triage`` was called. This is
+intentional: the walk is cheap to re-run, and a partial save that commits
+some items but not others is harder to reason about than a clean no-op abort.
 """
 from __future__ import annotations
 
 import datetime as _dt
+import sys
 from dataclasses import dataclass
 
-from .model import PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Finding, RegisterError
+from .model import (PROTECTED_DISPOSITIONS, SEVERITY_ORDER, Disposition,
+                    Finding, RegisterError)
 from .scope import ScopeProposal
 from .store import RegisterStore, markdown_cell
+from .transitions import reaffirm_risk, transition
 
 _SECTIONS = [
     ("risk_accept", "Proposed risk acceptances"),
@@ -203,3 +214,108 @@ def render_queue(items: list[QueueItem], *, product: str) -> str:
                           f"run-triage.sh"]
         lines.append("")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Interactive triage walk (spec §6 stage 3)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TriageOutcome:
+    decided: int = 0
+    skipped: int = 0
+
+
+_PROMPT = ("[a]ccept rec / [o]pen / [f]alse-positive / [r]isk-accept / "
+           "[p]ark / [s]kip > ")
+
+
+def _recommendation_choice(item: QueueItem) -> str:
+    rec = item.recommendation.lower()
+    if item.kind == "scope":
+        return "p" if rec == "park" else "o"  # unpark -> open
+    if "risk" in rec:
+        return "r"
+    if "false" in rec:
+        return "f"
+    if "park" in rec:
+        return "p"
+    return "o"
+
+
+def _apply_decision(findings, item: QueueItem, choice: str, *, date: str,
+                    prompt_fn) -> bool:
+    """Apply a single decision stamped pete. Returns True if it changed state."""
+    now = f"{date}T00:00:00+00:00"
+    finding = findings[item.finding_id]
+    if choice == "a":
+        choice = _recommendation_choice(item)
+    if choice == "o":
+        transition(finding, Disposition.OPEN, by="pete",
+                   reason="triaged open", now=now, verified=True)
+    elif choice == "f":
+        transition(finding, Disposition.FALSE_POSITIVE, by="pete",
+                   reason="triaged false_positive", now=now)
+    elif choice == "p":
+        transition(finding, Disposition.PARKED, by="pete",
+                   reason="triaged parked", now=now)
+    elif choice == "r":
+        review_by = prompt_fn("review_by (YYYY-MM-DD): ").strip()
+        reason = prompt_fn("reason: ").strip() or "risk accepted via triage"
+        if finding.disposition == "risk_accepted":
+            reaffirm_risk(finding, review_by=review_by, by="pete", now=now,
+                          reason=reason)
+        else:
+            transition(finding, Disposition.RISK_ACCEPTED, by="pete",
+                       reason=reason, now=now, review_by=review_by)
+    else:
+        return False
+    return True
+
+
+def run_triage(store: RegisterStore, *, scope_proposals: list[ScopeProposal],
+               date: str, stdin=None, accept_all: bool = False) -> TriageOutcome:
+    """Walk the queue and write pete-stamped dispositions.
+
+    Non-interactive when ``accept_all=True`` or when stdin is exhausted
+    (remaining items are skipped).
+
+    Abort behaviour: decisions are applied to the in-memory findings dict and
+    the register is saved once at the end inside ``store.locked()``. An EOF or
+    KeyboardInterrupt before the save completes means no decisions are
+    persisted — the register is left byte-identical to its pre-call state.
+    See module docstring for rationale.
+    """
+    stdin = stdin or sys.stdin
+    outcome = TriageOutcome()
+    items = build_queue(store, scope_proposals=scope_proposals, today=date)
+
+    def prompt(text: str) -> str:
+        line = stdin.readline()
+        return line if line else "s\n"
+
+    with store.locked():
+        findings = store.load()
+        for item in items:
+            if item.finding_id not in findings:
+                continue
+            if accept_all:
+                choice = "a"
+            else:
+                print(f"{item.finding_id} {item.severity} [{item.kind}] "
+                      f"{item.title}\n  rec: {item.recommendation} — "
+                      f"{item.detail}")
+                choice = prompt(_PROMPT).strip().lower()[:1] or "s"
+            try:
+                changed = _apply_decision(findings, item, choice, date=date,
+                                          prompt_fn=lambda t: prompt(t).strip())
+            except RegisterError as exc:
+                print(f"  skipped {item.finding_id}: {exc}", file=sys.stderr)
+                outcome.skipped += 1
+                continue
+            if changed:
+                outcome.decided += 1
+            else:
+                outcome.skipped += 1
+        store.save(findings)
+    return outcome

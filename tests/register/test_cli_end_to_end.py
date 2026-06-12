@@ -259,3 +259,89 @@ def test_narrowed_scope_parks_and_readiness_excludes(workspace, tmp_path):
     assert proc.returncode == 0, proc.stdout  # parked P0 must not block
     assert "NOT READY" not in proc.stdout
     assert "Parked: 1" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Task 5: verify-packets / verify-consume / triage / close CLI verbs
+# ---------------------------------------------------------------------------
+
+TRIAGE_POLICY = """\
+rules:
+  - id: open-verified-in-scope
+    match: {verified: true, in_scope: true}
+    action: open
+default: queue
+"""
+
+
+def test_verify_and_triage_e2e(workspace, tmp_path):
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    # generate packets
+    proc = cli("verify-packets", "--register-dir", str(register_dir))
+    assert proc.returncode == 0, proc.stderr
+    packets = register_dir / "triage" / "packets"
+    assert (packets / "R-0001.md").exists()
+    # simulate verifier results
+    results = register_dir / "triage" / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    for fid in ("R-0001", "R-0002"):
+        (results / f"{fid}.json").write_text(json.dumps({
+            "schema_version": 1, "finding_id": fid, "verdict": "VERIFIED",
+            "evidence": ["x.py:1"], "mechanism": "m",
+            "duplicate_of": None, "split_paths": []}))
+    proc = cli("verify-consume", "--register-dir", str(register_dir),
+               "--date", "2026-06-11")
+    assert proc.returncode == 0, proc.stderr
+    # policy + queue via triage --accept-all with a policy that opens verified
+    policy_path = register_dir / "triage-policy.yaml"
+    policy_path.write_text(TRIAGE_POLICY)
+    scope_path = register_dir / "launch-scope.yaml"
+    scope_path.write_text(LAUNCH_SCOPE)
+    proc = cli("triage", "--register-dir", str(register_dir),
+               "--policy", str(policy_path), "--scope", str(scope_path),
+               "--date", "2026-06-11", "--accept-all")
+    assert proc.returncode == 0, proc.stderr
+    from lazy_vibe.register.store import RegisterStore as RS
+    findings = RS(register_dir).load()
+    assert findings["R-0001"].disposition == "open"
+    assert (register_dir / "triage-queue.md").exists()
+
+
+def test_close_verb_open_to_fixed(workspace, tmp_path):
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    from lazy_vibe.register.store import RegisterStore as RS
+    from lazy_vibe.register.transitions import transition
+    from lazy_vibe.register.model import Disposition
+    store = RS(register_dir)
+    findings = store.load()
+    transition(findings["R-0001"], Disposition.OPEN, by="pete", reason="real",
+               now="2026-06-10T00:00:00+00:00", verified=True)
+    store.save(findings)
+    proc = cli("close", "--register-dir", str(register_dir),
+               "--finding", "R-0001",
+               "--test", "tests/test_evidence.py::test_tenant_scope",
+               "--reason", "fixed in PR-9")
+    assert proc.returncode == 0, proc.stderr
+    f = RS(register_dir).load()["R-0001"]
+    assert f.disposition == "fixed"
+    assert f.regression_test == "tests/test_evidence.py::test_tenant_scope"
+    assert f.disposition_by == "harness"
+
+
+def test_close_requires_open_or_remediation(workspace):
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    proc = cli("close", "--register-dir", str(register_dir),
+               "--finding", "R-0001",
+               "--test", "tests/t.py::t")
+    assert proc.returncode == 1  # R-0001 is `new`, not open
+    assert "error:" in proc.stderr
+    assert "Traceback" not in proc.stderr

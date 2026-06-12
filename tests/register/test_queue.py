@@ -1,9 +1,11 @@
+import io
+
 import pytest
 
 from lazy_vibe.register.fingerprint import compute
 from lazy_vibe.register.ingest import Candidate
 from lazy_vibe.register.model import RegisterError
-from lazy_vibe.register.queue import QueueItem, build_queue, render_queue
+from lazy_vibe.register.queue import QueueItem, build_queue, render_queue, run_triage
 from lazy_vibe.register.reconcile import reconcile
 from lazy_vibe.register.scope import ScopeProposal
 from lazy_vibe.register.store import RegisterStore
@@ -349,3 +351,63 @@ def test_unverified_section_caps_at_20_rows(store):
     rows = [ln for ln in section.splitlines() if ln.startswith("| R-")]
     assert len(rows) == 20  # capped
     assert "…and 5 more — run verify-packets / run-triage.sh" in md
+
+
+# ---------------------------------------------------------------------------
+# Task 5: run_triage interactive walk
+# ---------------------------------------------------------------------------
+
+
+def _stdin(text):
+    return io.StringIO(text)
+
+
+def test_run_triage_open_decision(store):
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "VERIFIED", "by": "agent:verifier"})
+    store.save({f.finding_id: f})
+    # unverified is empty (verified); force an item via risk_accept proposal
+    f.history.append({"ts": "t", "event": "risk_accept_proposed",
+                      "by": "policy:x", "rule": "x"})
+    store.save({f.finding_id: f})
+    out = run_triage(store, scope_proposals=[], date="2026-06-11",
+                     stdin=_stdin("o\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "open"
+    assert out.decided == 1
+
+
+def test_run_triage_risk_accept_prompts_review_by(store):
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "risk_accept_proposed",
+                      "by": "policy:x", "rule": "x"})
+    store.save({f.finding_id: f})
+    run_triage(store, scope_proposals=[], date="2026-06-11",
+               stdin=_stdin("r\n2026-12-01\ncustomer launch slipped\n"),
+               accept_all=False)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "risk_accepted"
+    assert f2.review_by == "2026-12-01"
+    assert f2.disposition_by == "pete"
+
+
+def test_run_triage_skip_leaves_finding(store):
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "risk_accept_proposed",
+                      "by": "policy:x", "rule": "x"})
+    store.save({f.finding_id: f})
+    run_triage(store, scope_proposals=[], date="2026-06-11",
+               stdin=_stdin("s\n"), accept_all=False)
+    assert store.load()["R-0001"].disposition == "new"
+
+
+def test_run_triage_accept_all_applies_recommendations(store):
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "VERIFIED", "by": "agent:verifier"})
+    store.save({f.finding_id: f})
+    # scope proposal park -> accept-all should park
+    run_triage(store, scope_proposals=[
+        ScopeProposal("R-0001", "park", "left scope")],
+        date="2026-06-11", stdin=_stdin(""), accept_all=True)
+    assert store.load()["R-0001"].disposition == "parked"
