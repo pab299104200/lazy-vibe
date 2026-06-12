@@ -317,6 +317,8 @@ git commit -m "feat(register): deterministic verification packet generation"
 
 Read each `R-NNNN.json`, schema-validate (deterministic fields only — `confidence` is omitted by contract), append a `verification` history event, and act: UNSUPPORTED proposes `false_positive`; a confirmed `duplicate_of` proposes `false_positive` referencing the original (the original absorbs the evidence); `split` appends a `split_proposed` event for the queue. VERIFIED leaves the finding `new` with a `verification` event marking it verifier-passed (policy/Pete still own the open transition). Malformed results are rejected loudly. The verifier NEVER transitions a protected state.
 
+> **Quality-review hardening (post-implementation):** verifier output is treated as untrusted input. `_validate_result` rejects a self-referential `duplicate_of` (C1), non-string evidence elements named by index (C2), and non-string `duplicate_of`/`split_paths` (same root cause — a list `duplicate_of` crashed the batch with an unhashable TypeError). Duplicate absorb is restricted to targets in `{new, open, in_remediation, regressed}` so a verifier-controlled `duplicate_of` can never modify an adjudicated entry or pre-seed refs that suppress reopen proposals (I3); absorb dedups on ref alone (I1). Consumption is idempotent via a result-file lifecycle: after the register save succeeds, processed results (including stray results for non-new findings) are moved to `triage/results/consumed/R-NNNN.json` via `os.replace`, so re-runs find no pending results (I2). Validation failures leave the file in place and abort the batch before save.
+
 **Files:**
 - Modify: `lazy_vibe/register/verify.py`
 - Test: extend `tests/register/test_verify.py`
@@ -459,6 +461,133 @@ def test_consume_missing_result_is_unverified(store):
     outcome = consume_results(store)
     assert outcome.verified == ["R-0001"]
     assert outcome.unverified == ["R-0002"]  # no result file -> stays new
+
+
+# ---------------------------------------------------------------------------
+# Quality-review hardening: verifier-input attack paths + idempotency
+# (added red-first during Task 2's quality review — C1/C2/I1/I2/I3)
+# ---------------------------------------------------------------------------
+
+def test_consume_rejects_self_duplicate(store):  # C1
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED", duplicate_of="R-0001")
+    with pytest.raises(RegisterError, match="duplicate of itself"):
+        consume_results(store)
+    # loud rejection aborts before save: finding stays new, untouched
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"
+    assert last_verification(f2) is None
+
+
+def test_consume_rejects_non_string_evidence(store):  # C2
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED",
+                  evidence=[{"ref": "x"}, None])
+    with pytest.raises(RegisterError, match=r"evidence\[0\]"):
+        consume_results(store)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"
+    assert last_verification(f2) is None  # no polluted history event
+
+
+def test_consume_rejects_non_string_duplicate_of(store):  # C2 root cause
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", duplicate_of=["R-0002"])
+    with pytest.raises(RegisterError, match="duplicate_of"):
+        consume_results(store)
+
+
+def test_consume_rejects_non_string_split_paths(store):  # C2 root cause
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="split", split_paths=[1, "a.py"])
+    with pytest.raises(RegisterError, match="split_paths"):
+        consume_results(store)
+
+
+def test_consume_refuses_duplicate_absorb_into_adjudicated(store):  # I3
+    from tests.register.helpers import with_history
+    orig = with_history(make_finding(finding_id="R-0001",
+                                     disposition="false_positive",
+                                     disposition_by="pete"))
+    dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({orig.finding_id: orig, dup.finding_id: dup})
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
+                  evidence=["y.py:9"])
+    with pytest.raises(RegisterError, match="adjudicated"):
+        consume_results(store)
+    findings = store.load()
+    assert findings["R-0002"].disposition == "new"  # batch aborted, no save
+    refs = {e["ref"] for e in findings["R-0001"].evidence}
+    assert "y.py:9" not in refs  # adjudicated entry not tampered with
+
+
+def test_consume_duplicate_absorb_into_active_target(store):  # I3
+    from tests.register.helpers import with_history
+    orig = with_history(make_finding(finding_id="R-0001", disposition="open",
+                                     disposition_by="pete"))
+    dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({orig.finding_id: orig, dup.finding_id: dup})
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
+                  evidence=["y.py:9"])
+    consume_results(store)
+    findings = store.load()
+    assert findings["R-0002"].disposition == "false_positive"
+    refs = {e["ref"] for e in findings["R-0001"].evidence}
+    assert "y.py:9" in refs  # active target absorbs the evidence
+
+
+def test_absorb_dedups_on_ref_alone(store):  # I1
+    orig = _new("R-0001")
+    dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({orig.finding_id: orig, dup.finding_id: dup})
+    # duplicate cites the exact ref the original already carries, but from a
+    # different run -- (ref, run_id) keying would wrongly re-append it
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
+                  evidence=["backend/routers/evidence.py:118"])
+    consume_results(store)
+    refs = [e["ref"] for e in store.load()["R-0001"].evidence]
+    assert refs.count("backend/routers/evidence.py:118") == 1
+
+
+def test_consume_is_idempotent(store):  # I2
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED")
+    first = consume_results(store)
+    second = consume_results(store)
+    events = [h for h in store.load()["R-0001"].history
+              if h.get("event") == "verification"]
+    assert len(events) == 1  # second run found no pending result
+    assert first.verified == ["R-0001"]
+    assert second.verified == []
+    assert second.unverified == []  # already verified, not "unverified"
+    assert second.false_positive == [] and second.split == []
+
+
+def test_consumed_result_moves_to_consumed_dir(store):  # I2
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED")
+    consume_results(store)
+    assert not result_path(store, "R-0001").exists()
+    consumed = (store.register_dir / "triage" / "results" / "consumed"
+                / "R-0001.json")
+    assert consumed.exists()
+
+
+def test_stray_result_for_non_new_is_archived(store):  # I2
+    from tests.register.helpers import with_history
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    store.save({fp.finding_id: fp})
+    _write_result(store, "R-0001", verdict="UNSUPPORTED", evidence=["x.py:1"])
+    consume_results(store)
+    assert not result_path(store, "R-0001").exists()  # stray result archived
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -470,10 +599,21 @@ Expected: FAIL — `consume_results` / `last_verification` not defined.
 
 > **Note (Task 1 review):** The consumption implementation (`VerifyOutcome`, `_now`, `last_verification`, `_validate_result`, `_absorb_duplicate_evidence`, `consume_results`, `_apply_verdict`) landed in `lazy_vibe/register/verify.py` as part of Task 1's commit. This step verifies it is correct via the tests above — no new code should be required.
 
-Append to `lazy_vibe/register/verify.py` (add `import json`, `from dataclasses import dataclass, field`, `from .model import RegisterError`, `from .transitions import transition` at the top; add `_now` helper):
+Append to `lazy_vibe/register/verify.py` (add `import json`, `import os`, `from dataclasses import dataclass, field`, `from .model import RegisterError`, `from .transitions import transition` at the top; add `_now` helper; document the result-file lifecycle in the module docstring; add `consumed_result_path` next to `result_path`):
 
 ```python
 _VALID_VERDICTS = {"VERIFIED", "UNSUPPORTED", "split"}
+# Dispositions a confirmed duplicate may absorb evidence into. Adjudicated
+# (false_positive/risk_accepted), parked, and fixed entries are off-limits:
+# a verifier-controlled duplicate_of must never modify a protected entry or
+# pre-seed refs that would suppress future reopen proposals.
+_ABSORB_TARGETS = {"new", "open", "in_remediation", "regressed"}
+
+
+def consumed_result_path(store: RegisterStore, finding_id: str) -> Path:
+    """Where a successfully consumed result is archived (see module doc)."""
+    return (store.register_dir / _TRIAGE_SUBDIR / "results" / "consumed"
+            / f"{finding_id}.json")
 
 
 @dataclass
@@ -481,7 +621,7 @@ class VerifyOutcome:
     verified: list[str] = field(default_factory=list)
     false_positive: list[str] = field(default_factory=list)
     split: list[str] = field(default_factory=list)
-    unverified: list[str] = field(default_factory=list)   # new, no result
+    unverified: list[str] = field(default_factory=list)   # new, never verified
     skipped: list[str] = field(default_factory=list)       # not new / stray
 
 
@@ -518,54 +658,101 @@ def _validate_result(finding_id: str, path: Path) -> dict:
         raise RegisterError(
             f"{path}: verdict {verdict!r} invalid "
             f"(valid: {sorted(_VALID_VERDICTS)})")
-    evidence = data.get("evidence")
-    if not isinstance(evidence, list):
-        raise RegisterError(f"{path}: 'evidence' must be a list")
-    if verdict == "VERIFIED" and not [e for e in evidence if str(e).strip()]:
-        raise RegisterError(
-            f"{path}: VERIFIED requires at least one evidence entry")
-    if verdict == "UNSUPPORTED" and not [e for e in evidence if str(e).strip()]:
-        raise RegisterError(
-            f"{path}: UNSUPPORTED requires a disproving citation in 'evidence'")
+    _validate_evidence(path, verdict, data.get("evidence"))
+    _validate_references(finding_id, path, data)
     return data
 
 
+def _validate_evidence(path: Path, verdict: str, evidence) -> None:
+    """Verifier output is untrusted: every evidence element must be a
+    non-empty string before it reaches history events or evidence absorb."""
+    if not isinstance(evidence, list):
+        raise RegisterError(f"{path}: 'evidence' must be a list")
+    for index, entry in enumerate(evidence):
+        if not isinstance(entry, str) or not entry.strip():
+            raise RegisterError(
+                f"{path}: evidence[{index}] must be a non-empty string, "
+                f"got {entry!r}")
+    if verdict == "VERIFIED" and not evidence:
+        raise RegisterError(
+            f"{path}: VERIFIED requires at least one evidence entry")
+    if verdict == "UNSUPPORTED" and not evidence:
+        raise RegisterError(
+            f"{path}: UNSUPPORTED requires a disproving citation in 'evidence'")
+
+
+def _validate_references(finding_id: str, path: Path, data: dict) -> None:
+    """Cross-reference fields are verifier-controlled: type-check them and
+    reject a self-referential duplicate before it can close its own finding."""
+    dup = data.get("duplicate_of")
+    if dup is not None and not isinstance(dup, str):
+        raise RegisterError(
+            f"{path}: 'duplicate_of' must be a string or null, got {dup!r}")
+    if dup == finding_id:
+        raise RegisterError(
+            f"{path}: a finding cannot be a duplicate of itself")
+    split_paths = data.get("split_paths", [])
+    if not isinstance(split_paths, list) or any(
+            not isinstance(s, str) for s in split_paths):
+        raise RegisterError(f"{path}: 'split_paths' must be a list of strings")
+
+
 def _absorb_duplicate_evidence(original, dup_result: dict, run_id: str) -> None:
-    seen = {(e.get("ref"), e.get("run_id")) for e in original.evidence}
+    # NOTE(M3): absorbed refs are verifier-controlled strings — the queue
+    # render (Task 4) must pass them through markdown_cell before tabling.
+    seen = {e.get("ref") for e in original.evidence}  # dedup on ref alone
     for ref in dup_result.get("evidence", []):
-        key = (ref, run_id)
-        if ref and key not in seen:
+        if ref not in seen:
             original.evidence.append({"type": "audit", "ref": ref,
                                       "run_id": run_id})
-            seen.add(key)
+            seen.add(ref)
+
+
+def _archive_result(store: RegisterStore, finding_id: str) -> None:
+    dst = consumed_result_path(store, finding_id)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(result_path(store, finding_id), dst)
 
 
 def consume_results(store: RegisterStore, *, date: str | None = None,
                     run_id: str = "verify") -> VerifyOutcome:
-    """Schema-validate every present result and apply its verdict.
+    """Schema-validate every pending result and apply its verdict.
 
     Verifier authority: it proposes false_positive (policy:verifier-*) and
     queues splits/duplicates. It never transitions a protected state and
-    never opens a finding — policy/Pete own the open transition (spec §6)."""
+    never opens a finding — policy/Pete own the open transition (spec §6).
+
+    Successfully processed results (including stray results for non-new
+    findings) are archived to triage/results/consumed/ AFTER the register
+    save succeeds, so a mid-batch error leaves every pending result in place
+    and persists nothing."""
     outcome = VerifyOutcome()
     now = _now(date)
+    consumed: list[str] = []
     with store.locked():
         findings = store.load()
         for finding in sorted(findings.values(), key=lambda f: f.finding_id):
+            fid = finding.finding_id
+            path = result_path(store, fid)
             if finding.disposition != "new":
-                outcome.skipped.append(finding.finding_id)
+                outcome.skipped.append(fid)
+                if path.exists():
+                    consumed.append(fid)  # stray result: archive, never apply
                 continue
-            path = result_path(store, finding.finding_id)
             if not path.exists():
-                outcome.unverified.append(finding.finding_id)
+                if last_verification(finding) is None:
+                    outcome.unverified.append(fid)
                 continue
-            data = _validate_result(finding.finding_id, path)
+            data = _validate_result(fid, path)
             finding.history.append({
                 "ts": now, "event": "verification",
                 "verdict": data["verdict"], "by": "agent:verifier",
                 "run_id": run_id, "evidence": data.get("evidence", [])})
             _apply_verdict(findings, finding, data, now, run_id, outcome)
+            consumed.append(fid)
         store.save(findings)
+        for fid in consumed:
+            _archive_result(store, fid)
     return outcome
 
 
@@ -581,6 +768,10 @@ def _apply_verdict(findings, finding, data, now, run_id,
         return
     if verdict == "VERIFIED" and dup and dup in findings:
         original = findings[dup]
+        if original.disposition not in _ABSORB_TARGETS:
+            raise RegisterError(
+                f"{finding.finding_id}: duplicate target {dup} is adjudicated "
+                f"({original.disposition}) — refusing to modify")
         _absorb_duplicate_evidence(original, data, run_id)
         finding.history.append({"ts": now, "event": "duplicate_confirmed",
                                 "duplicate_of": dup, "by": "agent:verifier"})
@@ -603,7 +794,7 @@ Add `from .model import Disposition as _D` to the top imports.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_verify.py -v` then `python3 -m pytest tests/register -q` — expect **179 passed**.
+Run: `python3 -m pytest tests/register/test_verify.py -v` then `python3 -m pytest tests/register -q` — expect **189 passed** (168 from Task 1 + 11 consumption tests + 10 quality-review hardening tests; downstream task totals below are shifted +10 accordingly).
 
 - [ ] **Step 5: Commit**
 
@@ -995,7 +1186,7 @@ def test_verified_match_requires_verified_event(store, policy):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytest tests/register -q` — expect **193 passed**.
+Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytest tests/register -q` — expect **203 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -1292,7 +1483,7 @@ def render_queue(items: list[QueueItem], *, product: str) -> str:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **203 passed**.
+Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **213 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -1696,7 +1887,7 @@ to `cli.py`'s imports (top of file). Add the subparsers in `build_parser`:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py tests/register/test_cli_end_to_end.py -v` then `python3 -m pytest tests/register -q` — expect **210 passed**.
+Run: `python3 -m pytest tests/register/test_queue.py tests/register/test_cli_end_to_end.py -v` then `python3 -m pytest tests/register -q` — expect **220 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -1844,7 +2035,7 @@ path+title haystack exactly like routes):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_scope.py -v` then `python3 -m pytest tests/register -q` — expect **214 passed**.
+Run: `python3 -m pytest tests/register/test_scope.py -v` then `python3 -m pytest tests/register -q` — expect **224 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -1969,6 +2160,11 @@ run_one() {
   fid="$(basename "$packet" .md)"
   result="$RESULTS_DIR/$fid.json"
   [[ -f "$result" ]] && return 0
+  # A consumed result (results/consumed/, moved there by verify-consume) means
+  # this finding was already verified on a previous run and is awaiting
+  # policy/Pete — do not re-dispatch the agent for it. Findings the queue
+  # flags "re-run verify" have no consumed result and still dispatch.
+  [[ -f "$RESULTS_DIR/consumed/$fid.json" ]] && return 0
   if [[ "$TRIAGE_AGENT" == claude* ]]; then
     # shellcheck disable=SC2086
     $TRIAGE_AGENT -p --dangerously-skip-permissions < "$packet" \
@@ -2011,15 +2207,15 @@ from .policy import Policy, PolicyOutcome, Rule, apply_policy, load_policy
 from .queue import (QueueItem, TriageOutcome, build_queue, render_queue,
                     run_triage)
 from .verify import (RESULT_SCHEMA_VERSION, VerifyOutcome, consume_results,
-                     generate_packets, last_verification, packet_path,
-                     result_path)
+                     consumed_result_path, generate_packets,
+                     last_verification, packet_path, result_path)
 ```
 
 and add to `__all__`: `"Policy", "PolicyOutcome", "QueueItem",
 "RESULT_SCHEMA_VERSION", "Rule", "TriageOutcome", "VerifyOutcome",
-"apply_policy", "build_queue", "consume_results", "generate_packets",
-"last_verification", "load_policy", "packet_path", "render_queue",
-"result_path", "run_triage"` (re-sort the full list).
+"apply_policy", "build_queue", "consume_results", "consumed_result_path",
+"generate_packets", "last_verification", "load_policy", "packet_path",
+"render_queue", "result_path", "run_triage"` (re-sort the full list).
 
 In `README.md`, after the Plan 2a paragraph (line ~799), append:
 
@@ -2040,7 +2236,7 @@ and consumes the results. Policy auto-dispositions are stamped
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register -q` — expect **215 passed** (214 + 1
+Run: `python3 -m pytest tests/register -q` — expect **225 passed** (224 + 1
 scorecard corpus test skipped on machines without
 `/home/pete/cadres/meridian/docs/scorecards`). Then
 `ruff check lazy_vibe/register/` — must be clean. Then `bash -n run-triage.sh`
@@ -2235,14 +2431,16 @@ full verifier pass."
   - `transition` / `reaffirm_risk` signatures (`by`, `reason`, `now`, kw
     `verified`/`review_by`/`regression_test`) used exactly as in Plan 1.
 - **Arithmetic (baseline 159, verified by counting distinct `def test_`
-  functions per task at plan-writing time):** T1 +9 = 168; T2 +11 = 179; T3
-  +14 = 193 (`test_verified_match_requires_verified_event` is one function —
+  functions per task at plan-writing time):** T1 +9 = 168; T2 +11 = 179, then
+  +10 quality-review hardening tests = 189 (verifier-input attack paths and
+  consumption idempotency — see the hardening note in Task 2); T3
+  +14 = 203 (`test_verified_match_requires_verified_event` is one function —
   the corrected `pytest.raises` form replaces the placeholder form, not an
-  added test); T4 +10 = 203; T5 +7 = 210 (4 `run_triage` walk tests + 3 cli
-  e2e: `verify_and_triage`, `close_verb`, `close_requires`); T6 +4 = 214; T7
-  +1 = 215 (the `run-triage.sh` wrapper smoke test; README and `__all__`
+  added test); T4 +10 = 213; T5 +7 = 220 (4 `run_triage` walk tests + 3 cli
+  e2e: `verify_and_triage`, `close_verb`, `close_requires`); T6 +4 = 224; T7
+  +1 = 225 (the `run-triage.sh` wrapper smoke test; README and `__all__`
   export changes add no tests — the export is import-checked by the existing
-  suite). **Final: 215 passed**, or 214 passed + 1 skipped on machines without
+  suite). **Final: 225 passed**, or 224 passed + 1 skipped on machines without
   `/home/pete/cadres/meridian/docs/scorecards` (the inherited scorecard corpus
   test). Task 8 adds no pytest tests. Implementers MUST re-derive the count
   after each task from the actual `-q` summary rather than trusting this

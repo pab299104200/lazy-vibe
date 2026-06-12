@@ -8,10 +8,19 @@ history event and proposes false_positive on UNSUPPORTED, never transitioning
 a protected state. Fuzzy-duplicate confirmation and collision split are
 folded in: a confirmed duplicate proposes false_positive referencing the
 original; a `split` verdict queues a manual item (auto-split is Plan 3).
+
+Result-file lifecycle: a verifier writes `triage/results/R-NNNN.json`.
+`consume_results` schema-validates the file, applies the verdict, saves the
+register, and only then moves the file to `triage/results/consumed/
+R-NNNN.json` (os.replace) — re-runs find no pending results, making
+consumption idempotent. A result that fails validation stays in place to be
+fixed and re-consumed; any validation or authority error aborts the whole
+batch before save, so nothing is persisted and nothing is archived.
 """
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +33,11 @@ RESULT_SCHEMA_VERSION = 1
 
 _TRIAGE_SUBDIR = "triage"
 _VALID_VERDICTS = {"VERIFIED", "UNSUPPORTED", "split"}
+# Dispositions a confirmed duplicate may absorb evidence into. Adjudicated
+# (false_positive/risk_accepted), parked, and fixed entries are off-limits:
+# a verifier-controlled duplicate_of must never modify a protected entry or
+# pre-seed refs that would suppress future reopen proposals.
+_ABSORB_TARGETS = {"new", "open", "in_remediation", "regressed"}
 
 
 def _fence_safe(text: str) -> str:
@@ -38,6 +52,12 @@ def packet_path(store: RegisterStore, finding_id: str) -> Path:
 
 def result_path(store: RegisterStore, finding_id: str) -> Path:
     return store.register_dir / _TRIAGE_SUBDIR / "results" / f"{finding_id}.json"
+
+
+def consumed_result_path(store: RegisterStore, finding_id: str) -> Path:
+    """Where a successfully consumed result is archived (see module doc)."""
+    return (store.register_dir / _TRIAGE_SUBDIR / "results" / "consumed"
+            / f"{finding_id}.json")
 
 
 def _fuzzy_candidate(finding) -> str | None:
@@ -137,7 +157,7 @@ class VerifyOutcome:
     verified: list[str] = field(default_factory=list)
     false_positive: list[str] = field(default_factory=list)
     split: list[str] = field(default_factory=list)
-    unverified: list[str] = field(default_factory=list)   # new, no result
+    unverified: list[str] = field(default_factory=list)   # new, never verified
     skipped: list[str] = field(default_factory=list)       # not new / stray
 
 
@@ -174,54 +194,101 @@ def _validate_result(finding_id: str, path: Path) -> dict:
         raise RegisterError(
             f"{path}: verdict {verdict!r} invalid "
             f"(valid: {sorted(_VALID_VERDICTS)})")
-    evidence = data.get("evidence")
-    if not isinstance(evidence, list):
-        raise RegisterError(f"{path}: 'evidence' must be a list")
-    if verdict == "VERIFIED" and not [e for e in evidence if str(e).strip()]:
-        raise RegisterError(
-            f"{path}: VERIFIED requires at least one evidence entry")
-    if verdict == "UNSUPPORTED" and not [e for e in evidence if str(e).strip()]:
-        raise RegisterError(
-            f"{path}: UNSUPPORTED requires a disproving citation in 'evidence'")
+    _validate_evidence(path, verdict, data.get("evidence"))
+    _validate_references(finding_id, path, data)
     return data
 
 
+def _validate_evidence(path: Path, verdict: str, evidence) -> None:
+    """Verifier output is untrusted: every evidence element must be a
+    non-empty string before it reaches history events or evidence absorb."""
+    if not isinstance(evidence, list):
+        raise RegisterError(f"{path}: 'evidence' must be a list")
+    for index, entry in enumerate(evidence):
+        if not isinstance(entry, str) or not entry.strip():
+            raise RegisterError(
+                f"{path}: evidence[{index}] must be a non-empty string, "
+                f"got {entry!r}")
+    if verdict == "VERIFIED" and not evidence:
+        raise RegisterError(
+            f"{path}: VERIFIED requires at least one evidence entry")
+    if verdict == "UNSUPPORTED" and not evidence:
+        raise RegisterError(
+            f"{path}: UNSUPPORTED requires a disproving citation in 'evidence'")
+
+
+def _validate_references(finding_id: str, path: Path, data: dict) -> None:
+    """Cross-reference fields are verifier-controlled: type-check them and
+    reject a self-referential duplicate before it can close its own finding."""
+    dup = data.get("duplicate_of")
+    if dup is not None and not isinstance(dup, str):
+        raise RegisterError(
+            f"{path}: 'duplicate_of' must be a string or null, got {dup!r}")
+    if dup == finding_id:
+        raise RegisterError(
+            f"{path}: a finding cannot be a duplicate of itself")
+    split_paths = data.get("split_paths", [])
+    if not isinstance(split_paths, list) or any(
+            not isinstance(s, str) for s in split_paths):
+        raise RegisterError(f"{path}: 'split_paths' must be a list of strings")
+
+
 def _absorb_duplicate_evidence(original, dup_result: dict, run_id: str) -> None:
-    seen = {(e.get("ref"), e.get("run_id")) for e in original.evidence}
+    # NOTE(M3): absorbed refs are verifier-controlled strings — the queue
+    # render (Task 4) must pass them through markdown_cell before tabling.
+    seen = {e.get("ref") for e in original.evidence}  # dedup on ref alone
     for ref in dup_result.get("evidence", []):
-        key = (ref, run_id)
-        if ref and key not in seen:
+        if ref not in seen:
             original.evidence.append({"type": "audit", "ref": ref,
                                       "run_id": run_id})
-            seen.add(key)
+            seen.add(ref)
+
+
+def _archive_result(store: RegisterStore, finding_id: str) -> None:
+    dst = consumed_result_path(store, finding_id)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(result_path(store, finding_id), dst)
 
 
 def consume_results(store: RegisterStore, *, date: str | None = None,
                     run_id: str = "verify") -> VerifyOutcome:
-    """Schema-validate every present result and apply its verdict.
+    """Schema-validate every pending result and apply its verdict.
 
     Verifier authority: it proposes false_positive (policy:verifier-*) and
     queues splits/duplicates. It never transitions a protected state and
-    never opens a finding — policy/Pete own the open transition (spec §6)."""
+    never opens a finding — policy/Pete own the open transition (spec §6).
+
+    Successfully processed results (including stray results for non-new
+    findings) are archived to triage/results/consumed/ AFTER the register
+    save succeeds, so a mid-batch error leaves every pending result in place
+    and persists nothing."""
     outcome = VerifyOutcome()
     now = _now(date)
+    consumed: list[str] = []
     with store.locked():
         findings = store.load()
         for finding in sorted(findings.values(), key=lambda f: f.finding_id):
+            fid = finding.finding_id
+            path = result_path(store, fid)
             if finding.disposition != "new":
-                outcome.skipped.append(finding.finding_id)
+                outcome.skipped.append(fid)
+                if path.exists():
+                    consumed.append(fid)  # stray result: archive, never apply
                 continue
-            path = result_path(store, finding.finding_id)
             if not path.exists():
-                outcome.unverified.append(finding.finding_id)
+                if last_verification(finding) is None:
+                    outcome.unverified.append(fid)
                 continue
-            data = _validate_result(finding.finding_id, path)
+            data = _validate_result(fid, path)
             finding.history.append({
                 "ts": now, "event": "verification",
                 "verdict": data["verdict"], "by": "agent:verifier",
                 "run_id": run_id, "evidence": data.get("evidence", [])})
             _apply_verdict(findings, finding, data, now, run_id, outcome)
+            consumed.append(fid)
         store.save(findings)
+        for fid in consumed:
+            _archive_result(store, fid)
     return outcome
 
 
@@ -237,6 +304,10 @@ def _apply_verdict(findings, finding, data, now, run_id,
         return
     if verdict == "VERIFIED" and dup and dup in findings:
         original = findings[dup]
+        if original.disposition not in _ABSORB_TARGETS:
+            raise RegisterError(
+                f"{finding.finding_id}: duplicate target {dup} is adjudicated "
+                f"({original.disposition}) — refusing to modify")
         _absorb_duplicate_evidence(original, data, run_id)
         finding.history.append({"ts": now, "event": "duplicate_confirmed",
                                 "duplicate_of": dup, "by": "agent:verifier"})

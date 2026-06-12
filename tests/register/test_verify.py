@@ -244,3 +244,129 @@ def test_consume_missing_result_is_unverified(store):
     outcome = consume_results(store)
     assert outcome.verified == ["R-0001"]
     assert outcome.unverified == ["R-0002"]  # no result file -> stays new
+
+
+# ---------------------------------------------------------------------------
+# Quality-review hardening: verifier-input attack paths + idempotency
+# ---------------------------------------------------------------------------
+
+def test_consume_rejects_self_duplicate(store):  # C1
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED", duplicate_of="R-0001")
+    with pytest.raises(RegisterError, match="duplicate of itself"):
+        consume_results(store)
+    # loud rejection aborts before save: finding stays new, untouched
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"
+    assert last_verification(f2) is None
+
+
+def test_consume_rejects_non_string_evidence(store):  # C2
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED",
+                  evidence=[{"ref": "x"}, None])
+    with pytest.raises(RegisterError, match=r"evidence\[0\]"):
+        consume_results(store)
+    f2 = store.load()["R-0001"]
+    assert f2.disposition == "new"
+    assert last_verification(f2) is None  # no polluted history event
+
+
+def test_consume_rejects_non_string_duplicate_of(store):  # C2 root cause
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", duplicate_of=["R-0002"])
+    with pytest.raises(RegisterError, match="duplicate_of"):
+        consume_results(store)
+
+
+def test_consume_rejects_non_string_split_paths(store):  # C2 root cause
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="split", split_paths=[1, "a.py"])
+    with pytest.raises(RegisterError, match="split_paths"):
+        consume_results(store)
+
+
+def test_consume_refuses_duplicate_absorb_into_adjudicated(store):  # I3
+    from tests.register.helpers import with_history
+    orig = with_history(make_finding(finding_id="R-0001",
+                                     disposition="false_positive",
+                                     disposition_by="pete"))
+    dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({orig.finding_id: orig, dup.finding_id: dup})
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
+                  evidence=["y.py:9"])
+    with pytest.raises(RegisterError, match="adjudicated"):
+        consume_results(store)
+    findings = store.load()
+    assert findings["R-0002"].disposition == "new"  # batch aborted, no save
+    refs = {e["ref"] for e in findings["R-0001"].evidence}
+    assert "y.py:9" not in refs  # adjudicated entry not tampered with
+
+
+def test_consume_duplicate_absorb_into_active_target(store):  # I3
+    from tests.register.helpers import with_history
+    orig = with_history(make_finding(finding_id="R-0001", disposition="open",
+                                     disposition_by="pete"))
+    dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({orig.finding_id: orig, dup.finding_id: dup})
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
+                  evidence=["y.py:9"])
+    consume_results(store)
+    findings = store.load()
+    assert findings["R-0002"].disposition == "false_positive"
+    refs = {e["ref"] for e in findings["R-0001"].evidence}
+    assert "y.py:9" in refs  # active target absorbs the evidence
+
+
+def test_absorb_dedups_on_ref_alone(store):  # I1
+    orig = _new("R-0001")
+    dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({orig.finding_id: orig, dup.finding_id: dup})
+    # duplicate cites the exact ref the original already carries, but from a
+    # different run -- (ref, run_id) keying would wrongly re-append it
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
+                  evidence=["backend/routers/evidence.py:118"])
+    consume_results(store)
+    refs = [e["ref"] for e in store.load()["R-0001"].evidence]
+    assert refs.count("backend/routers/evidence.py:118") == 1
+
+
+def test_consume_is_idempotent(store):  # I2
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED")
+    first = consume_results(store)
+    second = consume_results(store)
+    events = [h for h in store.load()["R-0001"].history
+              if h.get("event") == "verification"]
+    assert len(events) == 1  # second run found no pending result
+    assert first.verified == ["R-0001"]
+    assert second.verified == []
+    assert second.unverified == []  # already verified, not "unverified"
+    assert second.false_positive == [] and second.split == []
+
+
+def test_consumed_result_moves_to_consumed_dir(store):  # I2
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED")
+    consume_results(store)
+    assert not result_path(store, "R-0001").exists()
+    consumed = (store.register_dir / "triage" / "results" / "consumed"
+                / "R-0001.json")
+    assert consumed.exists()
+
+
+def test_stray_result_for_non_new_is_archived(store):  # I2
+    from tests.register.helpers import with_history
+    fp = with_history(make_finding(finding_id="R-0001",
+                                   disposition="false_positive",
+                                   disposition_by="pete"))
+    store.save({fp.finding_id: fp})
+    _write_result(store, "R-0001", verdict="UNSUPPORTED", evidence=["x.py:1"])
+    consume_results(store)
+    assert not result_path(store, "R-0001").exists()  # stray result archived
