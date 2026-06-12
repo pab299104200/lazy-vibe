@@ -156,10 +156,39 @@ def test_quoted_default_in_scope_rejected(tmp_path):
         load_scope(p)
 
 
-def test_unknown_surface_keys_rejected(tmp_path):
+def test_surface_accepts_journeys(tmp_path):
     p = tmp_path / "launch-scope.yaml"
-    p.write_text(SCOPE_YAML.replace(
-        'routes: ["/api/evidence"]',
-        'routes: ["/api/evidence"]\n    journeys: ["x"]'))
+    p.write_text(
+        "product: meridian\ndefault_in_scope: false\n"
+        "claims_doc: docs/functional/launch-claims.md\n"
+        "surfaces:\n  - slug: ev\n    paths: []\n    routes: []\n"
+        "    journeys: ['connector-to-evidence']\n")
+    scope = load_scope(p)
+    assert scope.claims_doc == "docs/functional/launch-claims.md"
+    f = make_finding(
+        fingerprint_inputs={"category": "product_gap", "theme": "t",
+                            "path": "docs/ux/flows.md", "symbol": "-"},
+        title="connector-to-evidence journey has no browser proof")
+    assert matches(f, scope) is True
+
+
+def test_journeys_must_be_list(tmp_path):
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text(
+        "product: meridian\ndefault_in_scope: false\n"
+        "surfaces:\n  - slug: ev\n    journeys: oops\n")
     with pytest.raises(RegisterError, match="journeys"):
+        load_scope(p)
+
+
+def test_claims_doc_defaults_none(scope):
+    assert scope.claims_doc is None
+
+
+def test_unknown_surface_key_still_rejected(tmp_path):
+    p = tmp_path / "launch-scope.yaml"
+    p.write_text(
+        "product: meridian\ndefault_in_scope: false\n"
+        "surfaces:\n  - slug: ev\n    gremlins: ['x']\n")
+    with pytest.raises(RegisterError, match="gremlins"):
         load_scope(p)

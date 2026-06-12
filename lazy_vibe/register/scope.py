@@ -32,6 +32,7 @@ class Surface:
     slug: str
     paths: tuple[str, ...]
     routes: tuple[str, ...]
+    journeys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class Scope:
     surfaces: tuple[Surface, ...]
     severity_bar: dict[str, str]
     gates: tuple[Gate, ...]
+    claims_doc: str | None = None
 
 
 def load_scope(path: Path) -> Scope:
@@ -65,20 +67,22 @@ def load_scope(path: Path) -> Scope:
     for raw in data.get("surfaces") or []:
         if not isinstance(raw, dict) or not raw.get("slug"):
             raise RegisterError(f"{path}: each surface needs a 'slug' mapping")
-        unknown = set(raw) - {"slug", "paths", "routes"}
+        unknown = set(raw) - {"slug", "paths", "routes", "journeys"}
         if unknown:
             raise RegisterError(
                 f"{path}: surface {raw['slug']!r}: unsupported keys "
-                f"{sorted(unknown)} (journeys/claims_doc arrive with plan 2b)")
+                f"{sorted(unknown)}")
         paths = raw.get("paths") or []
         routes = raw.get("routes") or []
-        if not isinstance(paths, list) or not isinstance(routes, list):
+        journeys = raw.get("journeys") or []
+        if not all(isinstance(x, list) for x in (paths, routes, journeys)):
             raise RegisterError(
-                f"{path}: surface {raw['slug']!r}: 'paths' and 'routes' "
-                f"must be lists")
+                f"{path}: surface {raw['slug']!r}: 'paths', 'routes' and "
+                f"'journeys' must be lists")
         surfaces.append(Surface(slug=raw["slug"],
                                 paths=tuple(str(p) for p in paths),
-                                routes=tuple(str(r) for r in routes)))
+                                routes=tuple(str(r) for r in routes),
+                                journeys=tuple(str(j) for j in journeys)))
     bar = data.get("severity_bar") or {}
     if not isinstance(bar, dict):
         raise RegisterError(f"{path}: 'severity_bar' must be a mapping")
@@ -112,11 +116,15 @@ def load_scope(path: Path) -> Scope:
         raise RegisterError(
             f"{path}: 'default_in_scope' must be a boolean, got "
             f"{default_in_scope!r}")
+    claims_doc = data.get("claims_doc")
+    if claims_doc is not None and not isinstance(claims_doc, str):
+        raise RegisterError(f"{path}: 'claims_doc' must be a string path")
     return Scope(product=product,
                  default_in_scope=default_in_scope,
                  surfaces=tuple(surfaces),
                  severity_bar=dict(bar),
-                 gates=tuple(gates))
+                 gates=tuple(gates),
+                 claims_doc=claims_doc)
 
 
 @dataclass(frozen=True)
@@ -138,7 +146,8 @@ def matches(finding: Finding, scope: Scope) -> bool:
     for surface in scope.surfaces:
         if any(path.startswith(prefix) for prefix in surface.paths):
             return True
-        if any(route and route in haystack for route in surface.routes):
+        route_like = surface.routes + surface.journeys
+        if any(token and token in haystack for token in route_like):
             return True
     return scope.default_in_scope
 
