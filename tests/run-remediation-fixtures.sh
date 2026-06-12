@@ -92,6 +92,179 @@ run_summary_only() {
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/lazy-vibe-remediation-fixtures.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
 
+register_repo="$tmp_root/register-repo"
+register_audit="$register_repo/docs/audit/fixture-launch-readiness-run"
+register_dir="$register_repo/docs/audit/register"
+register_remediation="$register_repo/docs/audit/register-remediation-run"
+mkdir -p "$register_audit" "$register_dir"
+python3 - "$register_dir" <<'PY'
+import sys
+from pathlib import Path
+
+from lazy_vibe.register.model import Disposition
+from lazy_vibe.register.store import RegisterStore
+from lazy_vibe.register.transitions import transition
+from tests.register.test_model import make_finding
+
+register_dir = Path(sys.argv[1])
+now = "2026-06-11T00:00:00+00:00"
+
+open_finding = make_finding(
+    finding_id="R-0001",
+    fingerprint="sha256:1",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "tenant_scope_missing",
+        "path": "backend/a.py",
+        "symbol": "A",
+    },
+    title="Open finding",
+    description="Open register-backed finding.",
+    evidence=[{"type": "code", "ref": "backend/a.py:10", "run_id": "run1"}],
+    occurrences=2,
+)
+transition(open_finding, Disposition.OPEN, by="pete", reason="real",
+           now=now, verified=True)
+
+regressed = make_finding(
+    finding_id="R-0002",
+    fingerprint="sha256:2",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "tenant_scope_missing",
+        "path": "backend/b.py",
+        "symbol": "B",
+    },
+    title="Regressed finding",
+    description="Regressed register-backed finding.",
+    severity="P0",
+    evidence=[{"type": "code", "ref": "backend/b.py:20", "run_id": "run2"}],
+)
+transition(regressed, Disposition.OPEN, by="pete", reason="real",
+           now=now, verified=True)
+transition(regressed, Disposition.IN_REMEDIATION, by="harness",
+           reason="unit", now=now)
+transition(regressed, Disposition.FIXED, by="harness", reason="fixed",
+           now=now, regression_test="tests/test_b.py::test_old")
+transition(regressed, Disposition.REGRESSED, by="reconciler",
+           reason="reappeared", now=now)
+
+new_finding = make_finding(
+    finding_id="R-0003",
+    fingerprint="sha256:3",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "tenant_scope_missing",
+        "path": "backend/c.py",
+        "symbol": "C",
+    },
+    title="New finding",
+    description="New register-backed finding.",
+    evidence=[{"type": "code", "ref": "backend/c.py:30", "run_id": "run1"}],
+)
+
+false_positive = make_finding(
+    finding_id="R-0004",
+    fingerprint="sha256:4",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "tenant_scope_missing",
+        "path": "backend/d.py",
+        "symbol": "D",
+    },
+    title="False positive finding",
+    description="False-positive register-backed finding.",
+    evidence=[{"type": "code", "ref": "backend/d.py:40", "run_id": "run1"}],
+)
+transition(false_positive, Disposition.FALSE_POSITIVE, by="pete",
+           reason="unsupported", now=now)
+
+RegisterStore(register_dir).save({
+    finding.finding_id: finding
+    for finding in [open_finding, regressed, new_finding, false_positive]
+})
+PY
+
+REPO_ROOT="$register_repo" \
+REPO_ROOT="$register_repo" \
+REGISTER_DIR="$register_dir" \
+REMEDIATION_DIR="$register_remediation" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --audit-run "$register_audit" \
+  --no-catalog >/tmp/lazy-vibe-register-remediation-fixture.out 2>/tmp/lazy-vibe-register-remediation-fixture.err || {
+    sed -n '1,120p' /tmp/lazy-vibe-register-remediation-fixture.out >&2 || true
+    sed -n '1,160p' /tmp/lazy-vibe-register-remediation-fixture.err >&2 || true
+    fail "register-backed remediation plan generation failed"
+  }
+
+assert_equals "2" "$(tail -n +2 "$register_remediation/00-register-px-map.tsv" | wc -l | tr -d ' ')" "register-backed packet count"
+grep -q $'PX-0001\tR-0002\tregressed' "$register_remediation/00-register-px-map.tsv" || fail "regressed finding not first by severity"
+grep -q $'PX-0002\tR-0001\topen' "$register_remediation/00-register-px-map.tsv" || fail "open finding missing"
+if grep -Eq 'R-0003|R-0004' "$register_remediation/00-register-px-map.tsv"; then
+  fail "register-backed remediation included non-open/non-regressed finding"
+fi
+grep -q 'Register finding: `R-0002`' "$register_remediation/packets/PX-0001.md" || fail "packet missing register context"
+
+register_verifier="$tmp_root/register-verifier.sh"
+cat > "$register_verifier" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+_prompt="$1"
+remediation="$2"
+workstream="$3"
+mkdir -p "$remediation/artifacts"
+case "$workstream" in
+  verify-*)
+    unit="${workstream#verify-}"
+    cat > "$remediation/artifacts/verify-$unit.md" <<VERIFY
+# Verification: $unit
+
+- Decision: accept
+- Implementation decision: fixed
+- Launch evidence decision: complete
+- Regression test: tests/test_register_fix.py::test_register_fix
+
+Packet $unit accepted from active checkout.
+VERIFY
+    printf 'unit_id\tseverity\ttype\tfile\tline\tfinding\trequired_fix\n' \
+      > "$remediation/artifacts/verify-$unit-findings.tsv"
+    ;;
+  99-final-review)
+    printf '# Final Review\n\nPASS\n' > "$remediation/04-final-remediation-review.md"
+    ;;
+esac
+EOF
+chmod +x "$register_verifier"
+
+REGISTER_DIR="$register_dir" \
+REMEDIATION_DIR="$register_remediation" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+REVIEWER_AGENT=none \
+VERIFICATION_RUNNER="$register_verifier" \
+REVIEW_RUNNER="$register_verifier" \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --audit-run "$register_audit" \
+  --verify-only \
+  --only-unit PX-0002 \
+  --no-catalog >/tmp/lazy-vibe-register-close-fixture.out 2>/tmp/lazy-vibe-register-close-fixture.err || {
+    sed -n '1,140p' /tmp/lazy-vibe-register-close-fixture.out >&2 || true
+    sed -n '1,180p' /tmp/lazy-vibe-register-close-fixture.err >&2 || true
+    fail "register-backed verifier close failed"
+  }
+
+closed_state="$(
+  python3 - "$register_dir/register.jsonl" <<'PY'
+import json
+import sys
+for line in open(sys.argv[1]):
+    finding = json.loads(line)
+    if finding["finding_id"] == "R-0001":
+        print(finding["disposition"] + "\t" + str(finding.get("regression_test")))
+PY
+)"
+assert_equals $'fixed\ttests/test_register_fix.py::test_register_fix' "$closed_state" "accepted verifier did not close register finding"
+
 repo="$tmp_root/repo"
 audit="$repo/docs/audit/fixture-launch-readiness-run"
 remediation="$repo/docs/audit/fixture-remediation-run"

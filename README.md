@@ -816,6 +816,16 @@ agents from the product repo so bare evidence refs resolve against the right
 checkout. Policy auto-dispositions are stamped
 `policy:<rule-id>`; every Pete decision is stamped `pete`.
 
+Plan 3 starts wiring remediation to the register. For register-enabled product
+repos, `run-remediation.sh` resolves the same `PROFILE`/`PRODUCT_PROFILE`
+contract, detects `docs/audit/register/register.jsonl`, and builds its packet
+inventory from `open` and `regressed` register entries instead of scraping
+historical audit prose. It writes `00-register-px-map.tsv` so the legacy
+`PX-*` packet runner remains stable while each packet stays bound to an
+authoritative `R-*` finding. When a verifier accepts a unit, the harness
+requires a `Regression test: path::test_name` line and closes the mapped
+register finding through `python3 -m lazy_vibe.register close`.
+
 ---
 
 ## Progress display

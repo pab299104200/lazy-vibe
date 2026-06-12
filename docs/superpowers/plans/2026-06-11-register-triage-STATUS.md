@@ -63,6 +63,11 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   Its first prerequisite slice is landed in lazy-vibe: `run-triage.sh` honors
   `PROFILE`/`PRODUCT_PROFILE`, infers the register from product `Repo root`,
   and runs Codex from the product repo so bare evidence refs resolve correctly.
-  Remaining Plan 3 work: run-remediation.sh register wiring, differential audit
-  mode (spec §8), prompt calibration + skill retirement (§9/§10), collision
-  auto-split.
+  Its second slice is landed in lazy-vibe: `run-remediation.sh` detects
+  register-enabled repos, builds packets from `open`/`regressed` register rows,
+  writes `00-register-px-map.tsv`, starts register remediation through the CLI
+  when implementation units begin, and closes accepted units through
+  `lazy_vibe.register close` with the verifier's regression test. Remaining
+  Plan 3 work: audit ingest/reconcile hook, differential audit mode (spec §8),
+  feature-build postcheck, prompt calibration + skill retirement (§9/§10),
+  collision auto-split.

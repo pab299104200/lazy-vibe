@@ -199,6 +199,29 @@ def _cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_start_remediation(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    now = f"{args.date or _today()}T00:00:00+00:00"
+    with store.locked():
+        findings = store.load()
+        if args.finding not in findings:
+            raise RegisterError(f"unknown finding {args.finding}")
+        finding = findings[args.finding]
+        if finding.disposition == "in_remediation":
+            print(f"{args.finding} already in_remediation")
+            return 0
+        if finding.disposition not in ("open", "regressed"):
+            raise RegisterError(
+                f"{args.finding}: start-remediation requires open/regressed, "
+                f"is {finding.disposition}")
+        reason = args.reason or f"started remediation unit {args.unit}"
+        transition(finding, Disposition.IN_REMEDIATION, by="harness",
+                   reason=reason, now=now)
+        store.save(findings)
+    print(f"{args.finding} -> in_remediation")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lazy_vibe.register")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -286,6 +309,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", default=None)
     p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_close)
+
+    p = sub.add_parser("start-remediation",
+                       help="harness: open/regressed -> in_remediation")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--finding", required=True)
+    p.add_argument("--unit", required=True)
+    p.add_argument("--reason", default=None)
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=_cmd_start_remediation)
 
     return parser
 

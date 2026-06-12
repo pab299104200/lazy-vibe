@@ -374,6 +374,45 @@ def test_close_rejects_malformed_test_format(workspace):
     assert f.regression_test is None
 
 
+def test_start_remediation_verb_open_to_in_remediation(workspace):
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+    from lazy_vibe.register.store import RegisterStore as RS
+    from lazy_vibe.register.transitions import transition
+    from lazy_vibe.register.model import Disposition
+    store = RS(register_dir)
+    findings = store.load()
+    transition(findings["R-0001"], Disposition.OPEN, by="pete", reason="real",
+               now="2026-06-10T00:00:00+00:00", verified=True)
+    store.save(findings)
+
+    proc = cli("start-remediation", "--register-dir", str(register_dir),
+               "--finding", "R-0001", "--unit", "IU-0001",
+               "--date", "2026-06-11")
+
+    assert proc.returncode == 0, proc.stderr
+    f = RS(register_dir).load()["R-0001"]
+    assert f.disposition == "in_remediation"
+    assert f.disposition_by == "harness"
+    assert f.history[-1]["reason"] == "started remediation unit IU-0001"
+
+
+def test_start_remediation_requires_open_or_regressed(workspace):
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+
+    proc = cli("start-remediation", "--register-dir", str(register_dir),
+               "--finding", "R-0001", "--unit", "IU-0001")
+
+    assert proc.returncode == 1
+    assert "open/regressed" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
 # ---------------------------------------------------------------------------
 # Task 7: run-triage.sh dispatch wrapper smoke test
 # ---------------------------------------------------------------------------

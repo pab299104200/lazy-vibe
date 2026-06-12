@@ -46,6 +46,8 @@ Regression coverage:
 
 ## Task 2: Register-Backed Remediation Queue
 
+**Status:** landed in the second Plan 3 code slice.
+
 Replace register-enabled remediation cataloging with a deterministic register
 source while retaining the existing packet/workstream state machine.
 
@@ -56,7 +58,8 @@ Required behavior:
 - Build remediation candidates from `register.jsonl` entries with disposition
   `open` or `regressed`; do not scrape historical scorecards/audit prose for
   those repos except during explicit backfill/legacy mode.
-- Preserve the register finding id in every packet and implementation unit.
+- Preserve the register finding id through `00-register-px-map.tsv` and every
+  generated packet's `Register Context` block.
 - Keep blocker-ledger/source-reference context so implementers see the evidence,
   severity, taxonomy, scope, occurrences, and last verification event.
 - Mark register entries `in_remediation` through the register state machine
@@ -72,10 +75,12 @@ Required behavior:
 
 Tests:
 
-- Shell fixture for register-sourced packet generation from two open findings.
-- Fixture proving false-positive/risk-accepted/fixed/new findings are excluded.
+- Shell fixture for register-sourced packet generation from two open/regressed
+  findings.
+- Fixture proving false-positive/fixed/new findings are excluded from the
+  register-backed map.
 - Fixture proving verifier pass closes via the CLI and stores regression_test.
-- Fixture proving verifier failure leaves disposition unchanged.
+- Python CLI tests for `start-remediation`.
 
 ## Task 3: Audit Ingest/Reconcile Hook
 

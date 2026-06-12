@@ -27,11 +27,19 @@ export GIT_EDITOR="${GIT_EDITOR:-true}"
 export GIT_SEQUENCE_EDITOR="${GIT_SEQUENCE_EDITOR:-true}"
 export GIT_MERGE_AUTOEDIT="${GIT_MERGE_AUTOEDIT:-no}"
 
+if [[ -n "${REPO_ROOT+x}" ]]; then
+  REPO_ROOT_EXPLICIT=1
+else
+  REPO_ROOT_EXPLICIT=0
+fi
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/generic-shared.md}"
 PRODUCT_PROFILE="${PRODUCT_PROFILE:-}"
 PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 PROFILE="${PROFILE:-}"
+PRODUCT_REPO_ROOT="${PRODUCT_REPO_ROOT:-}"
+REGISTER_DIR="${REGISTER_DIR:-}"
+REMEDIATION_REGISTER_SOURCE="${REMEDIATION_REGISTER_SOURCE:-auto}"
 AUDIT_RUN=""
 REMEDIATION_DIR="${REMEDIATION_DIR:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
@@ -116,6 +124,9 @@ Environment:
                               Sets PRODUCT_PROFILE from the profile if not already set.
   PROFILES_DIR                Directory containing named profile subdirectories. Defaults to profiles/ alongside the script.
   PRODUCT_PROFILE             Optional product profile markdown. Set automatically when PROFILE is used.
+  REGISTER_DIR                 Optional product register directory. Defaults to <Repo root>/docs/audit/register
+                               for product-profile repos when register.jsonl exists.
+  REMEDIATION_REGISTER_SOURCE  auto, 1, or 0. auto uses the register when REGISTER_DIR/register.jsonl exists.
   MAX_PARALLEL                Max workstreams per wave. Defaults to 3.
   MAX_WORKSTREAM_PACKETS      Max packets per workstream coordinator. Oversized workstreams are
                               split by source kind, then source file stem, then numerically.
@@ -455,6 +466,39 @@ while (($#)); do
   esac
 done
 
+repo_root_from_product_profile() {
+  local profile_file="$1"
+  sed -nE 's/^- Repo root:[[:space:]]*`?([^`]+)`?.*$/\1/p' \
+    "$profile_file" | head -1
+}
+
+if [[ -n "$PROFILE" ]]; then
+  _profile_dir="$PROFILE"
+  [[ "$PROFILE" != /* ]] && _profile_dir="$PROFILES_DIR/$PROFILE"
+  if [[ ! -d "$_profile_dir" ]]; then
+    printf 'Profile not found: %s\n' "$_profile_dir" >&2; exit 2
+  fi
+  [[ -z "$PRODUCT_PROFILE" && -f "$_profile_dir/product-profile.md" ]] && PRODUCT_PROFILE="$_profile_dir/product-profile.md"
+  [[ "$SHARED_PROMPT" == "$SCRIPT_DIR/shared.md" && -f "$_profile_dir/shared.md" ]] && SHARED_PROMPT="$_profile_dir/shared.md"
+fi
+
+if [[ -z "$PRODUCT_REPO_ROOT" && -n "$PRODUCT_PROFILE" ]]; then
+  if [[ ! -f "$PRODUCT_PROFILE" ]]; then
+    printf 'Product profile not found: %s\n' "$PRODUCT_PROFILE" >&2
+    exit 2
+  fi
+  PRODUCT_REPO_ROOT="$(repo_root_from_product_profile "$PRODUCT_PROFILE")"
+fi
+if [[ -n "$PRODUCT_REPO_ROOT" && "$REPO_ROOT_EXPLICIT" == "0" ]]; then
+  REPO_ROOT="$PRODUCT_REPO_ROOT"
+fi
+if [[ -z "$REGISTER_DIR" && -n "$PRODUCT_REPO_ROOT" && -f "$PRODUCT_REPO_ROOT/docs/audit/register/register.jsonl" ]]; then
+  REGISTER_DIR="$PRODUCT_REPO_ROOT/docs/audit/register"
+fi
+if [[ -z "$REGISTER_DIR" && -f "$REPO_ROOT/docs/audit/register/register.jsonl" ]]; then
+  REGISTER_DIR="$REPO_ROOT/docs/audit/register"
+fi
+
 if [[ -z "$SCORECARD" && -n "$FEATURE" ]]; then
   if [[ -f "$REPO_ROOT/docs/scorecard/$FEATURE.md" ]]; then
     SCORECARD="$REPO_ROOT/docs/scorecard/$FEATURE.md"
@@ -499,16 +543,6 @@ if [[ -z "$REMEDIATION_DIR" ]]; then
     REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/${_audit_date}-remediation-run"
   fi
   printf '[auto-detect] using remediation dir: %s\n' "$REMEDIATION_DIR"
-fi
-
-if [[ -n "$PROFILE" ]]; then
-  _profile_dir="$PROFILE"
-  [[ "$PROFILE" != /* ]] && _profile_dir="$PROFILES_DIR/$PROFILE"
-  if [[ ! -d "$_profile_dir" ]]; then
-    printf 'Profile not found: %s\n' "$_profile_dir" >&2; exit 2
-  fi
-  [[ -z "$PRODUCT_PROFILE" && -f "$_profile_dir/product-profile.md" ]] && PRODUCT_PROFILE="$_profile_dir/product-profile.md"
-  [[ "$SHARED_PROMPT" == "$SCRIPT_DIR/shared.md" && -f "$_profile_dir/shared.md" ]] && SHARED_PROMPT="$_profile_dir/shared.md"
 fi
 
 if [[ "$FORCE_VERIFY" == "1" && "$VERIFY_ONLY" == "1" && "$EXECUTE" == "1" && "$EXPLICIT_VERIFY_ONLY" != "1" ]]; then
@@ -568,6 +602,7 @@ fi
 PX_TSV="$REMEDIATION_DIR/00-master-px-list.tsv"
 PX_MD="$REMEDIATION_DIR/01-master-px-list.md"
 RAW_PX_TSV="$REMEDIATION_DIR/00-raw-px-list.tsv"
+REGISTER_PX_TSV="$REMEDIATION_DIR/00-register-px-map.tsv"
 BLOCKER_LEDGER_TSV="$REMEDIATION_DIR/00-blocker-ledger.tsv"
 BLOCKER_LEDGER_MD="$REMEDIATION_DIR/00-blocker-ledger.md"
 WORKSTREAMS_TSV="$REMEDIATION_DIR/02-workstreams.tsv"
@@ -2602,6 +2637,159 @@ extract_findings() {
   } > "$PX_TSV"
 }
 
+register_source_enabled() {
+  case "$REMEDIATION_REGISTER_SOURCE" in
+    0|false|False|legacy|off|OFF) return 1 ;;
+    1|true|True|on|ON)
+      [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]]
+      return
+      ;;
+    auto|"")
+      [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]]
+      return
+      ;;
+    *)
+      printf 'invalid REMEDIATION_REGISTER_SOURCE=%s (expected auto, 1, or 0)\n' \
+        "$REMEDIATION_REGISTER_SOURCE" >&2
+      exit 2
+      ;;
+  esac
+}
+
+write_register_findings_inventory() {
+  [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]] || {
+    printf 'Register not found: %s/register.jsonl\n' "$REGISTER_DIR" >&2
+    return 2
+  }
+  python3 - "$REGISTER_DIR/register.jsonl" "$PX_TSV" "$RAW_PX_TSV" \
+    "$REGISTER_PX_TSV" "$BLOCKER_LEDGER_TSV" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+register_jsonl = Path(sys.argv[1])
+px_tsv = Path(sys.argv[2])
+raw_tsv = Path(sys.argv[3])
+map_tsv = Path(sys.argv[4])
+ledger_tsv = Path(sys.argv[5])
+
+severity_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def evidence_ref(finding):
+    evidence = finding.get("evidence") or []
+    if evidence and isinstance(evidence[0], dict):
+        return str(evidence[0].get("ref") or "-")
+    inputs = finding.get("fingerprint_inputs") or {}
+    return str(inputs.get("path") or "-")
+
+
+def split_ref(ref):
+    path, sep, line = ref.rpartition(":")
+    if sep and line.isdigit():
+        return path, line
+    return ref, "-"
+
+
+def model_class(severity):
+    return "high-risk" if severity in {"P0", "P1"} else "standard"
+
+
+findings = []
+with register_jsonl.open() as fh:
+    for lineno, line in enumerate(fh, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            finding = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"corrupt register line {lineno}: {exc}") from exc
+        if finding.get("disposition") in {"open", "regressed"}:
+            findings.append(finding)
+
+findings.sort(key=lambda f: (
+    severity_rank.get(f.get("severity"), 99),
+    f.get("finding_id", ""),
+))
+
+px_rows = []
+map_rows = []
+ledger_rows = []
+for index, finding in enumerate(findings, start=1):
+    px_id = f"PX-{index:04d}"
+    blocker_id = f"B-{index:04d}"
+    finding_id = finding["finding_id"]
+    severity = finding.get("severity", "P3")
+    inputs = finding.get("fingerprint_inputs") or {}
+    category = inputs.get("category") or "register"
+    theme = inputs.get("theme") or "register"
+    ref = evidence_ref(finding)
+    source, line = split_ref(ref)
+    title = f"[{finding_id}] {finding.get('title') or finding_id}"
+    packet = f"packets/{px_id}.md"
+    group = category
+    cls = model_class(severity)
+    px_rows.append([px_id, severity, group, cls, source, line, title, packet])
+    map_rows.append([
+        px_id,
+        finding_id,
+        finding.get("disposition", ""),
+        severity,
+        finding.get("taxonomy", ""),
+        str(finding.get("occurrences", 1)),
+        ref,
+        finding.get("regression_test") or "",
+    ])
+    ledger_rows.append([
+        blocker_id,
+        category,
+        theme,
+        severity,
+        group,
+        cls,
+        str(finding.get("occurrences", 1)),
+        source,
+        line,
+        finding.get("title") or finding_id,
+        finding_id,
+        ref,
+    ])
+
+with px_tsv.open("w", newline="") as fh:
+    writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
+    writer.writerow(["id", "severity", "group", "model_class", "source", "line",
+                     "title", "packet"])
+    writer.writerows(px_rows)
+
+with raw_tsv.open("w", newline="") as fh:
+    writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
+    writer.writerow(["id", "severity", "group", "model_class", "source", "line",
+                     "title", "packet"])
+    writer.writerows(px_rows)
+
+with map_tsv.open("w", newline="") as fh:
+    writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
+    writer.writerow(["packet_id", "finding_id", "disposition", "severity",
+                     "taxonomy", "occurrences", "evidence_ref",
+                     "regression_test"])
+    writer.writerows(map_rows)
+
+with ledger_tsv.open("w", newline="") as fh:
+    writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
+    writer.writerow(["blocker_id", "category", "theme", "severity", "group",
+                     "model_class", "finding_count", "representative_source",
+                     "representative_line", "representative_title", "raw_px_ids",
+                     "references"])
+    writer.writerows(ledger_rows)
+PY
+  write_blocker_ledger_markdown
+  printf '[register] open_or_regressed=%s register=%s map=%s\n' \
+    "$(awk 'NR > 1 { count += 1 } END { print count + 0 }' "$REGISTER_PX_TSV")" \
+    "$REGISTER_DIR" "$REGISTER_PX_TSV"
+}
+
 dedupe_findings_into_blocker_ledger() {
   [[ -s "$PX_TSV" ]] || return 0
 
@@ -2773,6 +2961,24 @@ blocker_ledger_context_for_px() {
   ' "$BLOCKER_LEDGER_TSV"
 }
 
+register_context_for_px() {
+  local px_id="$1"
+  [[ -s "$REGISTER_PX_TSV" ]] || return 0
+  awk -F '\t' -v px="$px_id" '
+    NR > 1 && $1 == px {
+      print "- Register finding: `" $2 "`"
+      print "- Register disposition: `" $3 "`"
+      print "- Register severity: `" $4 "`"
+      print "- Register taxonomy: `" $5 "`"
+      print "- Register occurrences: `" $6 "`"
+      print "- Register evidence ref: `" $7 "`"
+      if ($8 != "") {
+        print "- Existing regression test: `" $8 "`"
+      }
+    }
+  ' "$REGISTER_PX_TSV"
+}
+
 write_master_markdown() {
   {
     printf '# Master Px Remediation List\n\n'
@@ -2814,6 +3020,13 @@ write_packet() {
     printf -- '- Source kind: `%s`\n' "$kind"
     printf -- '- Source: `%s:%s`\n' "$source" "$line"
     printf -- '- Finding: %s\n\n' "$title"
+    local register_context
+    register_context="$(register_context_for_px "$id")"
+    if [[ -n "$register_context" ]]; then
+      printf '## Register Context\n\n'
+      printf '%s\n\n' "$register_context"
+      printf 'This packet is backed by the persistent findings register. Treat the `R-*` finding as the authoritative remediation target. On verifier acceptance, the harness closes the register finding only through `python3 -m lazy_vibe.register close`; do not edit `register.jsonl` by hand.\n\n'
+    fi
     local blocker_context
     blocker_context="$(blocker_ledger_context_for_px "$id")"
     if [[ -n "$blocker_context" ]]; then
@@ -4750,6 +4963,11 @@ Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 - Decision: \`accept\`, \`revise\`, or \`stop\`.
 - Implementation decision: \`fixed\`, \`revise\`, or \`blocked\`.
 - Launch evidence decision: \`complete\`, \`pending\`, or \`blocked\`.
+- Regression test: \`path::test_name\` when Decision is \`accept\` and
+  Implementation decision is \`fixed\`; use the focused permanent regression
+  test that proves the fix. This line is required for register-backed
+  remediation because the harness stores it through
+  \`python3 -m lazy_vibe.register close\`.
 - Packet-by-packet assertion checks.
 - References opened and wider searches performed.
 - Standards reviewed and any coding/UI/definition-of-done violations found.
@@ -5692,6 +5910,120 @@ verifier_accepts_unit() {
   verifier_accepts_unit_raw "$unit_id"
 }
 
+register_findings_for_packets() {
+  local packets_csv="$1"
+  [[ -s "$REGISTER_PX_TSV" ]] || return 0
+  awk -F '\t' -v packets="$packets_csv" '
+    BEGIN {
+      count = split(packets, parts, ",")
+      for (i = 1; i <= count; i += 1) {
+        packet = parts[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", packet)
+        if (packet != "") want[packet] = 1
+      }
+    }
+    NR > 1 && want[$1] && !seen[$2]++ {
+      print $2
+    }
+  ' "$REGISTER_PX_TSV"
+}
+
+start_register_remediation_for_unit() {
+  [[ -s "$REGISTER_PX_TSV" && -n "$REGISTER_DIR" ]] || return 0
+  local unit_id="$1" packets_csv="$2" finding_id failed=0
+  while IFS= read -r finding_id; do
+    [[ -n "$finding_id" ]] || continue
+    if ! python3 -m lazy_vibe.register start-remediation \
+      --register-dir "$REGISTER_DIR" \
+      --finding "$finding_id" \
+      --unit "$unit_id" \
+      --reason "started remediation unit $unit_id" >/dev/null; then
+      failed=1
+    fi
+  done < <(register_findings_for_packets "$packets_csv")
+  return "$failed"
+}
+
+regression_test_for_unit() {
+  local unit_id="$1" verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  [[ -s "$verifier" ]] || return 1
+  awk '
+    BEGIN { IGNORECASE = 1 }
+    /^[[:space:]-]*(\*\*)?Regression test/ {
+      line = $0
+      gsub(/[`*]/, "", line)
+      sub(/^[[:space:]-]*Regression test[^A-Za-z0-9._\/-]*/, "", line)
+      n = split(line, parts, /[[:space:],]+/)
+      for (i = 1; i <= n; i += 1) {
+        if (parts[i] ~ /::/) {
+          print parts[i]
+          exit
+        }
+      }
+    }
+  ' "$verifier" | head -1
+}
+
+register_finding_disposition() {
+  local finding_id="$1"
+  [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]] || return 1
+  python3 - "$REGISTER_DIR/register.jsonl" "$finding_id" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target = sys.argv[2]
+with path.open() as fh:
+    for line in fh:
+        if not line.strip():
+            continue
+        finding = json.loads(line)
+        if finding.get("finding_id") == target:
+            print(finding.get("disposition", ""))
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+close_register_findings_for_unit() {
+  [[ -s "$REGISTER_PX_TSV" && -n "$REGISTER_DIR" ]] || return 0
+  verifier_accepts_unit "$1" || return 0
+  local unit_id="$1" packets_csv test_ref finding_id failed=0
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  [[ -n "$packets_csv" ]] || return 0
+  test_ref="$(regression_test_for_unit "$unit_id" || true)"
+  if [[ -z "$test_ref" ]]; then
+    printf '[register] %s: accepted verifier omitted required Regression test line\n' "$unit_id" >&2
+    return 1
+  fi
+  while IFS= read -r finding_id; do
+    [[ -n "$finding_id" ]] || continue
+    if [[ "$(register_finding_disposition "$finding_id" 2>/dev/null || true)" == "fixed" ]]; then
+      continue
+    fi
+    if ! python3 -m lazy_vibe.register close \
+      --register-dir "$REGISTER_DIR" \
+      --finding "$finding_id" \
+      --test "$test_ref" \
+      --reason "verified fixed by remediation unit $unit_id"; then
+      failed=1
+    fi
+  done < <(register_findings_for_packets "$packets_csv")
+  return "$failed"
+}
+
+finalize_verified_unit() {
+  local unit_id="$1" failed=0
+  if ! close_register_findings_for_unit "$unit_id"; then
+    failed=1
+  fi
+  if ! commit_verified_unit_changes "$unit_id"; then
+    failed=1
+  fi
+  return "$failed"
+}
+
 verifier_has_terminal_decision() {
   local unit_id="$1"
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
@@ -6329,7 +6661,7 @@ wait_for_wave() {
           if [[ "$DRY_RUN" != "1" ]]; then
             printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
             if [[ "${names_ref[$idx]}" == verify-* ]]; then
-              if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
+              if ! finalize_verified_unit "${names_ref[$idx]#verify-}"; then
                 failed=1
               fi
             fi
@@ -6341,7 +6673,7 @@ wait_for_wave() {
           if [[ "$DRY_RUN" != "1" ]]; then
             printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
             if [[ "${names_ref[$idx]}" == verify-* ]]; then
-              if ! commit_verified_unit_changes "${names_ref[$idx]#verify-}"; then
+              if ! finalize_verified_unit "${names_ref[$idx]#verify-}"; then
                 failed=1
               fi
             fi
@@ -6549,6 +6881,12 @@ execute_workstreams() {
 
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
     printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
+    if [[ "$DRY_RUN" != "1" ]] && ! start_register_remediation_for_unit "$unit_id" "$packets_csv"; then
+      if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+        exit 1
+      fi
+      continue
+    fi
     record_commit_baseline_for_unit "$unit_id"
 
     run_implementer_and_test "$prompt" "implement-$unit_id" "$model_class" "$worktree_dir" "$unit_id" &
@@ -6598,7 +6936,7 @@ execute_verifier_units() {
        recover_verifier_artifact_from_log "$unit_id" "$prior_verify_log"; then
       printf '[resume] recovered completed verify-%s from existing verifier log\n' "$unit_id"
       printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
-      if ! commit_verified_unit_changes "$unit_id"; then
+      if ! finalize_verified_unit "$unit_id"; then
         if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
           exit 1
         fi
@@ -7713,8 +8051,12 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
       _previous_px_tsv="$(mktemp)"
       cp "$PX_TSV" "$_previous_px_tsv"
     fi
-    extract_findings
-    dedupe_findings_into_blocker_ledger
+    if register_source_enabled; then
+      write_register_findings_inventory
+    else
+      extract_findings
+      dedupe_findings_into_blocker_ledger
+    fi
     guard_reused_px_inventory "$_previous_px_tsv"
     [[ -n "$_previous_px_tsv" ]] && rm -f "$_previous_px_tsv"
     write_master_markdown
