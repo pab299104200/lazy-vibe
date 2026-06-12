@@ -19,8 +19,8 @@
 | T4 queue render | DONE (4009584) + quality fixes landed 2aad3d7 — review CLOSED | 2aad3d7 (suite 236) |
 | T5 triage CLI + close | DONE (789b365) + quality fixes landed 04491b5 — review CLOSED | 04491b5 (suite 257) |
 | T6 scope journeys/claims_doc | DONE (f949c9c) — suite 260 (plan said 261; arithmetic defect: replaced 1 test with 4, net +3 not +4) | f949c9c |
-| T7 run-triage.sh + exports + README | DONE (58de804) — suite 262 | 58de804 |
-| T8 Meridian dry-run | not started | |
+| T7 run-triage.sh + exports + README | DONE (58de804) + Task 8 sampling fix (`--no-generate`) landed in current fix commit | suite 263 |
+| T8 Meridian dry-run | in progress — interrupted Claude run over-dispatched; out-of-scope results preserved aside | |
 
 ## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Re-review item LANDED in 066f427: duplicate claims bound to the solicited fuzzy candidate (`duplicate_of == _fuzzy_candidate(finding)`), closing both the unsolicited-claim hole AND the nonexistent-id silent fall-through (the residual previously flagged for T4 — now resolved).
 
@@ -41,7 +41,7 @@ Plan test arithmetic re-derived after T5 quality fixes: T2 192, T3 211, T4 236, 
 - **T4 (queue):** every free-text cell AND evidence ref rendered into triage-queue.md must go through `store.markdown_cell` (verifier-supplied refs may contain `|`/newlines — injection vector flagged in T2 review).
 - **T5 (triage CLI):** ~~decisions must go through `transitions.transition()`/`reaffirm_risk()` stamped by="pete"; never mutate dispositions directly.~~ DONE in 789b365/04491b5: all decisions flow through `transition()`/`reaffirm_risk()` by="pete"; accept-all additionally restricted to fully-specified decisions (see T5 quality fixes).
 - **T7 (run-triage.sh):** verification-only glue; full run-remediation.sh rewiring is Plan 3. Export `QueueDrift` alongside the queue symbols (plan T7 block updated).
-- **T8:** packets for Meridian's 5 P0 + 10 sampled P1 only (token bound); report verifier outcomes honestly; commit register changes in /home/pete/cadres/meridian. NOTE: with the C1 fix, `triage --accept-all` will NOT auto-open verified findings — that is the POLICY's job (`apply_policy` open action); the dry-run flow (policy then queue) is unaffected.
+- **T8:** packets for Meridian's 5 P0 + 10 sampled P1 only (token bound); report verifier outcomes honestly; commit register changes in /home/pete/cadres/meridian. NOTE: with the C1 fix, `triage --accept-all` will NOT auto-open verified findings — that is the POLICY's job (`apply_policy` open action); the dry-run flow (policy then queue) is unaffected. Task 8 exposed a T7/T8 integration defect: `run-triage.sh` regenerated all packets before dispatch, undoing the sample move-aside and causing the interrupted Claude run to create 24 out-of-scope `R-0001`–`R-0024` results. Fix: wrapper now accepts `--no-generate`; default behavior is unchanged, and Task 8 uses `--no-generate` after pre-bounding packets.
 
 ## After T8
 Final whole-branch adversarial review (cross-module composition, debris, plan/spec/code consistency) → fix minors → merge to main, run suite on merge, delete branch, push. Update spec deferred-items if scope changed.

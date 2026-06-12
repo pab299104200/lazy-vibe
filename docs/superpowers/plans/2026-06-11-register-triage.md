@@ -3092,17 +3092,22 @@ Create `run-triage.sh` (chmod +x):
 set -euo pipefail
 
 REGISTER_DIR=""
+GENERATE_PACKETS=1
 TRIAGE_AGENT="${TRIAGE_AGENT:-claude}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
 TRIAGE_DATE="${TRIAGE_DATE:-$(date +%F)}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-usage() { echo "usage: run-triage.sh --register-dir DIR" >&2; exit 2; }
+usage() {
+  echo "usage: run-triage.sh --register-dir DIR [--agent AGENT] [--no-generate]" >&2
+  exit 2
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --register-dir) REGISTER_DIR="$2"; shift 2 ;;
     --agent) TRIAGE_AGENT="$2"; shift 2 ;;
+    --no-generate) GENERATE_PACKETS=0; shift ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
@@ -3112,8 +3117,11 @@ done
 PACKETS_DIR="$REGISTER_DIR/triage/packets"
 RESULTS_DIR="$REGISTER_DIR/triage/results"
 
-# 1. (Re)generate packets for current `new` findings.
-python3 -m lazy_vibe.register verify-packets --register-dir "$REGISTER_DIR"
+# 1. (Re)generate packets for current `new` findings unless the caller has
+# pre-bounded packets for a sampled dry-run.
+if [[ "$GENERATE_PACKETS" == 1 ]]; then
+  python3 -m lazy_vibe.register verify-packets --register-dir "$REGISTER_DIR"
+fi
 mkdir -p "$RESULTS_DIR"
 
 # 2. For each packet without a result, dispatch the agent (bounded parallel).
@@ -3195,7 +3203,8 @@ Pete — `--accept-all` for batch, `--render-only` to just regenerate the
 queue), and `close` (harness: `open`/`in_remediation` -> `fixed` with a
 linked regression test). `run-triage.sh` dispatches a verifier agent
 (`TRIAGE_AGENT`, default `claude`; `MAX_PARALLEL`, default 3) over the packets
-and consumes the results. Policy auto-dispositions are stamped
+and consumes the results. `--no-generate` preserves a caller-prepared packet
+subset for sampled dry-runs. Policy auto-dispositions are stamped
 `policy:<rule-id>`; every Pete decision is stamped `pete`.
 ```
 
@@ -3287,7 +3296,7 @@ if a full run is desired. This is a token-budget measure, documented as such.)
 
 ```bash
 TRIAGE_AGENT=claude MAX_PARALLEL=3 \
-  bash run-triage.sh --register-dir "$REG"
+  bash run-triage.sh --no-generate --register-dir "$REG"
 ```
 
 Report verbatim: how many of the 15 returned VERIFIED vs UNSUPPORTED vs split,
