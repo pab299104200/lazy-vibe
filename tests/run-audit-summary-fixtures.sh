@@ -153,4 +153,11 @@ MAX_PARALLEL=1 \
 grep -q 'Tenant data is not scoped' "$audit_register/register.md" || fail "audit hook register report missing finding"
 grep -q '2026-06-12-launch-readiness-run' "$audit_register/baseline.json" || fail "baseline missing run id"
 
+grep -q 'Your job is accurate dispositions, not finding count' "$SCRIPT_DIR/generic-shared.md" || fail "prompt calibration accuracy contract missing"
+grep -q 'Closest severity anchor must be cited' "$SCRIPT_DIR/generic-shared.md" || fail "severity anchors missing"
+if rg -n "If you find zero bugs|didn.t look hard|Red is good" "$SCRIPT_DIR"/generic-*.md >/tmp/lazy-vibe-prompt-calibration-grep.out 2>/tmp/lazy-vibe-prompt-calibration-grep.err; then
+  cat /tmp/lazy-vibe-prompt-calibration-grep.out >&2
+  fail "old finding-count incentive language is present"
+fi
+
 printf 'PASS audit summary fixtures\n'

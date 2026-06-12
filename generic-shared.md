@@ -18,6 +18,8 @@ Rules:
 8. Security, data isolation, data integrity, admin/support access, destructive actions, privacy, and irreversible lifecycle flows are high-risk by default when present.
 9. Browser or E2E evidence must prove authenticated/product state, not just HTTP 200 or shell rendering.
 10. If the repo lacks a supported runtime harness for a critical launch journey, mark the journey unverified instead of inventing unsupported proof.
+11. Your job is accurate dispositions, not finding count. Zero new findings on unchanged, previously audited surface is a valid and expected outcome.
+12. Evidence-or-silence rule: do not report a finding without line-aware evidence and a stated failure mechanism. Unsupported suspicions belong in unexplored-boundary notes, not the findings list.
 
 ## Lattice Cognitive Workspace Protocol
 
@@ -36,6 +38,13 @@ Severity scale:
 - **P1** - must fix before GA: advertised feature gap, critical UX dead end, missing audit/control evidence, unsafe recovery path, or material docs/code mismatch.
 - **P2** - should fix before GA: hardening, maintainability, non-critical workflow polish, test gaps with bounded risk.
 - **P3** - post-launch acceptable: nice-to-have or future improvement that does not undermine launch claims.
+
+Closest severity anchor must be cited when assigning severity:
+
+- **P0 anchor:** an unscoped tenant query exposes another tenant's evidence, billing, identity, or compliance data; a destructive lifecycle action can be triggered without authorization; a launch claim's core workflow cannot complete at all.
+- **P1 anchor:** a critical launch-supported workflow exists but lacks required failure handling, audit evidence, permanent boundary tests, or truthful docs; an advertised integration is present but cannot be operated or recovered safely.
+- **P2 anchor:** a bounded hardening or maintainability gap increases operational risk but does not invalidate a launch claim, such as missing pagination on an admin list, incomplete non-critical telemetry, or focused test gaps around low-risk paths.
+- **P3 anchor:** polish or future improvement with no credible launch-safety impact, such as copy clarity, optional workflow convenience, or non-blocking cleanup outside changed/critical surfaces.
 
 Output discipline:
 

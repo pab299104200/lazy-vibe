@@ -155,6 +155,9 @@ Tests:
 
 ## Task 6: Prompt Calibration And Skill Consolidation
 
+**Status:** prompt calibration landed in the fifth Plan 3 code slice; Meridian
+skill retirement/rewiring remains.
+
 Remove finding-count incentives and make accurate dispositions the central
 prompt contract.
 
@@ -170,8 +173,10 @@ Required behavior:
 
 Tests:
 
-- Prompt fixture proves suppressed fingerprints are included and capped.
-- Text fixture rejects the old "finding count equals effort" language.
+- Text fixture proves the accuracy contract and severity anchors are present
+  and rejects old "finding count equals effort" language.
+- Remaining: prompt fixture proves suppressed fingerprints are included and
+  capped.
 
 ## Task 7: Collision Auto-Split
 

@@ -80,3 +80,8 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   fingerprint plus materially divergent evidence/title now creates a new split
   finding with a `collision` history event, and rerunning the same collision is
   idempotent.
+- Plan 3 fifth slice: generic prompt calibration is landed. `generic-shared.md`
+  now states accurate dispositions are the goal, zero new findings can be valid,
+  unsupported suspicions must stay out of findings, and every severity needs the
+  closest severity anchor. Meridian skill rewiring and suppressed-register
+  prompt context remain.
