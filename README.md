@@ -338,6 +338,8 @@ Splits the launch-readiness audit into parallel job batches, builds one bounded 
 | `MASTER_PROMPT` | `generic-launch-readiness-audit-prompt.md` | Master audit prompt template. |
 | `RUNNER` | `codex` | Agent backend: `codex`, `claude`, or `gemini`. |
 | `AUDIT_RUNNER` | — | Custom executable wrapper (overrides `RUNNER`). Receives `<prompt_file> <run_dir> <job_id>`. |
+| `AUDIT_DIFFERENTIAL` | `0` | Set to `1` or pass `--differential` to load `docs/audit/register/baseline.json`, compute changed paths from baseline SHA to `HEAD`, and run only the affected audit jobs plus the cheap final gates. |
+| `AUDIT_BASELINE_SHA` | — | Optional explicit baseline SHA for differential mode. Overrides `baseline.json`. |
 | `MAX_PARALLEL` | `3` | Maximum jobs running in parallel per group. |
 | `AUDIT_MAX_RETRIES` | `2` | Retry attempts per job on non-zero exit. |
 | `VERBOSE` | `0` | Set to `1` to print log size after each job completes. |
@@ -832,6 +834,13 @@ logs/artifacts, resolves the product register, runs
 `python3 -m lazy_vibe.register backfill`, regenerates the register report, and
 writes `docs/audit/register/baseline.json` with the reconciled run id and git
 sha. If an audit has no non-pass jobs, no ledger is written.
+
+For post-feature checks, `run-audit.sh --differential` reads that
+`baseline.json`, diffs the baseline SHA to `HEAD`, writes
+`RUN_DIR/artifacts/differential-scope.md` and
+`RUN_DIR/artifacts/differential-jobs.tsv`, and injects the changed-path scope
+into every selected prompt. Missing, corrupt, or stale baselines fail with an
+actionable message; pass `--full` to force the normal full job manifest.
 
 ---
 

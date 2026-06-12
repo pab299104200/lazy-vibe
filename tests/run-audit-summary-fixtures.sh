@@ -165,6 +165,145 @@ MAX_PARALLEL=1 \
 grep -q 'Tenant data is not scoped' "$audit_register/register.md" || fail "audit hook register report missing finding"
 grep -q '2026-06-12-launch-readiness-run' "$audit_register/baseline.json" || fail "baseline missing run id"
 
+differential_jobs="$tmp_root/differential-jobs.tsv"
+cat > "$differential_jobs" <<'EOF'
+group	job_id	kind	title	output	ref
+00	00-bootstrap	discovery	Bootstrap inventories	00-orchestrator-plan.md	PHASE 0
+01	01a-auth-sessions	discovery	Authentication and session handling	01-domain/01a-auth.md	PHASE 1A
+01	01b-tenant-isolation	discovery	Tenant isolation and RLS	01-domain/01b-tenant.md	PHASE 1B
+02	02a-backend-api	discovery	Backend API contracts	01-domain/02a-backend-api.md	PHASE 2A
+02	02b-frontend-browser	discovery	Frontend browser UX	01-domain/02b-frontend-browser.md	PHASE 2B
+03	03a-docs-contract	discovery	Documentation and API contracts	01-domain/03a-docs-contract.md	PHASE 3A
+14	14a-runtime-backend	runtime	Backend runtime tests	10-runtime-verification.md#Backend	PHASE 14A
+14	14b-runtime-frontend	runtime	Frontend runtime browser journeys	10-runtime-verification.md#Frontend	PHASE 14B
+16	16a-adversarial-security	adversarial	Security boundaries	13-adversarial-review.md#Security	PHASE 16A
+17	17-final-decision	final	Final release decision	14-final-release-decision.md	PHASE 17
+EOF
+
+diff_repo="$tmp_root/differential-repo"
+diff_run="$diff_repo/docs/audit/differential-run"
+diff_register="$diff_repo/docs/audit/register"
+mkdir -p "$diff_repo/backend" "$diff_repo/docs/api" "$diff_register" "$diff_run"
+git -C "$diff_repo" init -q
+git -C "$diff_repo" config user.email lazy-vibe@example.invalid
+git -C "$diff_repo" config user.name "Lazy Vibe Fixture"
+cat > "$diff_repo/backend/a.py" <<'EOF'
+def handler():
+    return {"ok": True}
+EOF
+cat > "$diff_repo/docs/api/routes.md" <<'EOF'
+# Routes
+EOF
+git -C "$diff_repo" add backend/a.py docs/api/routes.md
+git -C "$diff_repo" commit -q -m baseline
+baseline_sha="$(git -C "$diff_repo" rev-parse HEAD)"
+cat > "$diff_register/baseline.json" <<EOF
+{"git_sha": "$baseline_sha", "run_id": "baseline", "date": "2026-06-12"}
+EOF
+cat > "$diff_repo/backend/a.py" <<'EOF'
+def handler(account_id):
+    return {"account_id": account_id}
+EOF
+git -C "$diff_repo" add backend/a.py
+git -C "$diff_repo" commit -q -m "backend change"
+
+REPO_ROOT="$diff_repo" \
+RUN_DIR="$diff_run" \
+JOBS_FILE="$differential_jobs" \
+REGISTER_DIR="$diff_register" \
+AUDIT_REGISTER_RECONCILE=0 \
+ACCESSIBILITY_SCAN=0 \
+E2E_BROWSER_PROOF=0 \
+EXTERNAL_SERVICES_TEST=0 \
+LIGHTHOUSE_SCAN=0 \
+SAST_ENABLED=0 \
+"$SCRIPT_DIR/run-audit.sh" --dry-run --differential >/tmp/lazy-vibe-differential-backend.out 2>/tmp/lazy-vibe-differential-backend.err || {
+  sed -n '1,120p' /tmp/lazy-vibe-differential-backend.out >&2 || true
+  sed -n '1,160p' /tmp/lazy-vibe-differential-backend.err >&2 || true
+  fail "backend differential dry-run failed"
+}
+
+backend_selected="$diff_run/artifacts/differential-jobs.tsv"
+grep -q $'\t02a-backend-api\t' "$backend_selected" || fail "backend differential did not select backend API job"
+grep -q $'\t14a-runtime-backend\t' "$backend_selected" || fail "backend differential did not select backend runtime job"
+grep -q $'\t16a-adversarial-security\t' "$backend_selected" || fail "backend differential did not select security job"
+grep -q $'\t17-final-decision\t' "$backend_selected" || fail "backend differential did not select final gate"
+if grep -q $'\t14b-runtime-frontend\t' "$backend_selected"; then
+  fail "backend differential selected frontend runtime job"
+fi
+grep -q 'backend/a.py' "$diff_run/artifacts/differential-scope.md" || fail "backend differential scope missing changed path"
+grep -q 'changed endpoint, route, permission, state transition' "$diff_run/prompts/02a-backend-api.md" ||
+  fail "backend differential prompt missing scoped enumeration contract"
+
+docs_repo="$tmp_root/differential-docs-repo"
+docs_run="$docs_repo/docs/audit/differential-run"
+docs_register="$docs_repo/docs/audit/register"
+mkdir -p "$docs_repo/docs/api" "$docs_register" "$docs_run"
+git -C "$docs_repo" init -q
+git -C "$docs_repo" config user.email lazy-vibe@example.invalid
+git -C "$docs_repo" config user.name "Lazy Vibe Fixture"
+cat > "$docs_repo/docs/api/routes.md" <<'EOF'
+# Routes
+EOF
+git -C "$docs_repo" add docs/api/routes.md
+git -C "$docs_repo" commit -q -m baseline
+docs_baseline_sha="$(git -C "$docs_repo" rev-parse HEAD)"
+cat > "$docs_register/baseline.json" <<EOF
+{"git_sha": "$docs_baseline_sha", "run_id": "baseline", "date": "2026-06-12"}
+EOF
+cat > "$docs_repo/docs/api/routes.md" <<'EOF'
+# Routes
+
+GET /v1/accounts requires account:read.
+EOF
+git -C "$docs_repo" add docs/api/routes.md
+git -C "$docs_repo" commit -q -m "docs change"
+
+REPO_ROOT="$docs_repo" \
+RUN_DIR="$docs_run" \
+JOBS_FILE="$differential_jobs" \
+REGISTER_DIR="$docs_register" \
+AUDIT_REGISTER_RECONCILE=0 \
+ACCESSIBILITY_SCAN=0 \
+E2E_BROWSER_PROOF=0 \
+EXTERNAL_SERVICES_TEST=0 \
+LIGHTHOUSE_SCAN=0 \
+SAST_ENABLED=0 \
+"$SCRIPT_DIR/run-audit.sh" --dry-run --differential >/tmp/lazy-vibe-differential-docs.out 2>/tmp/lazy-vibe-differential-docs.err || {
+  sed -n '1,120p' /tmp/lazy-vibe-differential-docs.out >&2 || true
+  sed -n '1,160p' /tmp/lazy-vibe-differential-docs.err >&2 || true
+  fail "docs differential dry-run failed"
+}
+docs_selected="$docs_run/artifacts/differential-jobs.tsv"
+grep -q $'\t03a-docs-contract\t' "$docs_selected" || fail "docs differential did not select docs contract job"
+grep -q $'\t17-final-decision\t' "$docs_selected" || fail "docs differential did not select final gate"
+if grep -q $'\t14a-runtime-backend\t' "$docs_selected"; then
+  fail "docs differential selected backend runtime job"
+fi
+
+missing_repo="$tmp_root/differential-missing-baseline"
+missing_run="$missing_repo/docs/audit/differential-run"
+missing_register="$missing_repo/docs/audit/register"
+mkdir -p "$missing_repo/backend" "$missing_register" "$missing_run"
+git -C "$missing_repo" init -q
+git -C "$missing_repo" config user.email lazy-vibe@example.invalid
+git -C "$missing_repo" config user.name "Lazy Vibe Fixture"
+cat > "$missing_repo/backend/a.py" <<'EOF'
+print("x")
+EOF
+git -C "$missing_repo" add backend/a.py
+git -C "$missing_repo" commit -q -m baseline
+if REPO_ROOT="$missing_repo" \
+  RUN_DIR="$missing_run" \
+  JOBS_FILE="$differential_jobs" \
+  REGISTER_DIR="$missing_register" \
+  AUDIT_REGISTER_RECONCILE=0 \
+  "$SCRIPT_DIR/run-audit.sh" --dry-run --differential >/tmp/lazy-vibe-differential-missing.out 2>/tmp/lazy-vibe-differential-missing.err; then
+  fail "differential audit succeeded without baseline"
+fi
+grep -q 'Run a full audit first or rerun with --full' /tmp/lazy-vibe-differential-missing.err ||
+  fail "missing baseline error was not actionable"
+
 grep -q 'Your job is accurate dispositions, not finding count' "$SCRIPT_DIR/generic-shared.md" || fail "prompt calibration accuracy contract missing"
 grep -q 'Closest severity anchor must be cited' "$SCRIPT_DIR/generic-shared.md" || fail "severity anchors missing"
 if rg -n "If you find zero bugs|didn.t look hard|Red is good" "$SCRIPT_DIR"/generic-*.md >/tmp/lazy-vibe-prompt-calibration-grep.out 2>/tmp/lazy-vibe-prompt-calibration-grep.err; then

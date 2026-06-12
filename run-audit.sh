@@ -33,6 +33,9 @@ AUDIT_TOOLING_AUTO_INSTALL="${AUDIT_TOOLING_AUTO_INSTALL:-1}"
 AUDIT_TOOLING_VENV="${AUDIT_TOOLING_VENV:-$RUN_DIR/.audit-tooling/venv}"
 AUDIT_NODE_TOOLING_AUTO_INSTALL="${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}"
 AUDIT_NODE_TOOLING_DIR="${AUDIT_NODE_TOOLING_DIR:-$RUN_DIR/.audit-tooling/node}"
+AUDIT_DIFFERENTIAL="${AUDIT_DIFFERENTIAL:-0}"
+AUDIT_FULL="${AUDIT_FULL:-0}"
+AUDIT_BASELINE_SHA="${AUDIT_BASELINE_SHA:-}"
 AUDIT_BASE_URL="${AUDIT_BASE_URL:-}"
 AUDIT_BROWSER_BASE_URL="${AUDIT_BROWSER_BASE_URL:-}"
 ACCESSIBILITY_PATHS="${ACCESSIBILITY_PATHS:-/,/login}"
@@ -46,7 +49,7 @@ SAST_NPM_AUDIT_TIMEOUT="${SAST_NPM_AUDIT_TIMEOUT:-300}"
 
 usage() {
   cat <<'USAGE'
-Usage: run-audit.sh [--dry-run] [--verbose] [--rules FILE] [--from-group GROUP] [--to-group GROUP] [--only JOB_ID]
+Usage: run-audit.sh [--dry-run] [--verbose] [--differential] [--full] [--rules FILE] [--from-group GROUP] [--to-group GROUP] [--only JOB_ID]
 
 Environment:
   RUN_DIR              Output directory for this audit run.
@@ -61,6 +64,9 @@ Environment:
   AUDIT_REGISTER_RECONCILE
                        1 to reconcile RUN_DIR/00-blocker-ledger.tsv into REGISTER_DIR when present.
                        Defaults to 1. Set to 0 to disable the post-audit hook.
+  AUDIT_DIFFERENTIAL   1 to run only jobs affected by paths changed since docs/audit/register/baseline.json.
+                       Equivalent to --differential.
+  AUDIT_BASELINE_SHA   Optional explicit baseline SHA for --differential. Overrides baseline.json git_sha.
   JOBS_FILE            Job manifest TSV. Defaults to generic-jobs.tsv alongside the script (or jobs.tsv from the profile dir).
   SHARED_PROMPT        Shared job instructions. Defaults to generic-shared.md. Override with --rules or this env var.
   RUNNER               LLM runner to use: codex (default), claude, or gemini.
@@ -653,6 +659,16 @@ while (($#)); do
       ONLY_JOB="${2:?missing job id}"
       shift 2
       ;;
+    --differential)
+      AUDIT_DIFFERENTIAL=1
+      AUDIT_FULL=0
+      shift
+      ;;
+    --full)
+      AUDIT_FULL=1
+      AUDIT_DIFFERENTIAL=0
+      shift
+      ;;
     --rules)
       SHARED_PROMPT="${2:?missing rules file}"
       shift 2
@@ -705,6 +721,30 @@ mkdir -p "$RUN_DIR"/{prompts,logs,artifacts,01-domain,02-cross-cutting,03-spec-a
 CHECKPOINT_FILE="$RUN_DIR/completed-jobs.txt"
 RUNNER_UNAVAILABLE_FILE="$RUN_DIR/runner-unavailable.txt"
 
+prepare_differential_jobs() {
+  [[ "${AUDIT_FULL:-0}" == "1" ]] && return 0
+  [[ "${AUDIT_DIFFERENTIAL:-0}" == "1" ]] || return 0
+  if [[ -z "$REGISTER_DIR" ]]; then
+    printf 'Differential audit requires REGISTER_DIR or a product profile with Repo root. Run a full audit first or rerun with --full.\n' >&2
+    return 2
+  fi
+  local filtered_jobs="$RUN_DIR/artifacts/differential-jobs.tsv"
+  local args=(
+    --repo-root "$REPO_ROOT" \
+    --register-dir "$REGISTER_DIR" \
+    --jobs-file "$JOBS_FILE" \
+    --run-dir "$RUN_DIR" \
+    --out-jobs-file "$filtered_jobs"
+  )
+  if [[ -n "$AUDIT_BASELINE_SHA" ]]; then
+    args+=(--baseline-sha "$AUDIT_BASELINE_SHA")
+  fi
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.audit.differential "${args[@]}"
+  JOBS_FILE="$filtered_jobs"
+}
+
+prepare_differential_jobs
+
 if [[ -f "$RUNNER_UNAVAILABLE_FILE" && ( -n "$ONLY_JOB" || -n "$FROM_GROUP" || -n "$TO_GROUP" ) ]]; then
   prior_runner_unavailable_file="$RUN_DIR/runner-unavailable.$(date +%Y%m%d-%H%M%S).txt"
   mv "$RUNNER_UNAVAILABLE_FILE" "$prior_runner_unavailable_file"
@@ -755,6 +795,16 @@ $(cat "$SHARED_PROMPT")
 ## Product Profile
 
 $(if [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then cat "$PRODUCT_PROFILE"; else printf 'No product profile was provided. If this is a generic audit, infer cautiously from repo docs and mark assumptions explicitly.'; fi)
+
+$(if [[ "${AUDIT_DIFFERENTIAL:-0}" == "1" && -f "$RUN_DIR/artifacts/differential-scope.md" ]]; then cat <<DIFFSCOPE
+## Differential Audit Scope
+
+$(cat "$RUN_DIR/artifacts/differential-scope.md")
+
+Treat this as a scoped post-feature audit. Enumerate every changed endpoint, route, permission, state transition, documentation contract, and test boundary relevant to this job. If a category is untouched by the changed paths, say so explicitly and cite the changed-path list.
+
+DIFFSCOPE
+fi)
 
 ## Job Scope
 

@@ -89,3 +89,9 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   `lazy_vibe.audit.ledger` derives `RUN_DIR/00-blocker-ledger.tsv` from non-pass
   audit summary rows, logs, and output artifacts before the register backfill
   hook runs.
+- Plan 3 seventh slice: differential audit mode is landed. `run-audit.sh
+  --differential` validates `docs/audit/register/baseline.json`, computes
+  changed paths from baseline SHA to `HEAD`, writes
+  `artifacts/differential-jobs.tsv` and `artifacts/differential-scope.md`, and
+  injects the scoped changed-path contract into selected prompts. `--full`
+  bypasses differential selection.

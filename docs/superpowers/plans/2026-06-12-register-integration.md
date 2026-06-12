@@ -109,6 +109,8 @@ Tests:
 
 ## Task 4: Differential Audit Mode
 
+**Status:** landed in the seventh Plan 3 code slice.
+
 Implement `run-audit.sh --differential` as the cheap, scoped post-feature gate.
 
 Required behavior:
@@ -120,6 +122,16 @@ Required behavior:
 - Differential/feature-scoped audit prompts must enumerate changed endpoint,
   route, permission, state transition, docs, and tests exhaustively.
 - Full sweep remains available and reconciles through the register.
+
+Implementation notes:
+
+- `lazy_vibe.audit.differential` loads `baseline.json`, validates that the
+  baseline SHA is an ancestor of `HEAD`, computes changed paths, writes the
+  filtered job manifest, and records `artifacts/differential-scope.md`.
+- The runner injects the differential scope into every selected prompt so the
+  agent must enumerate changed endpoints, routes, permissions, state
+  transitions, docs, and tests for its scope.
+- `--full` disables differential selection and uses the normal full manifest.
 
 Tests:
 
