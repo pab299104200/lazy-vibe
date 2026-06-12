@@ -279,7 +279,7 @@ surfaces:
   # …
 severity_bar:
   P0: zero_open
-  P1: zero_open_or_risk_accepted_by: pete
+  P1: zero_open_or_risk_accepted   # risk acceptance is Pete-only by the state machine
   P2: triaged            # may be open, must not be `new`
 gates:
   - id: tests          # profile-listed test commands exit 0
