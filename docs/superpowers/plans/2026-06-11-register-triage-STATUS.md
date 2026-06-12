@@ -14,7 +14,7 @@
 | Task | Status | Commit |
 |---|---|---|
 | T1 packet generation | DONE, reviewed/approved | 1e7fd81 |
-| T2 result consumption | DONE (d93cd72) + FIX-FIRST in flight | fix commit pending |
+| T2 result consumption | DONE (d93cd72) + hardening landed, re-review pending | dec32e0 (suite 189) |
 | T3 policy engine | not started | |
 | T4 queue render | not started | |
 | T5 triage CLI + close | not started | |
@@ -22,8 +22,8 @@
 | T7 run-triage.sh + exports + README | not started | |
 | T8 Meridian dry-run | not started | |
 
-## In-flight: T2 fix (commit message "fix(register): close verifier-input attack paths, idempotent result consumption")
-If absent from git log, apply before T3: (C1) `_validate_result` rejects `duplicate_of == finding_id`; (C2) every `evidence` element must be a non-empty string, RegisterError naming index; (I3) duplicate-absorb target must be in {new, open, in_remediation, regressed} else RegisterError; (I1) `_absorb_duplicate_evidence` dedups on ref alone; (I2) processed result files MOVE to `triage/results/consumed/R-NNNN.json` (os.replace) so consume is idempotent — twice → one verification event. Adversarial test per fix, red-first. Expected suite ≈185.
+## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Plan test arithmetic re-derived: T3 203, T4 213, T5 220, T6 224, T7/final 225.
+Residual flagged for T4 review: duplicate_of naming a NONEXISTENT finding silently falls through to verified — consider surfacing loudly alongside the M3 markdown_cell check.
 
 ## Review carry-forwards (hold later tasks to these)
 - **T4 (queue):** every free-text cell AND evidence ref rendered into triage-queue.md must go through `store.markdown_cell` (verifier-supplied refs may contain `|`/newlines — injection vector flagged in T2 review).
