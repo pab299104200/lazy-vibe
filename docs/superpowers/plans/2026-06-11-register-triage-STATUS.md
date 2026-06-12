@@ -19,7 +19,7 @@
 | T4 queue render | DONE (4009584) + quality fixes landed 2aad3d7 — review CLOSED | 2aad3d7 (suite 236) |
 | T5 triage CLI + close | DONE (789b365) + quality fixes landed 04491b5 — review CLOSED | 04491b5 (suite 257) |
 | T6 scope journeys/claims_doc | DONE (f949c9c) — suite 260 (plan said 261; arithmetic defect: replaced 1 test with 4, net +3 not +4) | f949c9c |
-| T7 run-triage.sh + exports + README | not started | |
+| T7 run-triage.sh + exports + README | DONE (58de804) — suite 262 | 58de804 |
 | T8 Meridian dry-run | not started | |
 
 ## T2 hardening: LANDED in dec32e0 (all five review items + non-string duplicate_of/split_paths guards, result lifecycle via triage/results/consumed/). Re-review item LANDED in 066f427: duplicate claims bound to the solicited fuzzy candidate (`duplicate_of == _fuzzy_candidate(finding)`), closing both the unsolicited-claim hole AND the nonexistent-id silent fall-through (the residual previously flagged for T4 — now resolved).
@@ -35,7 +35,7 @@ Plan test arithmetic re-derived after T5 quality fixes: T2 192, T3 211, T4 236, 
 
 ## Review carry-forwards from T2 re-review (NOTE comments in verify.py)
 - **T5:** ~~VerifyOutcome buckets are per-run deltas, not a register census — verify-consume CLI summary must not present them as totals.~~ DONE in 789b365: `_cmd_verify_consume` prints "this run: …" deltas with a NOTE(T5) comment.
-- **T7:** `_archive_result` os.replace overwrites a prior consumed result on re-verification — consider run_id suffix or refuse-overwrite for per-run auditability.
+- **T7:** ~~`_archive_result` os.replace overwrites a prior consumed result on re-verification~~ DONE in 58de804: `_archive_result` now suffixes `R-NNNN.<unix_ts>.json` when the destination already exists — no prior verifier output is ever overwritten. Red-first test `test_archive_result_timestamps_collision` in test_verify.py.
 
 ## Review carry-forwards (hold later tasks to these)
 - **T4 (queue):** every free-text cell AND evidence ref rendered into triage-queue.md must go through `store.markdown_cell` (verifier-supplied refs may contain `|`/newlines — injection vector flagged in T2 review).
