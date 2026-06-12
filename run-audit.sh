@@ -10,6 +10,8 @@ JOBS_FILE="${JOBS_FILE:-}"
 PRODUCT_PROFILE="${PRODUCT_PROFILE:-}"
 PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 PROFILE="${PROFILE:-}"
+REGISTER_DIR="${REGISTER_DIR:-}"
+AUDIT_REGISTER_RECONCILE="${AUDIT_REGISTER_RECONCILE:-1}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/docs/audit/$(date +%Y-%m-%d)-launch-readiness-run}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
@@ -54,6 +56,11 @@ Environment:
                        Sets JOBS_FILE, PRODUCT_PROFILE, and SHARED_PROMPT (from shared.md in profile dir) if not already set.
   PROFILES_DIR         Directory containing named profile subdirectories. Defaults to profiles/ alongside the script.
   PRODUCT_PROFILE      Optional product profile markdown. Required for generic prompt usage.
+  REGISTER_DIR         Optional product register directory. Defaults to <Repo root>/docs/audit/register
+                       when register.jsonl exists or a product profile names a Repo root.
+  AUDIT_REGISTER_RECONCILE
+                       1 to reconcile RUN_DIR/00-blocker-ledger.tsv into REGISTER_DIR when present.
+                       Defaults to 1. Set to 0 to disable the post-audit hook.
   JOBS_FILE            Job manifest TSV. Defaults to generic-jobs.tsv alongside the script (or jobs.tsv from the profile dir).
   SHARED_PROMPT        Shared job instructions. Defaults to generic-shared.md. Override with --rules or this env var.
   RUNNER               LLM runner to use: codex (default), claude, or gemini.
@@ -675,6 +682,22 @@ if [[ -n "$PROFILE" ]]; then
   [[ -z "$JOBS_FILE" && -f "$_profile_dir/jobs.tsv" ]] && JOBS_FILE="$_profile_dir/jobs.tsv"
   [[ -z "$PRODUCT_PROFILE" && -f "$_profile_dir/product-profile.md" ]] && PRODUCT_PROFILE="$_profile_dir/product-profile.md"
   [[ "$SHARED_PROMPT" == "$SCRIPT_DIR/generic-shared.md" && -f "$_profile_dir/shared.md" ]] && SHARED_PROMPT="$_profile_dir/shared.md"
+fi
+
+repo_root_from_product_profile() {
+  local profile_file="$1"
+  sed -nE 's/^- Repo root:[[:space:]]*`?([^`]+)`?.*$/\1/p' \
+    "$profile_file" | head -1
+}
+
+if [[ -z "$REGISTER_DIR" && -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then
+  _profile_repo_root="$(repo_root_from_product_profile "$PRODUCT_PROFILE")"
+  if [[ -n "$_profile_repo_root" ]]; then
+    REGISTER_DIR="$_profile_repo_root/docs/audit/register"
+  fi
+fi
+if [[ -z "$REGISTER_DIR" && -f "$REPO_ROOT/docs/audit/register/register.jsonl" ]]; then
+  REGISTER_DIR="$REPO_ROOT/docs/audit/register"
 fi
 JOBS_FILE="${JOBS_FILE:-$SCRIPT_DIR/generic-jobs.tsv}"
 
@@ -2562,6 +2585,54 @@ write_run_summary() {
     --audit-runner "${AUDIT_RUNNER:-}"
 }
 
+audit_register_date() {
+  basename "$RUN_DIR" | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || date +%F
+}
+
+write_register_baseline() {
+  local register_dir="$1" run_id="$2" run_date="$3" sha
+  sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  python3 - "$register_dir/baseline.json" "$sha" "$run_id" "$run_date" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.write_text(json.dumps({
+    "git_sha": sys.argv[2],
+    "run_id": sys.argv[3],
+    "date": sys.argv[4],
+}, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+reconcile_audit_register() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  [[ "$AUDIT_REGISTER_RECONCILE" == "1" ]] || return 0
+  local ledger="$RUN_DIR/00-blocker-ledger.tsv"
+  [[ -s "$ledger" ]] || {
+    printf '[register] no audit blocker ledger found at %s; skipping reconcile\n' "$ledger"
+    return 0
+  }
+  if [[ -z "$REGISTER_DIR" ]]; then
+    printf '[register] blocker ledger exists but REGISTER_DIR could not be resolved\n' >&2
+    return 2
+  fi
+  local run_id run_date scope_args=()
+  run_id="$(basename "$RUN_DIR")"
+  run_date="$(audit_register_date)"
+  if [[ -f "$REGISTER_DIR/launch-scope.yaml" ]]; then
+    scope_args=(--scope "$REGISTER_DIR/launch-scope.yaml")
+  fi
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.register backfill \
+    --register-dir "$REGISTER_DIR" \
+    --ledger "$ledger" \
+    --run-id "$run_id" \
+    --date "$run_date" \
+    "${scope_args[@]}"
+  write_register_baseline "$REGISTER_DIR" "$run_id" "$run_date"
+}
+
 audit_summary_result_for_job() {
   local job_id="$1"
   local summary_file="$RUN_DIR/00-run-summary.tsv"
@@ -2662,4 +2733,5 @@ done
 
   write_ux_browser_gate_summary || true
 write_run_summary
+reconcile_audit_register
 printf 'Audit launcher complete. Run directory: %s\n' "$RUN_DIR"

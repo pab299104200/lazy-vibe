@@ -119,4 +119,38 @@ grep -q 'class=audit_output_missing' "$summary" || fail "missing-output class mi
 grep -q 'Remediation context' "$next_actions" || fail "next-actions context column missing"
 grep -q '02a-browser-e2e-summary.md' "$next_actions" || fail "native summary not linked in next actions"
 
+audit_repo="$tmp_root/audit-register-repo"
+audit_run="$audit_repo/docs/audit/2026-06-12-launch-readiness-run"
+audit_register="$audit_repo/docs/audit/register"
+audit_jobs="$tmp_root/register-jobs.tsv"
+mkdir -p "$audit_run" "$audit_register"
+cat > "$audit_jobs" <<'EOF'
+group	job_id	kind	title	output	ref
+EOF
+cat > "$audit_register/themes.yaml" <<'EOF'
+themes:
+  tenant_scope_missing:
+    patterns: ["tenant"]
+EOF
+cat > "$audit_run/00-blocker-ledger.tsv" <<'EOF'
+blocker_id	category	theme	severity	group	model_class	finding_count	representative_source	representative_line	representative_title	raw_px_ids	references
+B-0001	product_gap	tenant_scope_missing	P1	security-auth	high-risk	1	backend/a.py	10	Tenant data is not scoped	P1-0001	01a:backend/a.py:10
+EOF
+
+REPO_ROOT="$audit_repo" \
+RUN_DIR="$audit_run" \
+JOBS_FILE="$audit_jobs" \
+REGISTER_DIR="$audit_register" \
+MAX_PARALLEL=1 \
+"$SCRIPT_DIR/run-audit.sh" >/tmp/lazy-vibe-audit-register-fixture.out 2>/tmp/lazy-vibe-audit-register-fixture.err || {
+  sed -n '1,120p' /tmp/lazy-vibe-audit-register-fixture.out >&2 || true
+  sed -n '1,160p' /tmp/lazy-vibe-audit-register-fixture.err >&2 || true
+  fail "audit register reconcile hook failed"
+}
+
+[[ -s "$audit_register/register.jsonl" ]] || fail "audit hook did not write register.jsonl"
+[[ -s "$audit_register/baseline.json" ]] || fail "audit hook did not write baseline.json"
+grep -q 'Tenant data is not scoped' "$audit_register/register.md" || fail "audit hook register report missing finding"
+grep -q '2026-06-12-launch-readiness-run' "$audit_register/baseline.json" || fail "baseline missing run id"
+
 printf 'PASS audit summary fixtures\n'

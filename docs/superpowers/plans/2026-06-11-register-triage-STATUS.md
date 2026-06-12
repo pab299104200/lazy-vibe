@@ -71,3 +71,8 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   Plan 3 work: audit ingest/reconcile hook, differential audit mode (spec §8),
   feature-build postcheck, prompt calibration + skill retirement (§9/§10),
   collision auto-split.
+- Plan 3 third slice: `run-audit.sh` now resolves `REGISTER_DIR` and reconciles
+  `RUN_DIR/00-blocker-ledger.tsv` into the product register when that ledger is
+  present, then writes `baseline.json`. This is the safe hook point; audit-native
+  blocker-ledger generation remains to be implemented before every audit run can
+  reconcile without a remediation-generated ledger.
