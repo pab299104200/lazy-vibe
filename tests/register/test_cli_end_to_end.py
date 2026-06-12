@@ -1,5 +1,7 @@
 """End-to-end: two audit runs through the CLI demonstrate convergence
 (suppression of adjudicated findings, regression detection)."""
+import os
+import stat
 import json
 import subprocess
 import sys
@@ -376,8 +378,6 @@ def test_close_rejects_malformed_test_format(workspace):
 # Task 7: run-triage.sh dispatch wrapper smoke test
 # ---------------------------------------------------------------------------
 
-import os
-import stat
 
 
 def test_run_triage_sh_dispatches_stub_agent(workspace, tmp_path):
