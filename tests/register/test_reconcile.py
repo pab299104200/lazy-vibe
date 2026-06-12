@@ -168,6 +168,41 @@ def test_within_run_duplicate_higher_severity_escalates(store):
     assert loaded.occurrences == 1
 
 
+def test_same_fingerprint_divergent_evidence_splits_collision(store):
+    first = reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    assert [f.finding_id for f in first.new] == ["R-0001"]
+
+    collision = cand(blocker_id="B-0099", line="240",
+                     title="Admin export leaks billing records",
+                     references="backend/routers/evidence.py:240",
+                     run_id="next-run")
+    result = reconcile(store, [collision], VOCAB, run_id="next-run", date=DATE)
+
+    assert [f.finding_id for f in result.new] == ["R-0002"]
+    assert result.collisions == [("R-0002", "R-0001")]
+    findings = store.load()
+    assert findings["R-0001"].occurrences == 1
+    split = findings["R-0002"]
+    assert split.history[-1]["event"] == "collision"
+    assert split.history[-1]["collided_with"] == "R-0001"
+    assert split.history[-1]["ref"] == "backend/routers/evidence.py:240"
+    assert split.fingerprint_inputs["symbol"] == "-#collision:240"
+
+
+def test_collision_rerun_is_idempotent(store):
+    reconcile(store, [cand()], VOCAB, run_id=RUN, date=DATE)
+    collision = cand(blocker_id="B-0099", line="240",
+                     title="Admin export leaks billing records",
+                     references="backend/routers/evidence.py:240",
+                     run_id="next-run")
+    reconcile(store, [collision], VOCAB, run_id="next-run", date=DATE)
+    replay = reconcile(store, [collision], VOCAB, run_id="next-run", date=DATE)
+
+    assert replay.new == []
+    assert replay.collisions == []
+    assert set(store.load()) == {"R-0001", "R-0002"}
+
+
 def test_replay_does_not_duplicate_severity_review(store):
     f = existing(disposition="open", disposition_by="pete",
                  severity="P2", severity_source="adjudicated")

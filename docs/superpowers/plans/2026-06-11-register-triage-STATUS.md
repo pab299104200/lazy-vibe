@@ -76,3 +76,7 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   present, then writes `baseline.json`. This is the safe hook point; audit-native
   blocker-ledger generation remains to be implemented before every audit run can
   reconcile without a remediation-generated ledger.
+- Plan 3 fourth slice: reconciler collision auto-split is landed. Same
+  fingerprint plus materially divergent evidence/title now creates a new split
+  finding with a `collision` history event, and rerunning the same collision is
+  idempotent.

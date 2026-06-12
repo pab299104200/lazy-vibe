@@ -175,6 +175,8 @@ Tests:
 
 ## Task 7: Collision Auto-Split
 
+**Status:** landed in the fourth Plan 3 code slice.
+
 Finish the spec §12 collision path.
 
 Required behavior:
@@ -187,7 +189,7 @@ Required behavior:
 
 Tests:
 
-- Two candidates with the same fingerprint but divergent evidence split.
+- Two candidates with the same fingerprint but divergent evidence/title split.
 - Re-running the same collision is idempotent.
 
 ## Done Criteria

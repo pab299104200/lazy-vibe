@@ -1,7 +1,7 @@
 """Deterministic reconciler: run candidates vs register (spec §5)."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .fingerprint import compute, jaccard, normalize_path, title_tokens
@@ -28,6 +28,7 @@ class ReconcileResult:
     merged: list[Finding] = field(default_factory=list)
     regressed: list[Finding] = field(default_factory=list)
     fuzzy: list[tuple[str, str]] = field(default_factory=list)  # (new_id, existing_id)
+    collisions: list[tuple[str, str]] = field(default_factory=list)
     theme_candidates: set[str] = field(default_factory=set)
     # Post-reconcile register state, captured inside the lock so callers
     # render the report without an unlocked second store.load().
@@ -44,11 +45,38 @@ def _bump_seen(finding: Finding, run_id: str, date: str) -> None:
 
 
 def _merge_evidence(finding: Finding, candidate: Candidate) -> None:
-    ref = f"{normalize_path(candidate.path)}:{candidate.line}"
+    ref = _candidate_ref(candidate)
     seen = {(e["ref"], e["run_id"]) for e in finding.evidence}
     if (ref, candidate.run_id) not in seen:
         finding.evidence.append({"type": "audit", "ref": ref,
                                  "run_id": candidate.run_id})
+
+
+def _candidate_ref(candidate: Candidate) -> str:
+    return f"{normalize_path(candidate.path)}:{candidate.line}"
+
+
+def _evidence_refs(finding: Finding) -> set[str]:
+    return {e["ref"] for e in finding.evidence}
+
+
+def _is_collision(existing: Finding, candidate: Candidate) -> bool:
+    if _candidate_ref(candidate) in _evidence_refs(existing):
+        return False
+    score = jaccard(title_tokens(candidate.title), title_tokens(existing.title))
+    return score < FUZZY_THRESHOLD
+
+
+def _existing_collision(findings: dict[str, Finding], existing: Finding,
+                        candidate: Candidate) -> Finding | None:
+    ref = _candidate_ref(candidate)
+    for finding in findings.values():
+        for event in finding.history:
+            if (event.get("event") == "collision"
+                    and event.get("collided_with") == existing.finding_id
+                    and event.get("ref") == ref):
+                return finding
+    return None
 
 
 def _review_severity(finding: Finding, candidate: Candidate, date: str) -> None:
@@ -118,6 +146,21 @@ def _create_finding(findings: dict[str, Finding], candidate: Candidate,
     return finding
 
 
+def _create_collision_finding(findings: dict[str, Finding], candidate: Candidate,
+                              theme: str, run_id: str, date: str,
+                              existing: Finding, original_fingerprint: str) -> Finding:
+    symbol = f"{candidate.symbol}#collision:{candidate.line}"
+    split_candidate = replace(candidate, symbol=symbol)
+    finding = _create_finding(findings, split_candidate, theme, run_id, date)
+    finding.history.append({"ts": _now(date),
+                            "event": "collision",
+                            "collided_with": existing.finding_id,
+                            "original_fingerprint": original_fingerprint,
+                            "ref": _candidate_ref(candidate),
+                            "run_id": run_id})
+    return finding
+
+
 def reconcile(store: RegisterStore, candidates: list[Candidate],
               vocab: dict[str, list[str]], *, run_id: str,
               date: str, scope: Scope | None = None) -> ReconcileResult:
@@ -132,9 +175,30 @@ def reconcile(store: RegisterStore, candidates: list[Candidate],
             fingerprint = compute(candidate.category, theme, candidate.path,
                                   candidate.symbol)
             existing = index.get(fingerprint)
-            # Fingerprint collision splitting (spec §12) requires the
-            # verifier machinery — plan 2.
             if existing is not None:
+                if _is_collision(existing, candidate):
+                    collision = _existing_collision(findings, existing, candidate)
+                    if collision is not None:
+                        if collision.last_seen.get("run_id") != run_id:
+                            _bump_seen(collision, run_id, date)
+                            _merge_evidence(collision, candidate)
+                            _review_severity(collision, candidate, date)
+                            result.merged.append(collision)
+                        continue
+                    new = _create_collision_finding(
+                        findings, candidate, theme, run_id, date, existing,
+                        fingerprint)
+                    if scope is not None:
+                        new.in_scope = _scope_matches(new, scope)
+                        if not new.in_scope:
+                            transition(new, Disposition.PARKED, by="scope",
+                                       reason="outside launch scope at creation",
+                                       now=_now(date))
+                    findings[new.finding_id] = new
+                    index[new.fingerprint] = new
+                    result.new.append(new)
+                    result.collisions.append((new.finding_id, existing.finding_id))
+                    continue
                 if existing.last_seen.get("run_id") == run_id:
                     # Within-run duplicate fingerprint or same-run replay:
                     # record extra evidence and severity signal only — never
@@ -229,6 +293,14 @@ def render_report(result: ReconcileResult, findings: dict[str, Finding],
         for f in result.suppressed:
             lines.append(f"- {f.finding_id} ({f.disposition}, "
                          f"x{f.occurrences}) {markdown_cell(f.title)}")
+        lines.append("")
+    if result.collisions:
+        lines += ["## Collision splits", "",
+                  "Same fingerprint inputs, materially different evidence/title.", ""]
+        for new_id, existing_id in result.collisions:
+            new = findings[new_id]
+            lines.append(f"- **{new_id}** split from `{existing_id}`: "
+                         f"{markdown_cell(new.title)}")
         lines.append("")
     if result.theme_candidates:
         lines += ["## Theme vocabulary candidates", "",
