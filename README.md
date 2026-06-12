@@ -341,6 +341,8 @@ Splits the launch-readiness audit into parallel job batches, builds one bounded 
 | `AUDIT_DIFFERENTIAL` | `0` | Set to `1` or pass `--differential` to load `docs/audit/register/baseline.json`, compute changed paths from baseline SHA to `HEAD`, and run only the affected audit jobs plus the cheap final gates. |
 | `AUDIT_BASELINE_SHA` | — | Optional explicit baseline SHA for differential mode. Overrides `baseline.json`. |
 | `AUDIT_DIFFERENTIAL_INCLUDE_WORKTREE` | `0` | Include staged, unstaged, and untracked worktree paths in differential job selection. Feature-build postchecks set this automatically because they run before auto-commit. |
+| `AUDIT_REGISTER_CONTEXT` | `1` | Inject compact open/suppressed register context into every audit prompt when `REGISTER_DIR/register.jsonl` exists. Set to `0` to disable. |
+| `AUDIT_REGISTER_CONTEXT_LIMIT` | `40` | Maximum open and suppressed register entries shown in prompt context. |
 | `MAX_PARALLEL` | `3` | Maximum jobs running in parallel per group. |
 | `AUDIT_MAX_RETRIES` | `2` | Retry attempts per job on non-zero exit. |
 | `VERBOSE` | `0` | Set to `1` to print log size after each job completes. |
@@ -848,6 +850,12 @@ unstaged, and untracked worktree paths when
 `RUN_DIR/artifacts/differential-jobs.tsv`, and injects the changed-path scope
 into every selected prompt. Missing, corrupt, or stale baselines fail with an
 actionable message; pass `--full` to force the normal full job manifest.
+
+When `REGISTER_DIR/register.jsonl` exists, audit prompts also receive
+`RUN_DIR/artifacts/register-context.md`: a capped list of in-scope active
+findings plus adjudicated suppressed/fixed entries. Agents use it to avoid
+re-reporting known register items unless current-code evidence is materially
+different.
 
 ---
 

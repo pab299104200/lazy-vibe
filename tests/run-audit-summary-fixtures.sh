@@ -304,6 +304,36 @@ fi
 grep -q 'Run a full audit first or rerun with --full' /tmp/lazy-vibe-differential-missing.err ||
   fail "missing baseline error was not actionable"
 
+context_repo="$tmp_root/register-context-repo"
+context_run="$context_repo/docs/audit/context-run"
+context_register="$context_repo/docs/audit/register"
+context_jobs="$tmp_root/register-context-jobs.tsv"
+mkdir -p "$context_repo" "$context_run" "$context_register"
+cat > "$context_jobs" <<'EOF'
+group	job_id	kind	title	output	ref
+01	01a-context	discovery	Context check	01-domain/01a-context.md	PHASE 1A
+EOF
+cat > "$context_register/register.jsonl" <<'EOF'
+{"description":"Known active issue","disposition":"new","disposition_by":"ingest","disposition_reason":"","evidence":[{"ref":"backend/a.py:10"}],"fingerprint":"sha256:11111111111111111111111111111111","fingerprint_inputs":{"category":"product_gap","path":"backend/a.py","symbol":"handler","theme":"tenant_scope_missing"},"finding_id":"R-0001","first_seen":{"date":"2026-06-12","run_id":"r1"},"history":[],"in_scope":true,"last_seen":{"date":"2026-06-12","run_id":"r1"},"occurrences":3,"regression_test":null,"review_by":null,"severity":"P1","severity_source":"proposed","taxonomy":"B","title":"Known active tenant scope issue"}
+{"description":"Known false positive","disposition":"false_positive","disposition_by":"pete","disposition_reason":"Not exploitable in current design","evidence":[{"ref":"backend/b.py:20"}],"fingerprint":"sha256:22222222222222222222222222222222","fingerprint_inputs":{"category":"evidence_gap","path":"backend/b.py","symbol":"collector","theme":"browser_evidence_missing"},"finding_id":"R-0002","first_seen":{"date":"2026-06-12","run_id":"r1"},"history":[{"event":"disposition","from":"new","to":"false_positive"}],"in_scope":true,"last_seen":{"date":"2026-06-12","run_id":"r1"},"occurrences":5,"regression_test":null,"review_by":null,"severity":"P2","severity_source":"adjudicated","taxonomy":"G","title":"Known adjudicated browser evidence false positive"}
+EOF
+
+REPO_ROOT="$context_repo" \
+RUN_DIR="$context_run" \
+JOBS_FILE="$context_jobs" \
+REGISTER_DIR="$context_register" \
+"$SCRIPT_DIR/run-audit.sh" --dry-run >/tmp/lazy-vibe-register-context.out 2>/tmp/lazy-vibe-register-context.err || {
+  sed -n '1,120p' /tmp/lazy-vibe-register-context.out >&2 || true
+  sed -n '1,160p' /tmp/lazy-vibe-register-context.err >&2 || true
+  fail "register context dry-run failed"
+}
+grep -q 'Known active tenant scope issue' "$context_run/prompts/01a-context.md" ||
+  fail "audit prompt missing active register context"
+grep -q 'Known adjudicated browser evidence false positive' "$context_run/prompts/01a-context.md" ||
+  fail "audit prompt missing suppressed register context"
+grep -q 'Do not report a new finding that is materially identical' "$context_run/prompts/01a-context.md" ||
+  fail "audit prompt missing duplicate suppression instruction"
+
 grep -q 'Your job is accurate dispositions, not finding count' "$SCRIPT_DIR/generic-shared.md" || fail "prompt calibration accuracy contract missing"
 grep -q 'Closest severity anchor must be cited' "$SCRIPT_DIR/generic-shared.md" || fail "severity anchors missing"
 if rg -n "If you find zero bugs|didn.t look hard|Red is good" "$SCRIPT_DIR"/generic-*.md >/tmp/lazy-vibe-prompt-calibration-grep.out 2>/tmp/lazy-vibe-prompt-calibration-grep.err; then

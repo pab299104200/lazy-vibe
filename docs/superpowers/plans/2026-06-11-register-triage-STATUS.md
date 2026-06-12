@@ -101,3 +101,8 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   register triage and remediation when the register has `new`, `open`, or
   `regressed` entries. The hook preserves the product-profile environment and
   can be disabled with `FEATURE_BUILD_POSTCHECK=0`.
+- Plan 3 ninth slice: compact register prompt context is landed. `run-audit.sh`
+  writes `artifacts/register-context.md` from in-scope active and adjudicated
+  register entries and injects it into every audit prompt so agents do not
+  re-report known open/suppressed findings without materially different current
+  evidence. Meridian skill rewiring still remains.

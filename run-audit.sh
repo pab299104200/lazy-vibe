@@ -12,6 +12,8 @@ PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 PROFILE="${PROFILE:-}"
 REGISTER_DIR="${REGISTER_DIR:-}"
 AUDIT_REGISTER_RECONCILE="${AUDIT_REGISTER_RECONCILE:-1}"
+AUDIT_REGISTER_CONTEXT="${AUDIT_REGISTER_CONTEXT:-1}"
+AUDIT_REGISTER_CONTEXT_LIMIT="${AUDIT_REGISTER_CONTEXT_LIMIT:-40}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/docs/audit/$(date +%Y-%m-%d)-launch-readiness-run}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
@@ -65,6 +67,11 @@ Environment:
   AUDIT_REGISTER_RECONCILE
                        1 to reconcile RUN_DIR/00-blocker-ledger.tsv into REGISTER_DIR when present.
                        Defaults to 1. Set to 0 to disable the post-audit hook.
+  AUDIT_REGISTER_CONTEXT
+                       1 to inject compact open/suppressed register context into audit prompts when
+                       REGISTER_DIR/register.jsonl exists. Defaults to 1.
+  AUDIT_REGISTER_CONTEXT_LIMIT
+                       Max open and suppressed register rows shown in prompt context. Defaults to 40.
   AUDIT_DIFFERENTIAL   1 to run only jobs affected by paths changed since docs/audit/register/baseline.json.
                        Equivalent to --differential.
   AUDIT_BASELINE_SHA   Optional explicit baseline SHA for --differential. Overrides baseline.json git_sha.
@@ -723,6 +730,18 @@ JOBS_FILE="${JOBS_FILE:-$SCRIPT_DIR/generic-jobs.tsv}"
 mkdir -p "$RUN_DIR"/{prompts,logs,artifacts,01-domain,02-cross-cutting,03-spec-additions}
 CHECKPOINT_FILE="$RUN_DIR/completed-jobs.txt"
 RUNNER_UNAVAILABLE_FILE="$RUN_DIR/runner-unavailable.txt"
+REGISTER_CONTEXT_FILE="$RUN_DIR/artifacts/register-context.md"
+
+prepare_register_context() {
+  [[ "${AUDIT_REGISTER_CONTEXT:-1}" == "1" ]] || return 0
+  [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]] || return 0
+  PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m lazy_vibe.audit.register_context \
+    --register-dir "$REGISTER_DIR" \
+    --out "$REGISTER_CONTEXT_FILE" \
+    --limit "$AUDIT_REGISTER_CONTEXT_LIMIT"
+}
+
+prepare_register_context
 
 prepare_differential_jobs() {
   [[ "${AUDIT_FULL:-0}" == "1" ]] && return 0
@@ -801,6 +820,14 @@ $(cat "$SHARED_PROMPT")
 ## Product Profile
 
 $(if [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then cat "$PRODUCT_PROFILE"; else printf 'No product profile was provided. If this is a generic audit, infer cautiously from repo docs and mark assumptions explicitly.'; fi)
+
+$(if [[ -f "${REGISTER_CONTEXT_FILE:-}" ]]; then cat <<REGCTX
+## Register Context
+
+$(cat "$REGISTER_CONTEXT_FILE")
+
+REGCTX
+fi)
 
 $(if [[ "${AUDIT_DIFFERENTIAL:-0}" == "1" && -f "$RUN_DIR/artifacts/differential-scope.md" ]]; then cat <<DIFFSCOPE
 ## Differential Audit Scope

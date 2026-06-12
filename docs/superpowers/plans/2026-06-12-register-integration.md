@@ -177,8 +177,9 @@ Tests:
 
 ## Task 6: Prompt Calibration And Skill Consolidation
 
-**Status:** prompt calibration landed in the fifth Plan 3 code slice; Meridian
-skill retirement/rewiring remains.
+**Status:** prompt calibration landed in the fifth Plan 3 code slice; compact
+register prompt context landed in the ninth Plan 3 code slice; Meridian skill
+retirement/rewiring remains.
 
 Remove finding-count incentives and make accurate dispositions the central
 prompt contract.
@@ -197,8 +198,8 @@ Tests:
 
 - Text fixture proves the accuracy contract and severity anchors are present
   and rejects old "finding count equals effort" language.
-- Remaining: prompt fixture proves suppressed fingerprints are included and
-  capped.
+- Prompt fixture proves active and adjudicated suppressed register entries are
+  included in generated audit prompts.
 
 ## Task 7: Collision Auto-Split
 
