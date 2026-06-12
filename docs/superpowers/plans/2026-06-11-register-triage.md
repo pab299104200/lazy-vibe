@@ -318,6 +318,8 @@ git commit -m "feat(register): deterministic verification packet generation"
 Read each `R-NNNN.json`, schema-validate (deterministic fields only — `confidence` is omitted by contract), append a `verification` history event, and act: UNSUPPORTED proposes `false_positive`; a confirmed `duplicate_of` proposes `false_positive` referencing the original (the original absorbs the evidence); `split` appends a `split_proposed` event for the queue. VERIFIED leaves the finding `new` with a `verification` event marking it verifier-passed (policy/Pete still own the open transition). Malformed results are rejected loudly. The verifier NEVER transitions a protected state.
 
 > **Quality-review hardening (post-implementation):** verifier output is treated as untrusted input. `_validate_result` rejects a self-referential `duplicate_of` (C1), non-string evidence elements named by index (C2), and non-string `duplicate_of`/`split_paths` (same root cause — a list `duplicate_of` crashed the batch with an unhashable TypeError). Duplicate absorb is restricted to targets in `{new, open, in_remediation, regressed}` so a verifier-controlled `duplicate_of` can never modify an adjudicated entry or pre-seed refs that suppress reopen proposals (I3); absorb dedups on ref alone (I1). Consumption is idempotent via a result-file lifecycle: after the register save succeeds, processed results (including stray results for non-new findings) are moved to `triage/results/consumed/R-NNNN.json` via `os.replace`, so re-runs find no pending results (I2). Validation failures leave the file in place and abort the batch before save.
+>
+> **Re-review (candidate binding):** a duplicate claim is only valid for the candidate the packet solicited — `_apply_verdict` requires `duplicate_of == _fuzzy_candidate(finding)` (the same helper `_render_packet` uses to pin the packet's duplicate question). Any other non-null `duplicate_of` (unsolicited target, nonexistent id, or a claim when the packet pinned null) raises "unsolicited duplicate claim"; a pinned candidate missing from the register raises "not in register" instead of the old silent fall-through to verified. Carry-forwards: `_archive_result` overwrites a prior consumed result on re-verification (Task 7 owner: consider run_id suffix or refuse-overwrite); `VerifyOutcome` buckets are per-run deltas, not a register census (Task 5 owner: the verify-consume summary must not present them as totals).
 
 **Files:**
 - Modify: `lazy_vibe/register/verify.py`
@@ -514,6 +516,8 @@ def test_consume_refuses_duplicate_absorb_into_adjudicated(store):  # I3
                                      disposition="false_positive",
                                      disposition_by="pete"))
     dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    dup.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                        "candidate_of": "R-0001", "run_id": "run1"})
     store.save({orig.finding_id: orig, dup.finding_id: dup})
     _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
                   evidence=["y.py:9"])
@@ -530,6 +534,8 @@ def test_consume_duplicate_absorb_into_active_target(store):  # I3
     orig = with_history(make_finding(finding_id="R-0001", disposition="open",
                                      disposition_by="pete"))
     dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    dup.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                        "candidate_of": "R-0001", "run_id": "run1"})
     store.save({orig.finding_id: orig, dup.finding_id: dup})
     _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
                   evidence=["y.py:9"])
@@ -543,6 +549,8 @@ def test_consume_duplicate_absorb_into_active_target(store):  # I3
 def test_absorb_dedups_on_ref_alone(store):  # I1
     orig = _new("R-0001")
     dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    dup.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                        "candidate_of": "R-0001", "run_id": "run1"})
     store.save({orig.finding_id: orig, dup.finding_id: dup})
     # duplicate cites the exact ref the original already carries, but from a
     # different run -- (ref, run_id) keying would wrongly re-append it
@@ -588,6 +596,54 @@ def test_stray_result_for_non_new_is_archived(store):  # I2
     _write_result(store, "R-0001", verdict="UNSUPPORTED", evidence=["x.py:1"])
     consume_results(store)
     assert not result_path(store, "R-0001").exists()  # stray result archived
+
+
+# --- Re-review: duplicate claims bound to the solicited fuzzy candidate ---
+
+def test_consume_rejects_unsolicited_duplicate_claim(store):
+    # packet pinned duplicate_of: null (no fuzzy candidate) -- the verifier
+    # cannot close its own finding by naming an arbitrary real target
+    f = _new("R-0001")
+    other = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({f.finding_id: f, other.finding_id: other})
+    _write_result(store, "R-0001", verdict="VERIFIED", duplicate_of="R-0002")
+    with pytest.raises(RegisterError, match="unsolicited duplicate claim"):
+        consume_results(store)
+    findings = store.load()
+    assert findings["R-0001"].disposition == "new"  # both findings untouched
+    assert last_verification(findings["R-0001"]) is None
+    refs = {e["ref"] for e in findings["R-0002"].evidence}
+    assert "x.py:1" not in refs  # no evidence injected into the named target
+    assert result_path(store, "R-0001").exists()  # nothing archived
+
+
+def test_consume_rejects_duplicate_claim_for_wrong_candidate(store):
+    # packet pinned R-0001; the verifier names a different (here nonexistent)
+    # id -- previously a nonexistent duplicate_of vanished silently
+    orig = _new("R-0001")
+    f = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    f.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                      "candidate_of": "R-0001", "run_id": "run1"})
+    store.save({orig.finding_id: orig, f.finding_id: f})
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0004")
+    with pytest.raises(RegisterError, match="unsolicited duplicate claim"):
+        consume_results(store)
+    assert store.load()["R-0002"].disposition == "new"
+    assert result_path(store, "R-0002").exists()  # nothing archived
+
+
+def test_consume_rejects_pinned_candidate_missing_from_register(store):
+    # register inconsistency: the pinned candidate id does not exist; a
+    # matching duplicate claim must still fail loudly, never fall through
+    # silently to verified (the pre-binding behavior)
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                      "candidate_of": "R-0099", "run_id": "run1"})
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED", duplicate_of="R-0099")
+    with pytest.raises(RegisterError, match="not in register"):
+        consume_results(store)
+    assert store.load()["R-0001"].disposition == "new"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -618,6 +674,10 @@ def consumed_result_path(store: RegisterStore, finding_id: str) -> Path:
 
 @dataclass
 class VerifyOutcome:
+    # NOTE(Task 5): these buckets are "changed/observed THIS run", not a
+    # register census — a re-run after full consumption legitimately returns
+    # all-empty buckets. The verify-consume CLI summary must present them as
+    # per-run deltas, never as register totals.
     verified: list[str] = field(default_factory=list)
     false_positive: list[str] = field(default_factory=list)
     split: list[str] = field(default_factory=list)
@@ -709,6 +769,10 @@ def _absorb_duplicate_evidence(original, dup_result: dict, run_id: str) -> None:
 
 
 def _archive_result(store: RegisterStore, finding_id: str) -> None:
+    # NOTE(Task 7): os.replace overwrites a previously consumed result on
+    # re-verification — the prior verifier output is lost. When run-triage.sh
+    # lands, consider a run_id suffix (R-NNNN.<run_id>.json) or
+    # refuse-overwrite so consumed results stay auditable per run.
     dst = consumed_result_path(store, finding_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
     os.replace(result_path(store, finding_id), dst)
@@ -766,8 +830,22 @@ def _apply_verdict(findings, finding, data, now, run_id,
                                 "by": "agent:verifier"})
         outcome.split.append(finding.finding_id)
         return
-    if verdict == "VERIFIED" and dup and dup in findings:
-        original = findings[dup]
+    if verdict == "VERIFIED" and dup is not None:
+        # A duplicate claim is only valid for the candidate the packet
+        # solicited (the reconciler's fuzzy_match_candidate). Anything else —
+        # an unsolicited target, a nonexistent id, or a dup when the packet
+        # pinned null — is the verifier closing its own finding via an
+        # unconfirmed claim, rejected loudly.
+        candidate = _fuzzy_candidate(finding)
+        if dup != candidate:
+            raise RegisterError(
+                f"{finding.finding_id}: unsolicited duplicate claim {dup!r}; "
+                f"packet pinned {candidate!r}")
+        original = findings.get(dup)
+        if original is None:
+            raise RegisterError(
+                f"{finding.finding_id}: duplicate target {dup} not in "
+                f"register — fuzzy candidate references a missing finding")
         if original.disposition not in _ABSORB_TARGETS:
             raise RegisterError(
                 f"{finding.finding_id}: duplicate target {dup} is adjudicated "
@@ -794,7 +872,7 @@ Add `from .model import Disposition as _D` to the top imports.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_verify.py -v` then `python3 -m pytest tests/register -q` — expect **189 passed** (168 from Task 1 + 11 consumption tests + 10 quality-review hardening tests; downstream task totals below are shifted +10 accordingly).
+Run: `python3 -m pytest tests/register/test_verify.py -v` then `python3 -m pytest tests/register -q` — expect **192 passed** (168 from Task 1 + 11 consumption tests + 10 quality-review hardening tests + 3 candidate-binding tests; downstream task totals below are shifted +13 accordingly).
 
 - [ ] **Step 5: Commit**
 
@@ -1186,7 +1264,7 @@ def test_verified_match_requires_verified_event(store, policy):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytest tests/register -q` — expect **203 passed**.
+Run: `python3 -m pytest tests/register/test_policy.py -v` then `python3 -m pytest tests/register -q` — expect **206 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -1483,7 +1561,7 @@ def render_queue(items: list[QueueItem], *, product: str) -> str:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **213 passed**.
+Run: `python3 -m pytest tests/register/test_queue.py -v` then `python3 -m pytest tests/register -q` — expect **216 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -1887,7 +1965,7 @@ to `cli.py`'s imports (top of file). Add the subparsers in `build_parser`:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_queue.py tests/register/test_cli_end_to_end.py -v` then `python3 -m pytest tests/register -q` — expect **220 passed**.
+Run: `python3 -m pytest tests/register/test_queue.py tests/register/test_cli_end_to_end.py -v` then `python3 -m pytest tests/register -q` — expect **223 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -2035,7 +2113,7 @@ path+title haystack exactly like routes):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python3 -m pytest tests/register/test_scope.py -v` then `python3 -m pytest tests/register -q` — expect **224 passed**.
+Run: `python3 -m pytest tests/register/test_scope.py -v` then `python3 -m pytest tests/register -q` — expect **227 passed**.
 
 - [ ] **Step 5: Commit**
 
@@ -2236,7 +2314,7 @@ and consumes the results. Policy auto-dispositions are stamped
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `python3 -m pytest tests/register -q` — expect **225 passed** (224 + 1
+Run: `python3 -m pytest tests/register -q` — expect **228 passed** (227 + 1
 scorecard corpus test skipped on machines without
 `/home/pete/cadres/meridian/docs/scorecards`). Then
 `ruff check lazy_vibe/register/` — must be clean. Then `bash -n run-triage.sh`
@@ -2433,14 +2511,15 @@ full verifier pass."
 - **Arithmetic (baseline 159, verified by counting distinct `def test_`
   functions per task at plan-writing time):** T1 +9 = 168; T2 +11 = 179, then
   +10 quality-review hardening tests = 189 (verifier-input attack paths and
-  consumption idempotency — see the hardening note in Task 2); T3
-  +14 = 203 (`test_verified_match_requires_verified_event` is one function —
+  consumption idempotency) and +3 candidate-binding tests = 192 (re-review —
+  see the hardening notes in Task 2); T3
+  +14 = 206 (`test_verified_match_requires_verified_event` is one function —
   the corrected `pytest.raises` form replaces the placeholder form, not an
-  added test); T4 +10 = 213; T5 +7 = 220 (4 `run_triage` walk tests + 3 cli
-  e2e: `verify_and_triage`, `close_verb`, `close_requires`); T6 +4 = 224; T7
-  +1 = 225 (the `run-triage.sh` wrapper smoke test; README and `__all__`
+  added test); T4 +10 = 216; T5 +7 = 223 (4 `run_triage` walk tests + 3 cli
+  e2e: `verify_and_triage`, `close_verb`, `close_requires`); T6 +4 = 227; T7
+  +1 = 228 (the `run-triage.sh` wrapper smoke test; README and `__all__`
   export changes add no tests — the export is import-checked by the existing
-  suite). **Final: 225 passed**, or 224 passed + 1 skipped on machines without
+  suite). **Final: 228 passed**, or 227 passed + 1 skipped on machines without
   `/home/pete/cadres/meridian/docs/scorecards` (the inherited scorecard corpus
   test). Task 8 adds no pytest tests. Implementers MUST re-derive the count
   after each task from the actual `-q` summary rather than trusting this

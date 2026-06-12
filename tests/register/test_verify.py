@@ -296,6 +296,8 @@ def test_consume_refuses_duplicate_absorb_into_adjudicated(store):  # I3
                                      disposition="false_positive",
                                      disposition_by="pete"))
     dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    dup.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                        "candidate_of": "R-0001", "run_id": "run1"})
     store.save({orig.finding_id: orig, dup.finding_id: dup})
     _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
                   evidence=["y.py:9"])
@@ -312,6 +314,8 @@ def test_consume_duplicate_absorb_into_active_target(store):  # I3
     orig = with_history(make_finding(finding_id="R-0001", disposition="open",
                                      disposition_by="pete"))
     dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    dup.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                        "candidate_of": "R-0001", "run_id": "run1"})
     store.save({orig.finding_id: orig, dup.finding_id: dup})
     _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0001",
                   evidence=["y.py:9"])
@@ -325,6 +329,8 @@ def test_consume_duplicate_absorb_into_active_target(store):  # I3
 def test_absorb_dedups_on_ref_alone(store):  # I1
     orig = _new("R-0001")
     dup = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    dup.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                        "candidate_of": "R-0001", "run_id": "run1"})
     store.save({orig.finding_id: orig, dup.finding_id: dup})
     # duplicate cites the exact ref the original already carries, but from a
     # different run -- (ref, run_id) keying would wrongly re-append it
@@ -370,3 +376,49 @@ def test_stray_result_for_non_new_is_archived(store):  # I2
     _write_result(store, "R-0001", verdict="UNSUPPORTED", evidence=["x.py:1"])
     consume_results(store)
     assert not result_path(store, "R-0001").exists()  # stray result archived
+
+
+def test_consume_rejects_unsolicited_duplicate_claim(store):
+    # packet pinned duplicate_of: null (no fuzzy candidate) -- the verifier
+    # cannot close its own finding by naming an arbitrary real target
+    f = _new("R-0001")
+    other = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    store.save({f.finding_id: f, other.finding_id: other})
+    _write_result(store, "R-0001", verdict="VERIFIED", duplicate_of="R-0002")
+    with pytest.raises(RegisterError, match="unsolicited duplicate claim"):
+        consume_results(store)
+    findings = store.load()
+    assert findings["R-0001"].disposition == "new"  # both findings untouched
+    assert last_verification(findings["R-0001"]) is None
+    refs = {e["ref"] for e in findings["R-0002"].evidence}
+    assert "x.py:1" not in refs  # no evidence injected into the named target
+    assert result_path(store, "R-0001").exists()  # nothing archived
+
+
+def test_consume_rejects_duplicate_claim_for_wrong_candidate(store):
+    # packet pinned R-0001; the verifier names a different (here nonexistent)
+    # id -- previously a nonexistent duplicate_of vanished silently
+    orig = _new("R-0001")
+    f = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
+    f.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                      "candidate_of": "R-0001", "run_id": "run1"})
+    store.save({orig.finding_id: orig, f.finding_id: f})
+    _write_result(store, "R-0002", verdict="VERIFIED", duplicate_of="R-0004")
+    with pytest.raises(RegisterError, match="unsolicited duplicate claim"):
+        consume_results(store)
+    assert store.load()["R-0002"].disposition == "new"
+    assert result_path(store, "R-0002").exists()  # nothing archived
+
+
+def test_consume_rejects_pinned_candidate_missing_from_register(store):
+    # register inconsistency: the pinned candidate id does not exist; a
+    # matching duplicate claim must still fail loudly, never fall through
+    # silently to verified (the pre-binding behavior)
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "fuzzy_match_candidate",
+                      "candidate_of": "R-0099", "run_id": "run1"})
+    store.save({f.finding_id: f})
+    _write_result(store, "R-0001", verdict="VERIFIED", duplicate_of="R-0099")
+    with pytest.raises(RegisterError, match="not in register"):
+        consume_results(store)
+    assert store.load()["R-0001"].disposition == "new"

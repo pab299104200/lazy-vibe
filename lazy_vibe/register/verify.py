@@ -154,6 +154,10 @@ def generate_packets(store: RegisterStore) -> list[Path]:
 
 @dataclass
 class VerifyOutcome:
+    # NOTE(Task 5): these buckets are "changed/observed THIS run", not a
+    # register census — a re-run after full consumption legitimately returns
+    # all-empty buckets. The verify-consume CLI summary must present them as
+    # per-run deltas, never as register totals.
     verified: list[str] = field(default_factory=list)
     false_positive: list[str] = field(default_factory=list)
     split: list[str] = field(default_factory=list)
@@ -245,6 +249,10 @@ def _absorb_duplicate_evidence(original, dup_result: dict, run_id: str) -> None:
 
 
 def _archive_result(store: RegisterStore, finding_id: str) -> None:
+    # NOTE(Task 7): os.replace overwrites a previously consumed result on
+    # re-verification — the prior verifier output is lost. When run-triage.sh
+    # lands, consider a run_id suffix (R-NNNN.<run_id>.json) or
+    # refuse-overwrite so consumed results stay auditable per run.
     dst = consumed_result_path(store, finding_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
     os.replace(result_path(store, finding_id), dst)
@@ -302,8 +310,22 @@ def _apply_verdict(findings, finding, data, now, run_id,
                                 "by": "agent:verifier"})
         outcome.split.append(finding.finding_id)
         return
-    if verdict == "VERIFIED" and dup and dup in findings:
-        original = findings[dup]
+    if verdict == "VERIFIED" and dup is not None:
+        # A duplicate claim is only valid for the candidate the packet
+        # solicited (the reconciler's fuzzy_match_candidate). Anything else —
+        # an unsolicited target, a nonexistent id, or a dup when the packet
+        # pinned null — is the verifier closing its own finding via an
+        # unconfirmed claim, rejected loudly.
+        candidate = _fuzzy_candidate(finding)
+        if dup != candidate:
+            raise RegisterError(
+                f"{finding.finding_id}: unsolicited duplicate claim {dup!r}; "
+                f"packet pinned {candidate!r}")
+        original = findings.get(dup)
+        if original is None:
+            raise RegisterError(
+                f"{finding.finding_id}: duplicate target {dup} not in "
+                f"register — fuzzy candidate references a missing finding")
         if original.disposition not in _ABSORB_TARGETS:
             raise RegisterError(
                 f"{finding.finding_id}: duplicate target {dup} is adjudicated "
