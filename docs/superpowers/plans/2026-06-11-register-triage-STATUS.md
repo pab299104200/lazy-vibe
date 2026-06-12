@@ -16,7 +16,7 @@
 | T1 packet generation | DONE, reviewed/approved | 1e7fd81 |
 | T2 result consumption | DONE (d93cd72) + hardening (dec32e0) + candidate binding landed 066f427 — re-review CLOSED | 066f427 (suite 192) |
 | T3 policy engine | DONE (ca7de37) + quality fixes landed 123d843 — review CLOSED | 123d843 (suite 211) |
-| T4 queue render | DONE — reviewed, deviation documented | (pending commit SHA) |
+| T4 queue render | DONE — reviewed, deviation documented | 4009584 (suite 227) |
 | T5 triage CLI + close | not started | |
 | T6 scope journeys/claims_doc | not started | |
 | T7 run-triage.sh + exports + README | not started | |
