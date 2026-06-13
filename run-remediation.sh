@@ -514,11 +514,34 @@ if [[ -n "$SCORECARD" ]]; then
   fi
 fi
 
+REGISTER_SOURCE_AVAILABLE=0
+case "$REMEDIATION_REGISTER_SOURCE" in
+  auto)
+    [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]] && REGISTER_SOURCE_AVAILABLE=1
+    ;;
+  1)
+    if [[ -z "$REGISTER_DIR" || ! -f "$REGISTER_DIR/register.jsonl" ]]; then
+      printf 'Register not found: %s/register.jsonl\n' "$REGISTER_DIR" >&2
+      exit 2
+    fi
+    REGISTER_SOURCE_AVAILABLE=1
+    ;;
+  0) ;;
+  *)
+    printf 'invalid REMEDIATION_REGISTER_SOURCE=%s (expected auto, 1, or 0)\n' \
+      "$REMEDIATION_REGISTER_SOURCE" >&2
+    exit 2
+    ;;
+esac
+
 if [[ -z "$AUDIT_RUN" ]]; then
   if [[ -n "$SCORECARD" ]]; then
     AUDIT_RUN="scorecard:$SCORECARD"
     SCORECARD_ONLY_SOURCE=1
     printf '[scorecard] using scorecard remediation source: %s\n' "$SCORECARD"
+  elif [[ "$REGISTER_SOURCE_AVAILABLE" == "1" ]]; then
+    AUDIT_RUN="register:$REGISTER_DIR"
+    printf '[register] using register remediation source: %s\n' "$REGISTER_DIR"
   else
     # Auto-detect latest audit run
     AUDIT_RUN=$(find "$REPO_ROOT/docs/audit" "$REPO_ROOT/project-audit" "$REPO_ROOT" -maxdepth 2 -type d \( -name "*-launch-readiness-run" -o -name "*-audit-run" \) 2>/dev/null | sort | tail -n 1 || true)
@@ -528,8 +551,8 @@ if [[ -z "$AUDIT_RUN" ]]; then
     usage >&2
     exit 2
   fi
-  [[ "$AUDIT_RUN" == scorecard:* ]] || printf '[auto-detect] using audit run: %s\n' "$AUDIT_RUN"
-elif [[ ! -d "$AUDIT_RUN" ]]; then
+  [[ "$AUDIT_RUN" == scorecard:* || "$AUDIT_RUN" == register:* ]] || printf '[auto-detect] using audit run: %s\n' "$AUDIT_RUN"
+elif [[ "$AUDIT_RUN" != register:* && ! -d "$AUDIT_RUN" ]]; then
   echo "Audit run directory not found: $AUDIT_RUN" >&2
   exit 2
 fi
@@ -538,6 +561,8 @@ if [[ -z "$REMEDIATION_DIR" ]]; then
   if [[ "$AUDIT_RUN" == scorecard:* ]]; then
     _feature_slug="${FEATURE:-$(basename "$SCORECARD" .md)}"
     REMEDIATION_DIR="$REPO_ROOT/docs/audit/$(date +%Y-%m-%d)-${_feature_slug}-remediation-run"
+  elif [[ "$AUDIT_RUN" == register:* ]]; then
+    REMEDIATION_DIR="$REPO_ROOT/docs/audit/$(date +%Y-%m-%d)-register-remediation-run"
   else
     _audit_date=$(basename "$AUDIT_RUN" | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || date +%Y-%m-%d)
     REMEDIATION_DIR="$(dirname "$AUDIT_RUN")/${_audit_date}-remediation-run"
@@ -2689,6 +2714,8 @@ def split_ref(ref):
     path, sep, line = ref.rpartition(":")
     if sep and line.isdigit():
         return path, line
+    if sep and line in {"", "-"}:
+        return path, "-"
     return ref, "-"
 
 
@@ -3009,8 +3036,12 @@ write_packet() {
   if [[ "$source" == /* ]]; then
     abs_source="$source"
   fi
-  local start=$((line > 3 ? line - 3 : 1))
-  local end=$((line + 18))
+  local start=1
+  local end=80
+  if [[ "$line" =~ ^[0-9]+$ ]]; then
+    start=$((line > 3 ? line - 3 : 1))
+    end=$((line + 18))
+  fi
 
   {
     printf '# Remediation Packet %s\n\n' "$id"
@@ -8031,6 +8062,7 @@ execute_evidence_collection_rounds() {
 if [[ "$EXECUTE" == "0" && "$VERIFY" == "0" && "$VERIFY_ONLY" == "0" && \
       "$FINALIZE_ONLY" == "0" && "$SUMMARY_ONLY" == "0" && \
       "$REVISE_EXISTING" == "0" && "$REVISE_NEXT" == "0" && "$DRAIN_QUEUE" == "0" && "$SPLIT_INCOMPLETE" == "0" && \
+      "$DRY_RUN" == "0" && \
       "$CATALOG_WITH_CODEX" == "0" && "$FORCE_CATALOG" == "0" && \
       "$RECOORDINATE" == "0" ]] && remediation_state_exists; then
   STATE_RESUME=1
@@ -8046,6 +8078,7 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
   if [[ "$_preserve_existing_inventory" == "1" ]]; then
     printf '[resume] preserving existing master PX inventory: %s\n' "$PX_TSV"
     guard_existing_px_inventory_consistency
+    write_packets_and_workstreams
   else
     if [[ -f "$PX_TSV" ]]; then
       _previous_px_tsv="$(mktemp)"

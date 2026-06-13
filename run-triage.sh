@@ -16,6 +16,8 @@
 #                  (stub / custom agent pattern).
 #   MAX_PARALLEL   max concurrent agent invocations (default: 3).
 #   TRIAGE_DATE    ISO date stamped on verification events (default: today).
+#   TRIAGE_LIMIT   Optional max count of pending packets to dispatch in this
+#                  run. Equivalent to --limit.
 #   PROFILE        Profile name (under PROFILES_DIR) or absolute profile dir.
 #                  Sets PRODUCT_PROFILE and, when --register-dir is omitted,
 #                  infers docs/audit/register from the profile's Repo root.
@@ -26,6 +28,7 @@ set -euo pipefail
 
 REGISTER_DIR=""
 GENERATE_PACKETS=1
+TRIAGE_LIMIT="${TRIAGE_LIMIT:-}"
 TRIAGE_AGENT="${TRIAGE_AGENT:-claude}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
 TRIAGE_DATE="${TRIAGE_DATE:-$(date +%F)}"
@@ -36,7 +39,7 @@ PROFILE="${PROFILE:-}"
 PRODUCT_REPO_ROOT="${PRODUCT_REPO_ROOT:-}"
 
 usage() {
-  echo "usage: run-triage.sh [--register-dir DIR] [--agent AGENT] [--no-generate]" >&2
+  echo "usage: run-triage.sh [--register-dir DIR] [--agent AGENT] [--no-generate] [--limit N]" >&2
   exit 2
 }
 
@@ -45,10 +48,16 @@ while [[ $# -gt 0 ]]; do
     --register-dir) REGISTER_DIR="$2"; shift 2 ;;
     --agent) TRIAGE_AGENT="$2"; shift 2 ;;
     --no-generate) GENERATE_PACKETS=0; shift ;;
+    --limit) TRIAGE_LIMIT="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
+
+if [[ -n "$TRIAGE_LIMIT" && ! "$TRIAGE_LIMIT" =~ ^[0-9]+$ ]]; then
+  echo "--limit must be a non-negative integer" >&2
+  exit 2
+fi
 
 repo_root_from_profile() {
   local profile_file="$1"
@@ -129,9 +138,22 @@ run_one() {
 export -f run_one
 export RESULTS_DIR TRIAGE_AGENT PRODUCT_REPO_ROOT
 
+pending_packets=()
 if compgen -G "$PACKETS_DIR/*.md" > /dev/null 2>&1; then
-  printf '%s\n' "$PACKETS_DIR"/*.md \
-    | xargs -P "$MAX_PARALLEL" -I {} bash -c 'run_one "$@"' _ {}
+  for packet in "$PACKETS_DIR"/*.md; do
+    fid="$(basename "$packet" .md)"
+    [[ -f "$RESULTS_DIR/$fid.json" ]] && continue
+    [[ -f "$RESULTS_DIR/consumed/$fid.json" ]] && continue
+    pending_packets+=("$packet")
+    if [[ -n "$TRIAGE_LIMIT" && "${#pending_packets[@]}" -ge "$TRIAGE_LIMIT" ]]; then
+      break
+    fi
+  done
+fi
+
+if [[ "${#pending_packets[@]}" -gt 0 ]]; then
+  printf '%s\0' "${pending_packets[@]}" \
+    | xargs -0 -P "$MAX_PARALLEL" -I {} bash -c 'run_one "$@"' _ {}
 fi
 
 # 3. Fold every present result into the register (schema-validated).

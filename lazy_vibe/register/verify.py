@@ -104,6 +104,24 @@ disproving citation — nothing else.
 
 {evidence}
 
+## Repository path resolution
+
+Cited paths can be relative to a product subdirectory, not only the repository
+root. First try the cited path literally. If it is missing, search by basename
+or suffix before deciding the evidence is unsupported.
+
+Common roots to try are repo root, `backend/`, `frontend/`, `frontend/src/`,
+and `src/`. For backend-looking refs such as `routers/...`, `core/...`,
+`models/...`, `services/...`, `tests/...`, or `alembic/...`, try
+`backend/<cited path>` early. For frontend-looking refs such as
+`components/...`, `pages/...`, `routes/...`, `hooks/...`, or `services/...`,
+try `frontend/src/<cited path>` early.
+
+Never return UNSUPPORTED solely because a cited path is absent at repository
+root. UNSUPPORTED requires a disproving citation after suffix search. VERIFIED
+evidence should cite the resolved repo-relative path, for example
+`backend/routers/example.py:118`.
+
 ## Your contract
 
 {dup_line}

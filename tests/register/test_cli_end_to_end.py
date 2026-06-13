@@ -493,6 +493,29 @@ def test_run_triage_sh_no_generate_preserves_bounded_packet_set(workspace, tmp_p
     ]
 
 
+def test_run_triage_sh_limit_dispatches_next_pending_packet(workspace, tmp_path):
+    """--limit bounds dispatch without moving packets aside by hand."""
+    _, register_dir, run1, _ = workspace
+    cli("backfill", "--register-dir", str(register_dir),
+        "--ledger", str(run1 / "00-blocker-ledger.tsv"),
+        "--run-id", "run1", "--date", "2026-06-10")
+
+    stub = tmp_path / "stub-agent.sh"
+    _write_verified_stub(stub)
+    env = dict(os.environ, TRIAGE_AGENT=str(stub), MAX_PARALLEL="1")
+    proc = subprocess.run(
+        ["bash", str(REPO_ROOT / "run-triage.sh"), "--limit", "1",
+         "--register-dir", str(register_dir)],
+        cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    findings = RegisterStore(register_dir).load()
+    assert "verification" in [h.get("event") for h in findings["R-0001"].history]
+    assert "verification" not in [
+        h.get("event") for h in findings["R-0002"].history
+    ]
+
+
 def test_run_triage_sh_profile_sets_register_and_codex_cwd(workspace, tmp_path):
     """PROFILE keeps register triage on the same product-profile contract as
     audit/remediation and runs Codex in the product repo."""

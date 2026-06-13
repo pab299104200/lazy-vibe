@@ -16,6 +16,7 @@ from .readiness import evaluate, render_readiness
 from .reconcile import reconcile, render_report
 from .scope import load_scope, recompute
 from .scorecard import parse_scorecard
+from .split_resolve import consume_split_results, generate_split_packets
 from .store import RegisterStore
 from .themes import load_vocabulary
 from .transitions import transition, validate_regression_test
@@ -131,6 +132,25 @@ def _cmd_verify_consume(args: argparse.Namespace) -> int:
           f"{len(outcome.false_positive)} false_positive, "
           f"{len(outcome.split)} split, "
           f"{len(outcome.unverified)} unverified (no result yet)")
+    return 0
+
+
+def _cmd_split_packets(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    written = generate_split_packets(store)
+    print(f"wrote {len(written)} split-resolution packets to "
+          f"{store.register_dir / 'triage' / 'split-packets'}")
+    return 0
+
+
+def _cmd_split_consume(args: argparse.Namespace) -> int:
+    store = RegisterStore(Path(args.register_dir))
+    outcome = consume_split_results(store, date=args.date or _today())
+    print(f"this run: {len(outcome.opened)} opened, "
+          f"{len(outcome.false_positive)} false_positive, "
+          f"{len(outcome.parked)} parked, "
+          f"{len(outcome.skipped)} skipped, "
+          f"{len(outcome.unresolved)} unresolved")
     return 0
 
 
@@ -287,6 +307,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--register-dir", required=True)
     p.add_argument("--date", default=None)
     p.set_defaults(func=_cmd_verify_consume)
+
+    p = sub.add_parser("split-packets",
+                       help="write agent packets for verifier split findings")
+    p.add_argument("--register-dir", required=True)
+    p.set_defaults(func=_cmd_split_packets)
+
+    p = sub.add_parser("split-consume",
+                       help="consume split resolver JSON into the register")
+    p.add_argument("--register-dir", required=True)
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=_cmd_split_consume)
 
     p = sub.add_parser("triage",
                        help="apply policy, render the queue, walk it as Pete")

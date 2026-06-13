@@ -95,6 +95,26 @@ def test_verified_new_not_in_unverified(store):
     assert not any(i.kind == "unverified" for i in items)
 
 
+def test_split_proposed_new_finding_surfaces_for_manual_adjudication(store):
+    f = _new("R-0001")
+    f.history.append({"ts": "t", "event": "verification",
+                      "verdict": "split", "by": "agent:verifier"})
+    f.history.append({"ts": "t", "event": "split_proposed",
+                      "split_paths": ["backend/a.py", "frontend/b.tsx"],
+                      "by": "agent:verifier"})
+    store.save({f.finding_id: f})
+
+    items = build_queue(store, scope_proposals=[], today="2026-06-11")
+    item = next(i for i in items if i.kind == "split")
+    assert item.finding_id == "R-0001"
+    assert item.recommendation == "run split resolver"
+    assert "backend/a.py" in item.detail
+
+    md = render_queue(items, product="portal")
+    assert "Split adjudication" in md
+    assert "R-0001" in md
+
+
 def test_fuzzy_confirm_pending_section(store):
     f = _new("R-0002", fingerprint="sha256:bbbbbbbbbbbbbbbb")
     f.history.append({"ts": "t", "event": "fuzzy_match_candidate",

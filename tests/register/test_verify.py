@@ -32,6 +32,18 @@ def test_generate_packets_writes_one_per_new_finding(store):
     assert "backend/routers/evidence.py:118" in text  # evidence ref echoed
 
 
+def test_generate_packets_document_repo_path_resolution(store):
+    f = _new("R-0001")
+    store.save({f.finding_id: f})
+    generate_packets(store)
+
+    text = packet_path(store, "R-0001").read_text()
+    assert "## Repository path resolution" in text
+    assert "backend/<cited path>" in text
+    assert "frontend/src/<cited path>" in text
+    assert "Never return UNSUPPORTED solely because a cited path is absent" in text
+
+
 def test_generate_packets_skips_non_new(store):
     from tests.register.helpers import with_history
     f_new = _new("R-0001")

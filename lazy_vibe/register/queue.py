@@ -39,6 +39,7 @@ _SECTIONS = [
     ("severity_review", "Severity reviews"),
     ("reopen", "Reopen proposals (protected/parked, new evidence)"),
     ("scope", "Scope proposals"),
+    ("split", "Split adjudication"),
     ("unverified", "Unverified findings"),
     ("fuzzy_confirm", "Fuzzy duplicate confirms pending"),
 ]
@@ -123,6 +124,15 @@ def _finding_items(f: Finding, today_date: _dt.date) -> list[QueueItem]:
             f"run proposes {sev_ev.get('proposed')} vs current "
             f"{sev_ev.get('current')}",
             recommendation=f"review severity {sev_ev.get('proposed')}",
+            source_disposition=f.disposition))
+    split_ev = _last_event(f, "split_proposed")
+    if f.disposition == "new" and split_ev:
+        paths = split_ev.get("split_paths") or []
+        detail = ("divergent evidence paths: " + ", ".join(paths)
+                  if paths else "verifier reported divergent evidence paths")
+        items.append(QueueItem(
+            f.finding_id, "split", f.severity, f.title, detail,
+            recommendation="run split resolver",
             source_disposition=f.disposition))
     items.extend(_reopen_items(f))
     if f.disposition == "new" and not _has_event(f, "verification"):
@@ -254,6 +264,8 @@ def _recommendation_choice(item: QueueItem) -> str:
     Only reachable from a human keypress; ``--accept-all`` routes through
     ``_accept_all_decision`` instead, which refuses anything underspecified.
     """
+    if item.kind == "split":
+        return "s"
     rec = item.recommendation.lower()
     if item.kind == "scope":
         return "p" if rec == "park" else "o"  # unpark -> open

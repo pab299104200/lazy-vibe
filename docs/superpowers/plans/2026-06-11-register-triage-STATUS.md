@@ -107,3 +107,13 @@ Final whole-branch adversarial review (cross-module composition, debris, plan/sp
   `90aefc95`. `feature-review` and `feature-ux-audit` were retired, and the
   remaining feature skills now route audit/remediation through the register-backed
   lazy-vibe harnesses.
+- Plan 3 eleventh slice: split adjudication no longer requires Pete to decide
+  each split row interactively. `run-split-resolve.sh` generates focused
+  split-resolution packets, runs the selected triage agent from the product repo,
+  consumes validated JSON decisions, and transitions split findings to
+  `open`/`false_positive`/`parked` through the register state machine. The queue
+  still renders unresolved split rows, but `accept-all` skips them instead of
+  trying to force-open unverified findings. Portal run on 2026-06-12 resolved all
+  12 split rows: 11 opened, 0 false_positive, 1 parked, 0 unresolved; rendered
+  queue is now empty. Suite after the slice: `python3 -m pytest tests/register
+  -q` = 276 passed; `ruff check .` clean.

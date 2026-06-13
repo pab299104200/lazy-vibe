@@ -179,9 +179,31 @@ false_positive = make_finding(
 transition(false_positive, Disposition.FALSE_POSITIVE, by="pete",
            reason="unsupported", now=now)
 
+no_line_open = make_finding(
+    finding_id="R-0005",
+    fingerprint="sha256:5",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "tenant_scope_missing",
+        "path": "backend/no_line.py",
+        "symbol": "NoLine",
+    },
+    title="Open finding without numeric source line",
+    description="Open register-backed finding with file-level evidence.",
+    evidence=[{"type": "code", "ref": "backend/no_line.py:-", "run_id": "run1"}],
+)
+transition(no_line_open, Disposition.OPEN, by="pete", reason="real",
+           now=now, verified=True)
+
 RegisterStore(register_dir).save({
     finding.finding_id: finding
-    for finding in [open_finding, regressed, new_finding, false_positive]
+    for finding in [
+        open_finding,
+        regressed,
+        new_finding,
+        false_positive,
+        no_line_open,
+    ]
 })
 PY
 
@@ -198,13 +220,47 @@ REMEDIATION_SCRIPT_SNAPSHOT=1 \
     fail "register-backed remediation plan generation failed"
   }
 
-assert_equals "2" "$(tail -n +2 "$register_remediation/00-register-px-map.tsv" | wc -l | tr -d ' ')" "register-backed packet count"
+assert_equals "3" "$(tail -n +2 "$register_remediation/00-register-px-map.tsv" | wc -l | tr -d ' ')" "register-backed packet count"
 grep -q $'PX-0001\tR-0002\tregressed' "$register_remediation/00-register-px-map.tsv" || fail "regressed finding not first by severity"
 grep -q $'PX-0002\tR-0001\topen' "$register_remediation/00-register-px-map.tsv" || fail "open finding missing"
+grep -q $'PX-0003\tR-0005\topen' "$register_remediation/00-register-px-map.tsv" || fail "open no-line finding missing"
 if grep -Eq 'R-0003|R-0004' "$register_remediation/00-register-px-map.tsv"; then
   fail "register-backed remediation included non-open/non-regressed finding"
 fi
 grep -q 'Register finding: `R-0002`' "$register_remediation/packets/PX-0001.md" || fail "packet missing register context"
+grep -q 'Source: `backend/no_line.py:-`' "$register_remediation/packets/PX-0003.md" || fail "packet did not normalize file-level evidence source"
+
+rm -f "$register_remediation/packets/PX-0003.md"
+REPO_ROOT="$register_repo" \
+REGISTER_DIR="$register_dir" \
+REMEDIATION_DIR="$register_remediation" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --audit-run "$register_audit" \
+  --dry-run \
+  --no-catalog >/tmp/lazy-vibe-register-remediation-resume-fixture.out 2>/tmp/lazy-vibe-register-remediation-resume-fixture.err || {
+    sed -n '1,120p' /tmp/lazy-vibe-register-remediation-resume-fixture.out >&2 || true
+    sed -n '1,160p' /tmp/lazy-vibe-register-remediation-resume-fixture.err >&2 || true
+    fail "register-backed remediation resume after partial packet generation failed"
+  }
+[[ -f "$register_remediation/packets/PX-0003.md" ]] || fail "resume did not recreate missing packet"
+
+register_remediation_no_audit="$register_repo/docs/audit/register-remediation-no-audit-run"
+REPO_ROOT="$register_repo" \
+REGISTER_DIR="$register_dir" \
+REMEDIATION_REGISTER_SOURCE=1 \
+REMEDIATION_DIR="$register_remediation_no_audit" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --no-catalog >/tmp/lazy-vibe-register-remediation-no-audit.out 2>/tmp/lazy-vibe-register-remediation-no-audit.err || {
+    sed -n '1,120p' /tmp/lazy-vibe-register-remediation-no-audit.out >&2 || true
+    sed -n '1,160p' /tmp/lazy-vibe-register-remediation-no-audit.err >&2 || true
+    fail "register-backed remediation without --audit-run failed"
+  }
+grep -q '\[register\] using register remediation source:' \
+  /tmp/lazy-vibe-register-remediation-no-audit.out || fail "register source was not selected without --audit-run"
+assert_equals "3" "$(tail -n +2 "$register_remediation_no_audit/00-register-px-map.tsv" | wc -l | tr -d ' ')" \
+  "register-backed packet count without audit-run"
 
 register_verifier="$tmp_root/register-verifier.sh"
 cat > "$register_verifier" <<'EOF'
