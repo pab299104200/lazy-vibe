@@ -596,14 +596,12 @@ mkdir -p "$REMEDIATION_DIR"/{packets,prompts,logs,artifacts}
 CHECKPOINT_FILE="$REMEDIATION_DIR/completed-units.txt"
 RUN_LOG="${RUN_LOG:-$REMEDIATION_DIR/run.log}"
 
-# Improvement 3: fail fast if lazy_vibe is not importable when register mode is active.
+# Ensure lazy_vibe is importable. The module lives alongside this script, so
+# prepend SCRIPT_DIR to PYTHONPATH automatically — callers need not set it.
+export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 if [[ -n "${REGISTER_DIR:-}" ]] || [[ "${AUDIT_RUN:-}" == register:* ]]; then
   if ! python3 -c "import lazy_vibe.register" 2>/dev/null; then
-    log_event_err '[fatal] lazy_vibe module is not importable. Run with PYTHONPATH set:\n'
-    log_event '[fatal]   PYTHONPATH=%s/lazy_vibe/../.. %s %s\n' \
-      "$(python3 -c "import sys; print(next((p for p in sys.path if 'lazy_vibe' in p), 'shared/lazy-vibe'))" 2>/dev/null || printf 'shared/lazy-vibe')" \
-      "$0" "$*" >&2
-    log_event_err '[fatal] Typical fix: PYTHONPATH=/home/pete/cadres/shared/lazy-vibe %s %s\n' "$0" "$*"
+    log_event_err '[fatal] lazy_vibe module is not importable even with PYTHONPATH=%s\n' "$SCRIPT_DIR"
     exit 1
   fi
 fi
