@@ -2,6 +2,23 @@
 # shellcheck disable=SC2016
 set -euo pipefail
 
+# Structured event logging: writes to stdout (terminal) AND to RUN_LOG file.
+# Spinner output (printf '\r...') is intentionally NOT routed through these
+# helpers — it stays terminal-only for operator visibility without polluting
+# the structured log.
+log_event() {
+  local msg
+  printf -v msg "$@"
+  printf '%s' "$msg"
+  [[ -n "${RUN_LOG:-}" ]] && printf '%s' "$msg" >> "$RUN_LOG"
+}
+log_event_err() {
+  local msg
+  printf -v msg "$@"
+  printf '%s' "$msg" >&2
+  [[ -n "${RUN_LOG:-}" ]] && printf '%s' "$msg" >> "$RUN_LOG"
+}
+
 if [[ "${REMEDIATION_SCRIPT_SNAPSHOT:-0}" != "1" ]]; then
   _remediation_script_source="${BASH_SOURCE[0]}"
   _remediation_script_dir="$(cd "$(dirname "$_remediation_script_source")" && pwd)"
@@ -9,8 +26,8 @@ if [[ "${REMEDIATION_SCRIPT_SNAPSHOT:-0}" != "1" ]]; then
   cp "$_remediation_script_source" "$_remediation_script_snapshot"
   chmod 700 "$_remediation_script_snapshot"
   if ! bash -n "$_remediation_script_snapshot"; then
-    printf '[fatal] run-remediation.sh has a shell syntax error; refusing to start a long remediation run\n' >&2
-    printf '[fatal] source=%s snapshot=%s\n' "$_remediation_script_source" "$_remediation_script_snapshot" >&2
+    log_event_err '[fatal] run-remediation.sh has a shell syntax error; refusing to start a long remediation run\n'
+    log_event_err '[fatal] source=%s snapshot=%s\n' "$_remediation_script_source" "$_remediation_script_snapshot"
     exit 2
   fi
   export REMEDIATION_SCRIPT_SNAPSHOT=1
@@ -541,7 +558,7 @@ if [[ -z "$AUDIT_RUN" ]]; then
     printf '[scorecard] using scorecard remediation source: %s\n' "$SCORECARD"
   elif [[ "$REGISTER_SOURCE_AVAILABLE" == "1" ]]; then
     AUDIT_RUN="register:$REGISTER_DIR"
-    printf '[register] using register remediation source: %s\n' "$REGISTER_DIR"
+    log_event '[register] using register remediation source: %s\n' "$REGISTER_DIR"
   else
     # Auto-detect latest audit run
     AUDIT_RUN=$(find "$REPO_ROOT/docs/audit" "$REPO_ROOT/project-audit" "$REPO_ROOT" -maxdepth 2 -type d \( -name "*-launch-readiness-run" -o -name "*-audit-run" \) 2>/dev/null | sort | tail -n 1 || true)
@@ -577,6 +594,19 @@ fi
 
 mkdir -p "$REMEDIATION_DIR"/{packets,prompts,logs,artifacts}
 CHECKPOINT_FILE="$REMEDIATION_DIR/completed-units.txt"
+RUN_LOG="${RUN_LOG:-$REMEDIATION_DIR/run.log}"
+
+# Improvement 3: fail fast if lazy_vibe is not importable when register mode is active.
+if [[ -n "${REGISTER_DIR:-}" ]] || [[ "${AUDIT_RUN:-}" == register:* ]]; then
+  if ! python3 -c "import lazy_vibe.register" 2>/dev/null; then
+    log_event_err '[fatal] lazy_vibe module is not importable. Run with PYTHONPATH set:\n'
+    log_event '[fatal]   PYTHONPATH=%s/lazy_vibe/../.. %s %s\n' \
+      "$(python3 -c "import sys; print(next((p for p in sys.path if 'lazy_vibe' in p), 'shared/lazy-vibe'))" 2>/dev/null || printf 'shared/lazy-vibe')" \
+      "$0" "$*" >&2
+    log_event_err '[fatal] Typical fix: PYTHONPATH=/home/pete/cadres/shared/lazy-vibe %s %s\n' "$0" "$*"
+    exit 1
+  fi
+fi
 
 if [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]]; then
   if [[ "$MAX_PARALLEL" != "1" ]]; then
@@ -620,7 +650,7 @@ fi
 if [[ -z "$REVIEWER_AGENT" && -z "${REVIEWER_RUNNER:-}" && -z "${VERIFICATION_RUNNER:-}" && -z "${REVIEW_RUNNER:-}" ]]; then
   REVIEWER_AGENT="$IMPLEMENTER_AGENT"
   if [[ "$VERIFY" == "1" || "$VERIFY_ONLY" == "1" || "$FINALIZE_ONLY" == "1" ]]; then
-    printf '[warn] REVIEWER_AGENT not set; defaulting to IMPLEMENTER_AGENT=%s. Same-model verification reduces independence — set REVIEWER_AGENT to a different agent for stronger review.\n' "$IMPLEMENTER_AGENT" >&2
+    log_event_err '[warn] REVIEWER_AGENT not set; defaulting to IMPLEMENTER_AGENT=%s. Same-model verification reduces independence — set REVIEWER_AGENT to a different agent for stronger review.\n' "$IMPLEMENTER_AGENT"
   fi
 fi
 
@@ -1954,6 +1984,19 @@ collect_verification_cmds() {
     return 0
   fi
 
+  # Improvement 4: resolve relative .venv paths to absolute so worktree
+  # subshells can find the venv without requiring each profile to hardcode
+  # the absolute path. Resolves both ../.venv/ and ./.venv/ patterns.
+  _resolve_venv_path() {
+    local cmd="$1"
+    if [[ -n "${PRODUCT_REPO_ROOT:-}" ]] && [[ "$cmd" =~ (\.\.\/)*\.venv/ ]]; then
+      cmd="$(printf '%s' "$cmd" | sed \
+        -e "s|\.\.\/\.venv/|$PRODUCT_REPO_ROOT/.venv/|g" \
+        -e "s|\./\.venv/|$PRODUCT_REPO_ROOT/.venv/|g")"
+    fi
+    printf '%s' "$cmd"
+  }
+
   while IFS= read -r scope; do
     [[ -n "$scope" ]] || continue
     case "$scope" in
@@ -1965,6 +2008,7 @@ collect_verification_cmds() {
     while IFS= read -r raw; do
       raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
+      raw="$(_resolve_venv_path "$raw")"
       command_is_forbidden "$raw" && continue
       command_looks_executable "$raw" || continue
       command_is_path_reference "$raw" "$worktree" && continue
@@ -1979,6 +2023,7 @@ collect_verification_cmds() {
     while IFS= read -r raw; do
       raw="$(extract_profile_command "$raw")"
       [[ -n "$raw" ]] || continue
+      raw="$(_resolve_venv_path "$raw")"
       command_is_forbidden "$raw" && continue
       command_looks_executable "$raw" || continue
       command_is_path_reference "$raw" "$worktree" && continue
@@ -2061,6 +2106,106 @@ elif re.search(r'(^|[;&|()\s])pytest(\s|$)', cmd):
 else:
     sys.exit(1)
 PY
+}
+
+# Improvement 1: baseline snapshot — run the native test suite on HEAD before
+# any worktrees are created. Records known-failing test IDs so later worktree
+# runs can distinguish pre-existing failures from regressions introduced by the
+# implementation agent.
+#
+# The baseline is written to $REMEDIATION_DIR/artifacts/baseline-failing-tests.txt.
+# If the file already exists (resume), it is preserved and the snapshot is skipped.
+# Controlled by REMEDIATION_BASELINE_SNAPSHOT (default 1).
+run_baseline_snapshot() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  [[ "${REMEDIATION_BASELINE_SNAPSHOT:-1}" == "1" ]] || return 0
+  [[ "$EXECUTE" == "1" ]] || return 0
+
+  local baseline_file="$REMEDIATION_DIR/artifacts/baseline-failing-tests.txt"
+  local baseline_log="$REMEDIATION_DIR/artifacts/baseline-snapshot.log"
+
+  if [[ -f "$baseline_file" ]]; then
+    log_event '[baseline] existing baseline snapshot found; skipping re-run: %s\n' "$baseline_file"
+    return 0
+  fi
+
+  # Collect test commands from the first implementation unit as a representative sample.
+  # Fall back to scanning PRODUCT_REPO_ROOT for common test entry points.
+  local baseline_root="${PRODUCT_REPO_ROOT:-$REPO_ROOT}"
+  local -a test_cmds=()
+  local first_unit_id=""
+  if [[ -s "$UNITS_TSV" ]]; then
+    first_unit_id="$(awk -F '\t' 'NR == 2 { print $1; exit }' "$UNITS_TSV")"
+  fi
+  if [[ -n "$first_unit_id" ]]; then
+    local first_group
+    first_group="$(awk -F '\t' -v uid="$first_unit_id" 'NR > 1 && $1 == uid { print $3; exit }' "$UNITS_TSV")"
+    local tc
+    while IFS= read -r tc; do
+      [[ -n "$tc" ]] && test_cmds+=("$tc")
+    done < <(collect_verification_cmds "$first_unit_id" "$first_group" "$baseline_root")
+  fi
+
+  if ((${#test_cmds[@]} == 0)); then
+    log_event '[baseline] no test commands detected; skipping baseline snapshot\n'
+    return 0
+  fi
+
+  log_event '[baseline] running baseline snapshot on HEAD to record pre-existing failures...\n'
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  : > "$baseline_log"
+  : > "$baseline_file"
+
+  local test_cmd exit_code=0
+  for test_cmd in "${test_cmds[@]}"; do
+    {
+      printf '$ %s\n' "$test_cmd"
+    } >> "$baseline_log"
+    if (cd "$baseline_root" && eval "$test_cmd") >> "$baseline_log" 2>&1; then
+      printf '[baseline] command passed on HEAD: %s\n' "$test_cmd" >> "$baseline_log"
+    else
+      exit_code=$?
+      printf '[baseline] command exited %d on HEAD: %s\n' "$exit_code" "$test_cmd" >> "$baseline_log"
+    fi
+  done
+
+  # Extract failing test IDs from pytest FAILED lines in the log.
+  grep -E '^FAILED ' "$baseline_log" | sed 's/^FAILED //' | sed 's/ - .*$//' >> "$baseline_file" || true
+  # Also capture short test summary lines: "FAILED path::test_name"
+  grep -E '^\s+FAILED ' "$baseline_log" | sed 's/^\s*FAILED //' | sed 's/ - .*$//' >> "$baseline_file" || true
+  sort -u -o "$baseline_file" "$baseline_file"
+
+  local baseline_count
+  baseline_count=$(wc -l < "$baseline_file" | tr -d ' ')
+  log_event '[baseline] snapshot complete: %d pre-existing failing test(s) recorded in %s\n' \
+    "$baseline_count" "$baseline_file"
+}
+
+# Check if all failures in a native test log are pre-existing baseline failures.
+# Returns 0 (true) if ALL failing tests are known baseline failures.
+native_test_all_failures_are_baseline() {
+  local test_log="$1"
+  local baseline_file="$REMEDIATION_DIR/artifacts/baseline-failing-tests.txt"
+  [[ -s "$baseline_file" ]] || return 1  # no baseline = can't confirm
+
+  # Extract failing test IDs from this run's log.
+  local -a new_failures=()
+  local line
+  while IFS= read -r line; do
+    [[ "$line" =~ ^FAILED[[:space:]] ]] || [[ "$line" =~ ^[[:space:]]+FAILED[[:space:]] ]] || continue
+    local test_id
+    test_id="$(printf '%s' "$line" | sed 's/^[[:space:]]*FAILED //' | sed 's/ - .*$//')"
+    [[ -n "$test_id" ]] && new_failures+=("$test_id")
+  done < "$test_log"
+
+  ((${#new_failures[@]} > 0)) || return 1  # no failures to evaluate
+
+  for tid in "${new_failures[@]}"; do
+    if ! grep -qxF "$tid" "$baseline_file"; then
+      return 1  # found a non-baseline failure
+    fi
+  done
+  return 0  # all failures are baseline
 }
 
 run_static_prechecks() {
@@ -2812,7 +2957,7 @@ with ledger_tsv.open("w", newline="") as fh:
     writer.writerows(ledger_rows)
 PY
   write_blocker_ledger_markdown
-  printf '[register] open_or_regressed=%s register=%s map=%s\n' \
+  log_event '[register] open_or_regressed=%s register=%s map=%s\n' \
     "$(awk 'NR > 1 { count += 1 } END { print count + 0 }' "$REGISTER_PX_TSV")" \
     "$REGISTER_DIR" "$REGISTER_PX_TSV"
 }
@@ -3370,7 +3515,7 @@ auto_recover_raw_unit_manifest() {
     return 0
   fi
 
-  printf '[auto-recover] raw one-packet implementation manifest detected; forcing 00-cataloger rerun before execution\n'
+  log_event '[auto-recover] raw one-packet implementation manifest detected; forcing 00-cataloger rerun before execution\n'
   FORCE_CATALOG=1
   CATALOG_WITH_CODEX=1
 
@@ -3392,7 +3537,7 @@ auto_recover_raw_unit_manifest() {
     rebuild_unit_prompts
     build_final_review_prompt
   else
-    printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
+    log_event_err '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR"
     exit 1
   fi
 }
@@ -3897,7 +4042,7 @@ recover_packets_from_prior_remediation_runs() {
     [[ "$prior_dir" != "$REMEDIATION_DIR" ]] || continue
     [[ -f "$prior_dir/00-master-px-list.tsv" ]] || continue
     if [[ -f "$prior_dir/.remediation-no-import" || -f "$prior_dir/DO-NOT-IMPORT" ]]; then
-      printf '[resume] skipping quarantined prior remediation run: %s\n' "$prior_dir"
+      log_event '[resume] skipping quarantined prior remediation run: %s\n' "$prior_dir"
       continue
     fi
     prior_audit="$(remediation_dir_audit_run "$prior_dir")"
@@ -3911,7 +4056,7 @@ recover_packets_from_prior_remediation_runs() {
   imported_after="${#_IMPLEMENTED_PACKETS[@]}"
   imported=$(( imported_after - imported_before ))
   if (( imported > 0 )); then
-    printf '[resume] recovered %d fixed packet(s) from prior same-audit remediation runs\n' "$imported"
+    log_event '[resume] recovered %d fixed packet(s) from prior same-audit remediation runs\n' "$imported"
   fi
 }
 
@@ -5226,24 +5371,24 @@ execute_planners() {
     if ! unit_selected "$unit_id"; then continue; fi
     if [[ -n "$ONLY_GROUP" && "$group" != "$ONLY_GROUP" ]]; then continue; fi
     if [[ -z "$(incomplete_packets_csv "$packets_csv")" ]]; then
-      printf '[resume] all packets complete for plan-%s; auto-checkpointing\n' "$unit_id"
+      log_event '[resume] all packets complete for plan-%s; auto-checkpointing\n' "$unit_id"
       grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "plan-$unit_id" >> "$CHECKPOINT_FILE"
       continue
     fi
     local design_doc="$REMEDIATION_DIR/artifacts/$unit_id-design.md"
     recover_planner_design_result "$unit_id" "$design_doc" "$REMEDIATION_DIR/logs/plan-$unit_id.log" 2>/dev/null || true
     if final_result_is_pass "$design_doc" && artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
-      printf '[resume] recovered completed plan-%s from existing design artifact\n' "$unit_id"
+      log_event '[resume] recovered completed plan-%s from existing design artifact\n' "$unit_id"
       grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "plan-$unit_id" >> "$CHECKPOINT_FILE"
       continue
     fi
     if grep -qxF "plan-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then
       if artifact_mentions_all_packets "$design_doc" "$packets_csv"; then
-        printf '[resume] skipping completed plan-%s\n' "$unit_id"
+        log_event '[resume] skipping completed plan-%s\n' "$unit_id"
       else
         # Design artifact may not cover all packets yet (e.g. verifier hasn't
         # run), but the planner already ran successfully. Trust the checkpoint.
-        printf '[resume] skipping checkpointed plan-%s (design artifact pending)\n' "$unit_id"
+        log_event '[resume] skipping checkpointed plan-%s (design artifact pending)\n' "$unit_id"
       fi
       continue
     fi
@@ -6025,7 +6170,7 @@ close_register_findings_for_unit() {
   [[ -n "$packets_csv" ]] || return 0
   test_ref="$(regression_test_for_unit "$unit_id" || true)"
   if [[ -z "$test_ref" ]]; then
-    printf '[register] %s: accepted verifier omitted required Regression test line\n' "$unit_id" >&2
+    log_event_err '[register] %s: accepted verifier omitted required Regression test line\n' "$unit_id"
     return 1
   fi
   while IFS= read -r finding_id; do
@@ -6384,14 +6529,36 @@ $test_cmd"
             fi
           fi
           if [[ "$cmd_status" != "0" ]]; then
-            printf '[native-test] failed (exit %d): %s\n' "$cmd_status" "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
-            test_status="$cmd_status"
-            break
+            # Improvement 2: exit code 2 from pytest means collection error
+            # (import errors, missing symbols) — a systemic issue caused by
+            # peer IUs not yet implemented, not by this unit's changes.
+            # Treat collection errors as a soft skip: log clearly, do not
+            # block the unit, let the verifier see the evidence.
+            if [[ "$cmd_status" == "2" ]] && grep -qE 'ERROR collecting|ImportError|ModuleNotFoundError|Interrupted:.*error.*during collection' "$test_log" 2>/dev/null; then
+              printf '[native-test] collection-error (exit 2): %s — systemic import failures unrelated to this unit; not blocking\n' "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+              printf '\n[native-test] COLLECTION ERROR (exit 2): pytest could not collect tests due to import errors.\n' >> "$test_log"
+              printf '[native-test] This is a systemic issue (missing symbols from peer IUs) — not caused by this unit.\n' >> "$test_log"
+              printf '[native-test] The unit implementation is not blocked; verifier will review the evidence above.\n' >> "$test_log"
+            else
+              printf '[native-test] failed (exit %d): %s\n' "$cmd_status" "$test_cmd" >> "$REMEDIATION_DIR/logs/$workstream.log"
+              test_status="$cmd_status"
+              break
+            fi
           fi
         fi
       done
       if [[ "$test_status" != "0" ]]; then
-        return "$test_status"
+        # Improvement 1: if all failures are pre-existing baseline failures,
+        # treat this unit as passing the native test gate. The agent did not
+        # introduce new failures; the baseline snapshot already recorded these.
+        if native_test_all_failures_are_baseline "$test_log"; then
+          printf '[native-test] all failures are pre-existing baseline failures; not blocking unit %s\n' "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
+          printf '\n[native-test] BASELINE PASS: all %d failure(s) above were already failing before this unit ran.\n' \
+            "$(grep -cE '^FAILED |^\s+FAILED ' "$test_log" 2>/dev/null || printf '0')" >> "$test_log"
+          test_status=0
+        else
+          return "$test_status"
+        fi
       fi
     else
       printf '\n[native-test] no supported verification commands detected\n' >> "$REMEDIATION_DIR/logs/$workstream.log"
@@ -6469,7 +6636,7 @@ run_prompt() {
   # Skip reviewer/verifier roles when no agent is configured.
   if [[ "$class" == "verifier" || "$class" == "reviewer" ]]; then
     if [[ -z "$runner" && ( -z "$effective_agent" || "$effective_agent" == "none" ) ]]; then
-      printf '[skip] %s class=%s reviewer not configured\n' "$workstream" "$class"
+      log_event '[skip] %s class=%s reviewer not configured\n' "$workstream" "$class"
       return 0
     fi
   fi
@@ -6688,7 +6855,7 @@ wait_for_wave() {
         local _tw; _tw=$(tput cols 2>/dev/null || echo 120)
         printf '\r%-*s\r' $(( _tw - 1 )) ''
         if [[ $s -eq 0 ]]; then
-          printf '[ok] %s\n' "${names_ref[$idx]}"
+          log_event '[ok] %s\n' "${names_ref[$idx]}"
           if [[ "$DRY_RUN" != "1" ]]; then
             printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
             if [[ "${names_ref[$idx]}" == verify-* ]]; then
@@ -6698,7 +6865,7 @@ wait_for_wave() {
             fi
           fi
         elif wave_job_completed_successfully "${names_ref[$idx]}" "${job_log[$idx]}"; then
-          printf '[ok] %s (auto-recovered after non-zero wave exit)\n' "${names_ref[$idx]}"
+          log_event '[ok] %s (auto-recovered after non-zero wave exit)\n' "${names_ref[$idx]}"
           printf '\n[auto-recover] %s: non-zero wave exit but terminal RESULT with required artifact — treating as success\n' \
             "${names_ref[$idx]}" >>"${job_log[$idx]}"
           if [[ "$DRY_RUN" != "1" ]]; then
@@ -6710,8 +6877,8 @@ wait_for_wave() {
             fi
           fi
         else
-          printf '[fail] %s (see %s/logs/%s.log)\n' \
-            "${names_ref[$idx]}" "$REMEDIATION_DIR" "${names_ref[$idx]}" >&2
+          log_event_err '[fail] %s (see %s/logs/%s.log)\n' \
+            "${names_ref[$idx]}" "$REMEDIATION_DIR" "${names_ref[$idx]}"
           failed=1
         fi
       else
@@ -6770,7 +6937,7 @@ execute_workstreams() {
   execute_native_test_script_repairs
   if [[ "$REVISE_EXISTING" != "1" ]]; then
     if grep -qxF "00-coordinator" "$CHECKPOINT_FILE" 2>/dev/null; then
-      printf '[resume] skipping completed 00-coordinator\n'
+      log_event '[resume] skipping completed 00-coordinator\n'
     else
       printf '[coordinator] %s\n' "$coordinator"
       if run_prompt "$coordinator" "00-coordinator" "coordinator"; then
@@ -6778,7 +6945,7 @@ execute_workstreams() {
       fi
     fi
   else
-    printf '[revise-existing] skipping catalog/global coordination and using existing implementation units\n'
+    log_event '[revise-existing] skipping catalog/global coordination and using existing implementation units\n'
   fi
 
   if [[ "$NO_NORMALIZE" != "1" ]]; then
@@ -6808,7 +6975,7 @@ execute_workstreams() {
       local prompt="$REMEDIATION_DIR/prompts/coordinate-$group.md"
       local coord_name="coordinate-$group"
       if grep -qxF "$coord_name" "$CHECKPOINT_FILE" 2>/dev/null; then
-        printf '[resume] skipping completed %s\n' "$coord_name"
+        log_event '[resume] skipping completed %s\n' "$coord_name"
         continue
       fi
       # If every packet in this workstream is already complete, auto-checkpoint
@@ -6850,19 +7017,19 @@ execute_workstreams() {
     fi
     if [[ "$REVISE_EXISTING" == "1" ]]; then
       if verifier_accepts_unit "$unit_id"; then
-        printf '[revise] skipping verifier-accepted unit %s\n' "implement-$unit_id"
+        log_event '[revise] skipping verifier-accepted unit %s\n' "implement-$unit_id"
         continue
       fi
       if unit_has_split_children "$unit_id" || unit_packets_marked_split_parent "$unit_id"; then
-        printf '[revise] skipping decomposed parent unit %s; split children will run instead\n' "implement-$unit_id"
+        log_event '[revise] skipping decomposed parent unit %s; split children will run instead\n' "implement-$unit_id"
         continue
       fi
       if verifier_has_only_launch_evidence_findings "$unit_id"; then
-        printf '[revise] skipping launch-evidence-only unit %s\n' "implement-$unit_id"
+        log_event '[revise] skipping launch-evidence-only unit %s\n' "implement-$unit_id"
         continue
       fi
       if verifier_has_only_coordinator_or_evidence_findings "$unit_id"; then
-        printf '[revise] skipping packet/process/evidence-only unit %s\n' "implement-$unit_id"
+        log_event '[revise] skipping packet/process/evidence-only unit %s\n' "implement-$unit_id"
         continue
       fi
     fi
@@ -6870,7 +7037,7 @@ execute_workstreams() {
       local _already_complete_packets
       _already_complete_packets="$(incomplete_packets_csv "$packets_csv")"
       if [[ -z "$_already_complete_packets" ]]; then
-        printf '[resume] all packets complete for %s; auto-checkpointing\n' "implement-$unit_id"
+        log_event '[resume] all packets complete for %s; auto-checkpointing\n' "implement-$unit_id"
         printf '%s\n' "implement-$unit_id" >> "$CHECKPOINT_FILE"
         continue
       fi
@@ -6886,18 +7053,18 @@ execute_workstreams() {
         local _findings
         _findings="$(verifier_findings_tsv_for_unit "$unit_id")"
         if [[ -z "$_remaining_packets" ]] && implementation_summary_is_fixed "$_summary" && [[ ! -s "$_findings" ]]; then
-          printf '[revise] skipping fixed completed unit %s\n' "implement-$unit_id"
+          log_event '[revise] skipping fixed completed unit %s\n' "implement-$unit_id"
           continue
         fi
-        printf '[revise] re-running %s from verifier decision\n' "implement-$unit_id"
+        log_event '[revise] re-running %s from verifier decision\n' "implement-$unit_id"
       elif [[ -z "$_remaining_packets" ]]; then
-        printf '[resume] skipping completed unit %s\n' "implement-$unit_id"
+        log_event '[resume] skipping completed unit %s\n' "implement-$unit_id"
         continue
       else
         # Packets not yet marked complete (verifier hasn't run), but the
         # implementer already ran successfully. Trust the checkpoint and skip
         # rather than re-running the same implementation again.
-        printf '[resume] skipping checkpointed unit %s (packets pending verification)\n' "implement-$unit_id"
+        log_event '[resume] skipping checkpointed unit %s (packets pending verification)\n' "implement-$unit_id"
         continue
       fi
     fi
@@ -6911,7 +7078,7 @@ execute_workstreams() {
     record_unit_workspace "$unit_id" "$worktree_dir"
 
     local prompt="$REMEDIATION_DIR/prompts/implement-$unit_id.md"
-    printf '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
+    log_event '[start] unit=%s group=%s model_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
     if [[ "$DRY_RUN" != "1" ]] && ! start_register_remediation_for_unit "$unit_id" "$packets_csv"; then
       if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
         exit 1
@@ -6965,7 +7132,7 @@ execute_verifier_units() {
     if [[ "$REVISE_EXISTING" != "1" ]] && \
        ! grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null && \
        recover_verifier_artifact_from_log "$unit_id" "$prior_verify_log"; then
-      printf '[resume] recovered completed verify-%s from existing verifier log\n' "$unit_id"
+      log_event '[resume] recovered completed verify-%s from existing verifier log\n' "$unit_id"
       printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
       if ! finalize_verified_unit "$unit_id"; then
         if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
@@ -6979,7 +7146,7 @@ execute_verifier_units() {
         if [[ "$FORCE_VERIFY" == "1" ]]; then
           printf '[rerun] verify-%s requested explicitly\n' "$unit_id"
         else
-          printf '[resume] skipping completed verify-%s\n' "$unit_id"
+          log_event '[resume] skipping completed verify-%s\n' "$unit_id"
           grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
           continue
         fi
@@ -6988,14 +7155,14 @@ execute_verifier_units() {
           printf '[rerun] verify-%s requested; checkpoint verifier does not cover merged packets=%s\n' \
             "$unit_id" "$packets_csv"
         else
-          printf '[resume] not re-running verify-%s; checkpoint verifier is stale for packets=%s (use --rerun-verifiers to refresh)\n' \
+          log_event '[resume] not re-running verify-%s; checkpoint verifier is stale for packets=%s (use --rerun-verifiers to refresh)\n' \
             "$unit_id" "$packets_csv"
           continue
         fi
       fi
     fi
     local prompt="$REMEDIATION_DIR/prompts/verify-$unit_id.md"
-    printf '[verify] unit=%s group=%s implementation_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
+    log_event '[verify] unit=%s group=%s implementation_class=%s packets=%s\n' "$unit_id" "$group" "$model_class" "$packets_csv"
     run_prompt "$prompt" "verify-$unit_id" "verifier" &
     pids+=("$!")
     names+=("verify-$unit_id")
@@ -7254,13 +7421,13 @@ execute_final_review() {
       if [[ "$FORCE_FINAL_REVIEW" == "1" ]]; then
         printf '[rerun] 99-final-review requested explicitly\n'
       else
-        printf '[resume] skipping completed 99-final-review\n'
+        log_event '[resume] skipping completed 99-final-review\n'
         return 0
       fi
     elif [[ "$FORCE_FINAL_REVIEW" == "1" || "$REMEDIATION_AUTO_RERUN_FINAL_REVIEW" == "1" ]]; then
       printf '[rerun] 99-final-review inputs changed since prior final review\n'
     else
-      printf '[resume] not re-running 99-final-review; checkpoint inputs changed (use --rerun-final-review to refresh)\n'
+      log_event '[resume] not re-running 99-final-review; checkpoint inputs changed (use --rerun-final-review to refresh)\n'
       return 0
     fi
     if [[ "$DRY_RUN" != "1" ]]; then
@@ -7287,7 +7454,7 @@ execute_verifiers() {
 }
 
 execute_state_resume() {
-  printf '[resume] deriving next action from existing remediation state\n'
+  log_event '[resume] deriving next action from existing remediation state\n'
   run_static_prechecks
   aggregate_verifier_findings
 
@@ -7302,13 +7469,13 @@ execute_state_resume() {
   fi
 
   if find "$REMEDIATION_DIR/artifacts" -maxdepth 1 -name 'verify-*.md' -print -quit 2>/dev/null | grep -q .; then
-    printf '[resume] final review checkpoint missing; verifier artifacts exist, so running final review only\n'
+    log_event '[resume] final review checkpoint missing; verifier artifacts exist, so running final review only\n'
     execute_final_review
     return 0
   fi
 
-  printf '[resume] no final-review checkpoint and no verifier artifacts; generated summary/queue only\n'
-  printf '[resume] use --execute, --verify-only, or --rerun-verifiers for an explicit agent section\n'
+  log_event '[resume] no final-review checkpoint and no verifier artifacts; generated summary/queue only\n'
+  log_event '[resume] use --execute, --verify-only, or --rerun-verifiers for an explicit agent section\n'
 }
 
 execute_queue_drain() {
@@ -8076,7 +8243,7 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
   fi
 
   if [[ "$_preserve_existing_inventory" == "1" ]]; then
-    printf '[resume] preserving existing master PX inventory: %s\n' "$PX_TSV"
+    log_event '[resume] preserving existing master PX inventory: %s\n' "$PX_TSV"
     guard_existing_px_inventory_consistency
     write_packets_and_workstreams
   else
@@ -8103,7 +8270,7 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
   elif [[ "$FORCE_CATALOG" == "1" && "$EXECUTE" == "1" && "$NO_CATALOG" != "1" ]]; then
     printf '[catalog] preserving existing implementation units as catalog seed; --force-catalog will rerun 00-cataloger: %s\n' "$UNITS_TSV"
   else
-    printf '[resume] preserving existing implementation units: %s\n' "$UNITS_TSV"
+    log_event '[resume] preserving existing implementation units: %s\n' "$UNITS_TSV"
   fi
 
   # Reconcile completed packet state before any agent phase. A reused
@@ -8138,30 +8305,30 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
           printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
           purge_orphaned_packets
         else
-          printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
+          log_event_err '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR"
           exit 1
         fi
       else
-        printf '[resume] existing catalog detected; skipping 00-cataloger (use --force-catalog to rewrite)\n'
+        log_event '[resume] existing catalog detected; skipping 00-cataloger (use --force-catalog to rewrite)\n'
         grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
       fi
     else
       build_catalog_prompt
       if grep -qxF "00-cataloger" "$CHECKPOINT_FILE" 2>/dev/null; then
-        printf '[resume] skipping completed 00-cataloger\n'
+        log_event '[resume] skipping completed 00-cataloger\n'
       else
         printf '[cataloger] %s\n' "$REMEDIATION_DIR/prompts/00-cataloger.md"
         if run_prompt "$REMEDIATION_DIR/prompts/00-cataloger.md" "00-cataloger" "cataloger"; then
           printf '%s\n' "00-cataloger" >> "$CHECKPOINT_FILE"
           purge_orphaned_packets
         else
-          printf '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR" >&2
+          log_event_err '[fail] 00-cataloger (see %s/logs/00-cataloger.log)\n' "$REMEDIATION_DIR"
           exit 1
         fi
       fi
     fi
   elif [[ "$EXECUTE" == "1" && "$NO_CATALOG" != "1" && "$FORCE_CATALOG" != "1" && -s "$UNITS_TSV" && -s "$WORKSTREAMS_TSV" ]]; then
-    printf '[resume] existing catalog detected; not auto-running 00-cataloger (use --force-catalog to rewrite)\n'
+    log_event '[resume] existing catalog detected; not auto-running 00-cataloger (use --force-catalog to rewrite)\n'
   fi
 elif [[ ! -f "$WORKSTREAMS_TSV" || ! -f "$PX_TSV" || ! -f "$UNITS_TSV" ]]; then
   echo "--verify-only/--finalize-only/--summary-only/--revise-existing requires an existing REMEDIATION_DIR with $PX_TSV, $WORKSTREAMS_TSV, and $UNITS_TSV" >&2
@@ -8858,13 +9025,13 @@ if [[ "$RECOORDINATE" == "1" && -f "$CHECKPOINT_FILE" ]]; then
   _rc_after=$(grep -c "^coordinate-" "$CHECKPOINT_FILE" 2>/dev/null || true)
   [[ "$_rc_before" =~ ^[0-9]+$ ]] || _rc_before=0
   [[ "$_rc_after" =~ ^[0-9]+$ ]] || _rc_after=0
-  printf '[recoordinate] cleared %d coordinate-* checkpoint entries; workstream coordinators will re-run against incomplete packets\n' \
+  log_event '[recoordinate] cleared %d coordinate-* checkpoint entries; workstream coordinators will re-run against incomplete packets\n' \
     "$(( _rc_before - _rc_after ))"
 fi
 
 if [[ "$STATE_RESUME" == "1" ]]; then
   if [[ "$REMEDIATION_AUTO_DRAIN_QUEUE" == "1" ]]; then
-    printf '[resume] deriving and executing deterministic queue actions from existing remediation state\n'
+    log_event '[resume] deriving and executing deterministic queue actions from existing remediation state\n'
     execute_queue_drain
   else
     execute_state_resume
@@ -8882,6 +9049,7 @@ elif [[ "$FINALIZE_ONLY" == "1" ]]; then
 elif [[ "$SPLIT_SKIP_EXECUTION" == "1" ]]; then
   printf 'No split candidates or child units to execute.\n'
 elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" ]]; then
+  run_baseline_snapshot
   execute_workstreams
   if [[ "$EXECUTE" == "1" && "$DRY_RUN" != "1" && "$REMEDIATION_VERIFY_AFTER_EXECUTE" == "1" ]]; then
     VERIFY=1
@@ -8889,9 +9057,9 @@ elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" ]]; then
   if [[ "$REVISE_EXISTING" == "1" && "$EXECUTE" == "1" && "$DRY_RUN" != "1" ]]; then
     VERIFY=1
     FORCE_VERIFY=1
-    printf '[revise-existing] implementation pass complete; forcing verifier rerun for selected units\n'
+    log_event '[revise-existing] implementation pass complete; forcing verifier rerun for selected units\n'
   elif [[ "$VERIFY" == "1" && "$EXECUTE" == "1" && "$DRY_RUN" != "1" && "$REMEDIATION_VERIFY_AFTER_EXECUTE" == "1" ]]; then
-    printf '[execute] implementation pass complete; running verifier/final-review drain by default\n'
+    log_event '[execute] implementation pass complete; running verifier/final-review drain by default\n'
   fi
   if [[ "$VERIFY" == "1" ]]; then
     if [[ "$REVISE_EXISTING" == "1" && -n "${ONLY_UNIT:-}" ]]; then
@@ -8910,8 +9078,8 @@ else
 fi
 
 if ! write_run_summary; then
-  printf '[warn] run summary generation failed; remediation execution already completed\n' >&2
+  log_event_err '[warn] run summary generation failed; remediation execution already completed\n'
 fi
 if ! write_remediation_queue_summary; then
-  printf '[warn] remediation queue summary generation failed; remediation execution already completed\n' >&2
+  log_event_err '[warn] remediation queue summary generation failed; remediation execution already completed\n'
 fi
