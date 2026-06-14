@@ -10,13 +10,13 @@ log_event() {
   local msg
   printf -v msg "$@"
   printf '%s' "$msg"
-  [[ -n "${RUN_LOG:-}" ]] && printf '%s' "$msg" >> "$RUN_LOG"
+  [[ -z "${RUN_LOG:-}" ]] || printf '%s' "$msg" >> "$RUN_LOG"
 }
 log_event_err() {
   local msg
   printf -v msg "$@"
   printf '%s' "$msg" >&2
-  [[ -n "${RUN_LOG:-}" ]] && printf '%s' "$msg" >> "$RUN_LOG"
+  [[ -z "${RUN_LOG:-}" ]] || printf '%s' "$msg" >> "$RUN_LOG"
 }
 
 if [[ "${REMEDIATION_SCRIPT_SNAPSHOT:-0}" != "1" ]]; then
