@@ -119,6 +119,7 @@ REMEDIATION_AUTO_RERUN_FINAL_REVIEW="${REMEDIATION_AUTO_RERUN_FINAL_REVIEW:-1}"
 REMEDIATION_AUTO_VERIFY_MISSING="${REMEDIATION_AUTO_VERIFY_MISSING:-1}"
 REMEDIATION_AUTO_METADATA_CLOSEOUT="${REMEDIATION_AUTO_METADATA_CLOSEOUT:-1}"
 REMEDIATION_SANDBOX_PYTEST_FALLBACK="${REMEDIATION_SANDBOX_PYTEST_FALLBACK:-1}"
+REMEDIATION_NATIVE_TEST_FIX_RETRIES="${REMEDIATION_NATIVE_TEST_FIX_RETRIES:-1}"
 REMEDIATION_STATIC_PRECHECKS="${REMEDIATION_STATIC_PRECHECKS:-1}"
 REMEDIATION_AUTO_DRAIN_QUEUE="${REMEDIATION_AUTO_DRAIN_QUEUE:-1}"
 REMEDIATION_VERIFY_AFTER_EXECUTE="${REMEDIATION_VERIFY_AFTER_EXECUTE:-1}"
@@ -6400,6 +6401,42 @@ commit_verified_unit_changes() {
   fi
 }
 
+build_native_test_fix_prompt() {
+  local unit_id="$1" test_log="$2" failing_cmd="$3"
+  local fix_prompt="$REMEDIATION_DIR/prompts/test-fix-$unit_id.md"
+  local packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  local failure_excerpt
+  failure_excerpt="$(tail -300 "$test_log" 2>/dev/null || true)"
+  cat > "$fix_prompt" <<FIXPROMPT
+# Native Test Fix: $unit_id
+
+The implementation for unit **$unit_id** (packets: $packets_csv) was completed but the test
+command below found regressions in the broader test suite. Your sole task is to fix the
+product code so every test passes.
+
+## Failing command
+
+\`\`\`
+$failing_cmd
+\`\`\`
+
+## Test output (last 300 lines)
+
+\`\`\`
+$failure_excerpt
+\`\`\`
+
+## Rules
+
+- Do NOT revert, undo, or weaken the implementation changes made for $unit_id.
+- Do NOT modify test files unless a test assertion is demonstrably wrong (document why).
+- Fix the product code to satisfy both the implementation requirements and the failing tests.
+- When done, write a brief summary to stdout of what you changed and why.
+FIXPROMPT
+  printf '%s\n' "$fix_prompt"
+}
+
 run_implementer_and_test() {
   local prompt_file="$1" workstream="$2" class="$3" worktree_dir="$4" unit_id="$5"
 
@@ -6546,16 +6583,52 @@ $test_cmd"
         fi
       done
       if [[ "$test_status" != "0" ]]; then
-        # Improvement 1: if all failures are pre-existing baseline failures,
-        # treat this unit as passing the native test gate. The agent did not
-        # introduce new failures; the baseline snapshot already recorded these.
         if native_test_all_failures_are_baseline "$test_log"; then
           printf '[native-test] all failures are pre-existing baseline failures; not blocking unit %s\n' "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
           printf '\n[native-test] BASELINE PASS: all %d failure(s) above were already failing before this unit ran.\n' \
             "$(grep -cE '^FAILED |^\s+FAILED ' "$test_log" 2>/dev/null || printf '0')" >> "$test_log"
           test_status=0
         else
-          return "$test_status"
+          # Ask the agent to fix the regressions before giving up.
+          local _fix_remaining="$REMEDIATION_NATIVE_TEST_FIX_RETRIES"
+          local _fix_attempt=0
+          local _last_failing_cmd="$test_cmd"
+          local _last_failing_script="$test_script"
+          while [[ "$test_status" != "0" ]] && (( _fix_remaining > 0 )); do
+            _fix_attempt=$(( _fix_attempt + 1 ))
+            _fix_remaining=$(( _fix_remaining - 1 ))
+            printf '[native-test-fix] attempt=%d: regressions found; running fix pass for %s\n' \
+              "$_fix_attempt" "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            local _fix_prompt
+            _fix_prompt="$(build_native_test_fix_prompt "$unit_id" "$test_log" "$_last_failing_cmd")"
+            run_prompt "$_fix_prompt" "test-fix-$unit_id" "$class" "$worktree_dir" \
+              >> "$REMEDIATION_DIR/logs/$workstream.log" 2>&1 || break
+            # Re-run the failing command to see if the fix worked.
+            : > "$test_log"
+            test_status=0
+            cmd_status=0
+            if {
+              printf '$ %s\n' "$_last_failing_cmd"
+              printf '[native-test] fix-retry script: %s\n' "$_last_failing_script"
+              (cd "$worktree_dir" && bash "$_last_failing_script")
+            } >> "$test_log" 2>&1; then
+              cmd_status=0
+            else
+              cmd_status=$?
+              test_status="$cmd_status"
+            fi
+            if [[ "$test_status" == "0" ]]; then
+              printf '[native-test-fix] fix pass succeeded for %s\n' "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            elif native_test_all_failures_are_baseline "$test_log"; then
+              printf '[native-test-fix] remaining failures are pre-existing baseline; passing %s\n' "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
+              test_status=0
+            else
+              printf '[native-test-fix] fix pass did not resolve all failures for %s\n' "$unit_id" >> "$REMEDIATION_DIR/logs/$workstream.log"
+            fi
+          done
+          if [[ "$test_status" != "0" ]]; then
+            return "$test_status"
+          fi
         fi
       fi
     else
