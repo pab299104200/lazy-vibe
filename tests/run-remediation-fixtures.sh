@@ -501,6 +501,147 @@ grep -q 'needs credentials' "$remediation/artifacts/triage-IU-0013.md" || fail "
 grep -q 'Do not rerun broad product-code remediation blindly' "$remediation/artifacts/triage-IU-0005.md" || fail "test harness next action missing"
 grep -q 'Resolve the product/security contract first' "$remediation/artifacts/triage-IU-0006.md" || fail "contract next action missing"
 grep -q 'External input, access, dependency, or human decision is required' "$remediation/artifacts/triage-IU-0013.md" || fail "blocked next action missing"
+
+parallel_repo="$tmp_root/parallel-repo"
+parallel_audit="$parallel_repo/docs/audit/fixture-launch-readiness-run"
+parallel_remediation="$parallel_repo/docs/audit/fixture-remediation-run"
+mkdir -p "$parallel_repo" "$parallel_audit" "$parallel_remediation"/{packets,prompts,logs,artifacts}
+git -C "$parallel_repo" init -q
+git -C "$parallel_repo" config user.email "fixture@example.test"
+git -C "$parallel_repo" config user.name "Fixture Runner"
+mkdir -p "$parallel_repo/src"
+printf '# fixture\n' > "$parallel_repo/README.md"
+git -C "$parallel_repo" add README.md src
+git -C "$parallel_repo" commit -q -m "initial fixture"
+
+cat > "$parallel_remediation/00-master-px-list.tsv" <<'EOF'
+packet_id	severity	group	title	source_file	source_line	finding	rationale
+PX-1001	P1	parallel	First	fixture.md	1	first	row
+PX-1002	P1	parallel	Second	fixture.md	2	second	row
+EOF
+cat > "$parallel_remediation/02-workstreams.tsv" <<'EOF'
+group	packets	model_class	rationale
+parallel	PX-1001,PX-1002	standard	fixture
+EOF
+cat > "$parallel_remediation/03-implementation-units.tsv" <<'EOF'
+unit_id	packets	group	model_class	severity	rationale
+IU-1001	PX-1001	parallel	standard	P1	first
+IU-1002	PX-1002	parallel	standard	P1	second
+EOF
+write_packet "$parallel_remediation" PX-1001 not-started
+write_packet "$parallel_remediation" PX-1002 not-started
+printf '00-coordinator\ncoordinate-parallel\n' > "$parallel_remediation/completed-units.txt"
+
+parallel_runner="$tmp_root/parallel-implementer.sh"
+cat > "$parallel_runner" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+prompt_file="$1"
+remediation="$2"
+workstream="$3"
+unit="${workstream#implement-}"
+worktree="$(
+  sed -n 's/.*Planned unit worktree: `\([^`]*\)`.*/\1/p' "$prompt_file" | head -1
+)"
+if [[ -z "$worktree" || ! -d "$worktree" ]]; then
+  printf 'missing worktree for %s\n' "$workstream" >&2
+  exit 1
+fi
+mkdir -p "$worktree/src" "$remediation/artifacts"
+printf '%s\n' "$unit" > "$worktree/src/$unit.txt"
+cat > "$remediation/artifacts/$unit-summary.md" <<SUMMARY
+# $unit summary
+
+IMPLEMENTATION_RESULT: fixed
+SUMMARY
+EOF
+chmod +x "$parallel_runner"
+
+REPO_ROOT="$parallel_repo" \
+REMEDIATION_DIR="$parallel_remediation" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+IMPLEMENTER_AGENT=runner \
+IMPLEMENTER_RUNNER="$parallel_runner" \
+MAX_PARALLEL=2 \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --audit-run "$parallel_audit" \
+  --execute \
+  --no-verify-after-execute \
+  --no-catalog >/tmp/lazy-vibe-parallel-worktree-fixture.out 2>/tmp/lazy-vibe-parallel-worktree-fixture.err || {
+    sed -n '1,160p' /tmp/lazy-vibe-parallel-worktree-fixture.out >&2 || true
+    sed -n '1,200p' /tmp/lazy-vibe-parallel-worktree-fixture.err >&2 || true
+    fail "parallel worktree promotion fixture failed"
+  }
+
+[[ -f "$parallel_repo/src/IU-1001.txt" ]] || fail "first parallel unit was not merged into active checkout"
+[[ -f "$parallel_repo/src/IU-1002.txt" ]] || fail "second parallel unit was not merged into active checkout"
+[[ ! -d "$parallel_remediation/worktrees/IU-1001" ]] || fail "first promoted worktree was not removed"
+[[ ! -d "$parallel_remediation/worktrees/IU-1002" ]] || fail "second promoted worktree was not removed"
+[[ -s "$parallel_remediation/artifacts/IU-1001.promotion" ]] || fail "first promotion marker missing"
+[[ -s "$parallel_remediation/artifacts/IU-1002.promotion" ]] || fail "second promotion marker missing"
+grep -q '\[worktree-merge\] promoting completed implementation units=IU-1001,IU-1002' \
+  /tmp/lazy-vibe-parallel-worktree-fixture.out || fail "parallel wave promotion log missing"
+if git -C "$parallel_repo" worktree list --porcelain | grep -q "$parallel_remediation/worktrees"; then
+  fail "git worktree metadata still references promoted remediation worktrees"
+fi
+
+resume_repo="$tmp_root/resume-repo"
+resume_audit="$resume_repo/docs/audit/fixture-launch-readiness-run"
+resume_remediation="$resume_repo/docs/audit/fixture-remediation-run"
+resume_unit="IU-2001"
+resume_branch="remediation-$(basename "$resume_remediation")-$resume_unit"
+resume_worktree="$resume_remediation/worktrees/$resume_unit"
+mkdir -p "$resume_repo" "$resume_audit" "$resume_remediation"/{packets,prompts,logs,artifacts,worktrees}
+git -C "$resume_repo" init -q
+git -C "$resume_repo" config user.email "fixture@example.test"
+git -C "$resume_repo" config user.name "Fixture Runner"
+printf '# fixture\n' > "$resume_repo/README.md"
+git -C "$resume_repo" add README.md
+git -C "$resume_repo" commit -q -m "initial fixture"
+git -C "$resume_repo" worktree add -q -b "$resume_branch" "$resume_worktree" HEAD
+mkdir -p "$resume_worktree/src"
+printf '%s\n' "$resume_unit" > "$resume_worktree/src/$resume_unit.txt"
+
+cat > "$resume_remediation/00-master-px-list.tsv" <<'EOF'
+packet_id	severity	group	title	source_file	source_line	finding	rationale
+PX-2001	P1	resume	Checkpointed	fixture.md	1	resume	row
+EOF
+cat > "$resume_remediation/02-workstreams.tsv" <<'EOF'
+group	packets	model_class	rationale
+resume	PX-2001	standard	fixture
+EOF
+cat > "$resume_remediation/03-implementation-units.tsv" <<'EOF'
+unit_id	packets	group	model_class	severity	rationale
+IU-2001	PX-2001	resume	standard	P1	resume
+EOF
+write_packet "$resume_remediation" PX-2001 not-started
+write_summary "$resume_remediation" "$resume_unit" fixed
+printf '00-coordinator\ncoordinate-resume\nimplement-%s\n' "$resume_unit" > "$resume_remediation/completed-units.txt"
+
+REPO_ROOT="$resume_repo" \
+REMEDIATION_DIR="$resume_remediation" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+MAX_PARALLEL=2 \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --audit-run "$resume_audit" \
+  --execute \
+  --no-verify-after-execute \
+  --only-unit "$resume_unit" \
+  --no-catalog >/tmp/lazy-vibe-resume-worktree-fixture.out 2>/tmp/lazy-vibe-resume-worktree-fixture.err || {
+    sed -n '1,160p' /tmp/lazy-vibe-resume-worktree-fixture.out >&2 || true
+    sed -n '1,200p' /tmp/lazy-vibe-resume-worktree-fixture.err >&2 || true
+    fail "resume checkpointed worktree promotion fixture failed"
+  }
+
+[[ -f "$resume_repo/src/$resume_unit.txt" ]] || fail "checkpointed resume worktree was not merged"
+[[ ! -d "$resume_worktree" ]] || fail "checkpointed resume worktree was not removed"
+[[ -s "$resume_remediation/artifacts/$resume_unit.promotion" ]] || fail "checkpointed promotion marker missing"
+grep -q '\[worktree-merge\] promoting completed implementation units=IU-2001' \
+  /tmp/lazy-vibe-resume-worktree-fixture.out || fail "resume checkpointed promotion log missing"
+if git -C "$resume_repo" worktree list --porcelain | grep -q "$resume_remediation/worktrees"; then
+  fail "git worktree metadata still references checkpointed remediation worktree"
+fi
+
 grep -q 'command_is_long_running_server' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command guard missing"
 grep -q 'refused long-running server command' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command refusal log missing"
 grep -q 'npm run dev' "$SCRIPT_DIR/run-remediation.sh" || fail "npm dev-server guard missing"

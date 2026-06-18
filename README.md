@@ -457,6 +457,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REVIEWER_AGENT` | — | Verification agent. Empty disables `--verify`. |
 | `MAX_PARALLEL` | `3` | Maximum implementation units running in parallel. |
 | `CONTINUE_ON_FAIL` | `0` | Set to `1` to continue past a failed unit instead of stopping. |
+| `REMEDIATION_COMMIT_ON_VERIFY` | `0` | Preserve verified-unit commit closeout. Parallel implementation still uses isolated worktrees; completed implementation waves are merged into the active checkout and cleaned before verification so only active wave worktrees remain. |
 | `REMEDIATION_AUTO_REVISE` | `1` | Re-run units that verifier marks `revise` when findings are safe for targeted automatic revision. |
 | `REMEDIATION_MAX_REVISION_ROUNDS` | `1` | Maximum automatic revision loops before final review. |
 | `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` | `8` | Maximum verifier finding rows allowed for automatic revision; larger units are left for manual triage or splitting. |

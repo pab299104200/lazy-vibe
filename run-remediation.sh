@@ -186,7 +186,8 @@ Environment:
                               when the packet source/line/title still matches. Defaults to 1.
   REMEDIATION_COMMIT_ON_VERIFY
                               1 to commit changed Git roots after a unit verifies as accepted/fixed.
-                              Defaults to 0. Forces serialized implementation/verification waves.
+                              Defaults to 0. Parallel implementation still uses isolated worktrees;
+                              completed worktree waves are merged and cleaned before verification.
   REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
                               REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to backend,frontend.
   REMEDIATION_COLLECT_EVIDENCE
@@ -604,17 +605,6 @@ if [[ -n "${REGISTER_DIR:-}" ]] || [[ "${AUDIT_RUN:-}" == register:* ]]; then
   if ! python3 -c "import lazy_vibe.register" 2>/dev/null; then
     log_event_err '[fatal] lazy_vibe module is not importable even with PYTHONPATH=%s\n' "$SCRIPT_DIR"
     exit 1
-  fi
-fi
-
-if [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]]; then
-  if [[ "$MAX_PARALLEL" != "1" ]]; then
-    printf '[commit-on-verify] forcing MAX_PARALLEL=1 so unit diffs cannot interleave across repos\n'
-    MAX_PARALLEL=1
-  fi
-  if [[ "${REMEDIATION_REVISION_MAX_PARALLEL:-2}" != "1" ]]; then
-    printf '[commit-on-verify] forcing REMEDIATION_REVISION_MAX_PARALLEL=1 so revision diffs remain attributable\n'
-    REMEDIATION_REVISION_MAX_PARALLEL=1
   fi
 fi
 
@@ -5989,6 +5979,10 @@ unit_workspace_marker_file() {
   printf '%s/artifacts/%s.workspace\n' "$REMEDIATION_DIR" "$1"
 }
 
+unit_promotion_marker_file() {
+  printf '%s/artifacts/%s.promotion\n' "$REMEDIATION_DIR" "$1"
+}
+
 record_unit_workspace() {
   local unit_id="$1" workspace="$2" marker
   marker="$(unit_workspace_marker_file "$unit_id")"
@@ -6009,6 +6003,24 @@ recorded_unit_workspace() {
   marker="$(unit_workspace_marker_file "$unit_id")"
   [[ -s "$marker" ]] || return 1
   awk -F '\t' '$1 == "workspace" { print $2; found = 1; exit } END { if (!found) exit 1 }' "$marker"
+}
+
+record_unit_promotion() {
+  local unit_id="$1" status="$2" detail="${3:-}" marker
+  marker="$(unit_promotion_marker_file "$unit_id")"
+  mkdir -p "$REMEDIATION_DIR/artifacts"
+  {
+    printf 'unit_id\t%s\n' "$unit_id"
+    printf 'status\t%s\n' "$status"
+    [[ -z "$detail" ]] || printf 'detail\t%s\n' "$detail"
+    printf 'promoted_at\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$marker"
+}
+
+unit_already_promoted() {
+  local unit_id="$1" marker
+  marker="$(unit_promotion_marker_file "$unit_id")"
+  [[ -s "$marker" ]] && grep -qx $'status\tmerged' "$marker"
 }
 
 unit_worktree_changed_after_workspace_marker() {
@@ -6256,6 +6268,7 @@ git_root_is_clean_for_merge() {
   done < <(git_root_merge_pathspec_args "$root")
   git -C "$root" diff --quiet -- "${pathspec[@]}" || return 1
   git -C "$root" diff --cached --quiet -- "${pathspec[@]}" || return 1
+  [[ -z "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]] || return 1
 }
 
 commit_dirty_git_root() {
@@ -6264,7 +6277,7 @@ commit_dirty_git_root() {
   while IFS= read -r path; do
     [[ -n "$path" ]] && pathspec+=("$path")
   done < <(git_root_merge_pathspec_args "$root")
-  if ! git -C "$root" diff --quiet -- "${pathspec[@]}" || ! git -C "$root" diff --cached --quiet -- "${pathspec[@]}"; then
+  if [[ -n "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]]; then
     git -C "$root" add -A -- "${pathspec[@]}"
     git -C "$root" commit -m "$message" >/dev/null
   fi
@@ -6295,9 +6308,28 @@ merge_branch_or_head_into_root() {
   return 1
 }
 
+cleanup_promoted_unit_worktree() {
+  local unit_id="$1"
+  local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+  [[ -d "$worktree_dir" ]] || return 0
+  [[ "$worktree_dir" != "$REPO_ROOT" ]] || return 0
+  repo_root_is_git_root || return 0
+
+  local branch_name
+  branch_name="$(unit_worktree_branch_name "$unit_id")"
+  if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "worktree $worktree_dir"; then
+    git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || return 1
+  elif [[ -d "$worktree_dir" ]]; then
+    git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || rm -rf "$worktree_dir"
+  fi
+  git -C "$REPO_ROOT" branch -d "$branch_name" >/dev/null 2>&1 || true
+  git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
+}
+
 integrate_unit_worktree_changes() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+  unit_already_promoted "$unit_id" && return 0
   [[ -d "$worktree_dir" ]] || return 0
   if [[ "$worktree_dir" == "$REPO_ROOT" ]]; then
     return 0
@@ -6343,6 +6375,13 @@ integrate_unit_worktree_changes() {
       return 1
     fi
   done
+
+  if ! cleanup_promoted_unit_worktree "$unit_id"; then
+    printf '[worktree-cleanup] %s: merged successfully but failed to remove %s\n' "$unit_id" "$worktree_dir" >&2
+    return 1
+  fi
+  record_unit_promotion "$unit_id" "merged" "$worktree_dir"
+  printf '[worktree-cleanup] %s: removed promoted worktree %s\n' "$unit_id" "$worktree_dir"
 }
 
 integrate_units_before_verification() {
@@ -6367,6 +6406,10 @@ commit_verified_unit_changes() {
     printf '[commit-on-verify] %s: verifier did not accept/fix; not committing\n' "$unit_id"
     return 0
   }
+  if unit_already_promoted "$unit_id"; then
+    printf '[commit-on-verify] %s: changes already promoted before verification\n' "$unit_id"
+    return 0
+  fi
 
   if ! repo_root_is_git_root; then
     printf '[commit-on-verify] %s: REPO_ROOT is not a git root; auto-commit is disabled in split-root mode\n' "$unit_id"
@@ -7003,6 +7046,26 @@ wait_for_wave() {
   return "$failed"
 }
 
+promote_completed_implementation_wave() {
+  local -n wave_names_ref=$1
+  local units="" name unit_id
+  for name in "${wave_names_ref[@]}"; do
+    [[ "$name" == implement-* ]] || continue
+    unit_id="${name#implement-}"
+    if grep -qxF "$name" "$CHECKPOINT_FILE" 2>/dev/null; then
+      units="$(combine_unit_lists "$units" "$unit_id")"
+    fi
+  done
+  promote_completed_implementation_units "$units"
+}
+
+promote_completed_implementation_units() {
+  local units="$1"
+  [[ -n "$units" ]] || return 0
+  log_event '[worktree-merge] promoting completed implementation units=%s\n' "$units"
+  integrate_units_before_verification "$units"
+}
+
 execute_workstreams() {
   local coordinator="$REMEDIATION_DIR/prompts/00-coordinator.md"
   execute_native_test_script_repairs
@@ -7135,6 +7198,11 @@ execute_workstreams() {
         # Packets not yet marked complete (verifier hasn't run), but the
         # implementer already ran successfully. Trust the checkpoint and skip
         # rather than re-running the same implementation again.
+        if ! promote_completed_implementation_units "$unit_id"; then
+          if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+            exit 1
+          fi
+        fi
         log_event '[resume] skipping checkpointed unit %s (packets pending verification)\n' "implement-$unit_id"
         continue
       fi
@@ -7163,22 +7231,44 @@ execute_workstreams() {
     names+=("implement-$unit_id")
     active=$((active + 1))
     if ((active >= MAX_PARALLEL)); then
+      local wave_failed=0
       if ! wait_for_wave pids names; then
+        wave_failed=1
         if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
           exit 1
         fi
       fi
+      if ! promote_completed_implementation_wave names; then
+        if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+          exit 1
+        fi
+        wave_failed=1
+      fi
       pids=()
       names=()
       active=0
+      if [[ "$wave_failed" != "0" && "$CONTINUE_ON_FAIL" != "1" ]]; then
+        exit 1
+      fi
     fi
   done < <(tail -n +2 "$UNITS_TSV")
 
   if ((${#pids[@]} > 0)); then
+    local wave_failed=0
     if ! wait_for_wave pids names; then
+      wave_failed=1
       if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
         exit 1
       fi
+    fi
+    if ! promote_completed_implementation_wave names; then
+      if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+        exit 1
+      fi
+      wave_failed=1
+    fi
+    if [[ "$wave_failed" != "0" && "$CONTINUE_ON_FAIL" != "1" ]]; then
+      exit 1
     fi
   fi
 }
