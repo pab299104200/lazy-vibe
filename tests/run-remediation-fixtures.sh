@@ -659,6 +659,7 @@ grep -q 'scripts/deploy-runtime dev' "$SCRIPT_DIR/run-remediation.sh" || fail "M
 grep -q 'verifier requested revision; queued for implementer retry' "$SCRIPT_DIR/run-remediation.sh" || fail "verifier revision retry log missing"
 grep -q 'finalize_verified_unit "$unit_id"' "$SCRIPT_DIR/run-remediation.sh" || fail "checkpointed verifier finalization missing"
 grep -q 'merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify does not use resolver-capable merge helper"
+grep -q 'active workspace was dirty before implementation; refusing auto-commit' "$SCRIPT_DIR/run-remediation.sh" || fail "active workspace dirty-baseline commit guard missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi

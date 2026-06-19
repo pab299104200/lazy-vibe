@@ -6107,6 +6107,27 @@ record_commit_baseline_for_unit() {
   done
 }
 
+commit_verified_active_workspace_changes() {
+  local unit_id="$1" label status_file
+  label="$(commit_root_label "$REPO_ROOT")"
+  status_file="$(commit_baseline_dir_for_unit "$unit_id")/$label.status"
+  if [[ ! -f "$status_file" ]]; then
+    printf '[commit-on-verify] %s: missing clean-baseline record for active workspace; refusing auto-commit\n' "$unit_id" >&2
+    return 1
+  fi
+  if [[ -s "$status_file" ]]; then
+    printf '[commit-on-verify] %s: active workspace was dirty before implementation; refusing auto-commit\n' "$unit_id" >&2
+    return 1
+  fi
+  if git_root_is_clean_for_merge "$REPO_ROOT"; then
+    printf '[commit-on-verify] %s: active workspace has no product changes to commit\n' "$unit_id"
+  else
+    commit_dirty_git_root "$REPO_ROOT" "fix(remediation): complete $unit_id"
+    printf '[commit-on-verify] %s: committed active workspace changes\n' "$unit_id"
+  fi
+  record_unit_promotion "$unit_id" "merged" "$REPO_ROOT"
+}
+
 verifier_accepts_unit() {
   local unit_id="$1"
   verifier_postcheck_invalid "$unit_id" && return 1
@@ -6636,6 +6657,13 @@ commit_verified_unit_changes() {
   local branch_name
   branch_name="$(unit_worktree_branch_name "$unit_id")"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+  local recorded_workspace
+  recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
+
+  if [[ "$recorded_workspace" == "$REPO_ROOT" ]]; then
+    commit_verified_active_workspace_changes "$unit_id"
+    return $?
+  fi
 
   if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
     if [[ -n "$(git -C "$worktree_dir" status --porcelain)" ]]; then
