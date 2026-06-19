@@ -294,6 +294,7 @@ EOF
 chmod +x "$register_verifier"
 
 REGISTER_DIR="$register_dir" \
+REPO_ROOT="$register_repo" \
 REMEDIATION_DIR="$register_remediation" \
 REMEDIATION_SCRIPT_SNAPSHOT=1 \
 REVIEWER_AGENT=none \
@@ -660,6 +661,8 @@ grep -q 'verifier requested revision; queued for implementer retry' "$SCRIPT_DIR
 grep -q 'finalize_verified_unit "$unit_id"' "$SCRIPT_DIR/run-remediation.sh" || fail "checkpointed verifier finalization missing"
 grep -q 'merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify does not use resolver-capable merge helper"
 grep -q 'active workspace was dirty before implementation; refusing auto-commit' "$SCRIPT_DIR/run-remediation.sh" || fail "active workspace dirty-baseline commit guard missing"
+grep -q 'REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify default must stay enabled"
+grep -q 'REMEDIATION_COMMIT_ROOTS="$REPO_ROOT"' "$SCRIPT_DIR/run-remediation.sh" || fail "git-root commit root default missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi

@@ -110,8 +110,8 @@ REMEDIATION_REWRITE_PACKETS="${REMEDIATION_REWRITE_PACKETS:-0}"
 REMEDIATION_REWRITE_WORKSTREAMS="${REMEDIATION_REWRITE_WORKSTREAMS:-0}"
 REMEDIATION_REWRITE_UNITS="${REMEDIATION_REWRITE_UNITS:-0}"
 REMEDIATION_IMPORT_PRIOR_RUNS="${REMEDIATION_IMPORT_PRIOR_RUNS:-1}"
-REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-0}"
-REMEDIATION_COMMIT_ROOTS="${REMEDIATION_COMMIT_ROOTS:-backend,frontend}"
+REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-1}"
+REMEDIATION_COMMIT_ROOTS="${REMEDIATION_COMMIT_ROOTS:-}"
 REMEDIATION_COLLECT_EVIDENCE="${REMEDIATION_COLLECT_EVIDENCE:-1}"
 REMEDIATION_EVIDENCE_MAX_ROUNDS="${REMEDIATION_EVIDENCE_MAX_ROUNDS:-1}"
 REMEDIATION_EVIDENCE_MODE="${REMEDIATION_EVIDENCE_MODE:-targeted}"
@@ -187,10 +187,12 @@ Environment:
                               when the packet source/line/title still matches. Defaults to 1.
   REMEDIATION_COMMIT_ON_VERIFY
                               1 to commit changed Git roots after a unit verifies as accepted/fixed.
-                              Defaults to 0. Parallel implementation still uses isolated worktrees;
+                              Defaults to 1. Set to 0 to disable commit closeout.
+                              Parallel implementation still uses isolated worktrees;
                               completed worktree waves are merged and cleaned before verification.
   REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
-                              REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to backend,frontend.
+                              REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to REPO_ROOT for git-root
+                              repos, otherwise backend,frontend for split-root repos.
   REMEDIATION_COLLECT_EVIDENCE
                               1 to automatically collect deterministic launch evidence after
                               verification finds only evidence/coordination gaps. Defaults to 1.
@@ -518,6 +520,13 @@ if [[ -z "$PRODUCT_REPO_ROOT" && -n "$PRODUCT_PROFILE" ]]; then
 fi
 if [[ -n "$PRODUCT_REPO_ROOT" && "$REPO_ROOT_EXPLICIT" == "0" ]]; then
   REPO_ROOT="$PRODUCT_REPO_ROOT"
+fi
+if [[ -z "$REMEDIATION_COMMIT_ROOTS" ]]; then
+  if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    REMEDIATION_COMMIT_ROOTS="$REPO_ROOT"
+  else
+    REMEDIATION_COMMIT_ROOTS="backend,frontend"
+  fi
 fi
 if [[ -z "$REGISTER_DIR" && -n "$PRODUCT_REPO_ROOT" && -f "$PRODUCT_REPO_ROOT/docs/audit/register/register.jsonl" ]]; then
   REGISTER_DIR="$PRODUCT_REPO_ROOT/docs/audit/register"
@@ -6271,10 +6280,14 @@ finalize_verified_unit() {
     esac
     return 0
   fi
+  local clean_before_closeout=0
+  if [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] && repo_root_is_git_root && git_root_is_clean_for_merge "$REPO_ROOT"; then
+    clean_before_closeout=1
+  fi
   if ! close_register_findings_for_unit "$unit_id"; then
     failed=1
   fi
-  if ! commit_verified_unit_changes "$unit_id"; then
+  if ! commit_verified_unit_changes "$unit_id" "$clean_before_closeout"; then
     failed=1
   fi
   return "$failed"
@@ -6640,6 +6653,7 @@ integrate_units_before_verification() {
 commit_verified_unit_changes() {
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
   local unit_id="$1"
+  local clean_before_closeout="${2:-0}"
   verifier_accepts_unit "$unit_id" || {
     printf '[commit-on-verify] %s: verifier did not accept/fix; refusing commit\n' "$unit_id"
     return 0
@@ -6685,6 +6699,16 @@ commit_verified_unit_changes() {
       return 1
     fi
   else
+    if git_root_is_clean_for_merge "$REPO_ROOT"; then
+      printf '[commit-on-verify] %s: branch %s not found and repo has no product changes; nothing to commit\n' \
+        "$unit_id" "$branch_name"
+      return 0
+    fi
+    if [[ "$clean_before_closeout" == "1" ]]; then
+      commit_dirty_git_root "$REPO_ROOT" "chore(remediation): close verified $unit_id"
+      printf '[commit-on-verify] %s: committed verifier closeout changes\n' "$unit_id"
+      return 0
+    fi
     printf '[commit-on-verify] %s: branch %s not found\n' "$unit_id" "$branch_name" >&2
     return 1
   fi
