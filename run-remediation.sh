@@ -8753,7 +8753,11 @@ if [[ "$REVISE_NEXT" != "1" && "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "
   guard_against_incomplete_unit_coverage
   guard_against_raw_unit_manifest
 fi
-build_implemented_packet_set 1
+if [[ "$DRY_RUN" == "1" ]]; then
+  build_implemented_packet_set 0
+else
+  build_implemented_packet_set 1
+fi
 build_coordinator_prompt
 
 rebuild_workstream_coordinator_prompts
