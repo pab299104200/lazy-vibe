@@ -4730,9 +4730,11 @@ workspace_prompt_block() {
   roots="$(workspace_git_roots | sed 's/^/- `/; s/$/`/' || true)"
   if repo_root_is_git_root; then
     cat <<EOF
-- Product root: \`$REPO_ROOT\`
-- Workspace mode: isolated git worktree when available.
+- Product root: \`$REPO_ROOT\` (active checkout; read-only reference during implementation)
+- Workspace mode: isolated git worktree.
+- Editable repo root: \`$REMEDIATION_DIR/worktrees/$unit_id\`
 - Planned unit worktree: \`$REMEDIATION_DIR/worktrees/$unit_id\`
+- Do not edit files under \`$REPO_ROOT\` directly for this implementation unit. All code, docs, tests, packet updates, and summary artifacts for this unit must be written under the editable repo root above. The harness merges that worktree into the active checkout before verification.
 EOF
   elif [[ -n "$roots" ]]; then
     cat <<EOF
@@ -4970,6 +4972,12 @@ $(cat "$SHARED_PROMPT")
 ## Product Profile
 
 $(product_profile_block)
+
+## Workspace Boundary
+
+$workspace_block
+
+For isolated git worktree mode, the editable repo root above overrides any product-profile or packet text that names \`$REPO_ROOT\` as the repo root. Treat \`$REPO_ROOT\` as the active checkout used by the harness for merge and verification, not as your implementation write target.
 
 ## Shared Standards Gate
 
@@ -6573,6 +6581,28 @@ merge_branch_or_head_into_root() {
   return 1
 }
 
+checkpoint_dirty_active_root_before_worktree_merge() {
+  local active_root="$1" unit_id="$2" label="$3"
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 1
+  git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  if git_root_is_clean_for_merge "$active_root"; then
+    return 0
+  fi
+  if git_root_has_unmerged_files "$active_root"; then
+    printf '[worktree-merge] %s:%s active git root has unmerged files; refusing pre-verify checkpoint\n' \
+      "$unit_id" "$label" >&2
+    return 1
+  fi
+  commit_dirty_git_root "$active_root" "chore(remediation): checkpoint active implementation wave before verification"
+  if ! git_root_is_clean_for_merge "$active_root"; then
+    printf '[worktree-merge] %s:%s active git root remains dirty after pre-verify checkpoint\n' \
+      "$unit_id" "$label" >&2
+    return 1
+  fi
+  printf '[worktree-merge] %s:%s checkpointed active implementation changes before merging worktree\n' \
+    "$unit_id" "$label"
+}
+
 cleanup_promoted_unit_worktree() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
@@ -6633,8 +6663,10 @@ integrate_unit_worktree_changes() {
 
   if repo_root_is_git_root; then
     if ! git_root_is_clean_for_merge "$REPO_ROOT"; then
-      printf '[worktree-merge] %s: active repo root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" >&2
-      return 1
+      if ! checkpoint_dirty_active_root_before_worktree_merge "$REPO_ROOT" "$unit_id" "repo"; then
+        printf '[worktree-merge] %s: active repo root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" >&2
+        return 1
+      fi
     fi
     commit_dirty_git_root "$worktree_dir" "fix(remediation): integrate $unit_id"
     if ! merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"; then
@@ -6652,8 +6684,10 @@ integrate_unit_worktree_changes() {
     git -C "$source_root" rev-parse --git-dir >/dev/null 2>&1 || continue
     label="$(commit_root_label "$active_root")"
     if ! git_root_is_clean_for_merge "$active_root"; then
-      printf '[worktree-merge] %s:%s active git root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" "$label" >&2
-      return 1
+      if ! checkpoint_dirty_active_root_before_worktree_merge "$active_root" "$unit_id" "$label"; then
+        printf '[worktree-merge] %s:%s active git root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" "$label" >&2
+        return 1
+      fi
     fi
     commit_dirty_git_root "$source_root" "fix(remediation): integrate $unit_id ($label)"
     if ! merge_branch_or_head_into_root "$active_root" "$source_root" "$unit_id" "$label"; then
