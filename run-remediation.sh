@@ -6107,11 +6107,18 @@ record_commit_baseline_for_unit() {
     fi
     label="$(commit_root_label "$root_path")"
     status_file="$baseline_dir/$label.status"
-    [[ -f "$status_file" ]] && continue
     local -a pathspec=()
     while IFS= read -r path; do
       [[ -n "$path" ]] && pathspec+=("$path")
     done < <(git_root_merge_pathspec_args "$root_path")
+    if [[ -f "$status_file" ]]; then
+      if [[ -s "$status_file" ]] && git_root_is_clean_for_merge "$root_path"; then
+        : > "$status_file"
+        printf '[commit-on-verify] %s: refreshed stale dirty baseline for clean root %s\n' \
+          "$unit_id" "$root_path"
+      fi
+      continue
+    fi
     git -C "$root_path" status --porcelain=v1 -uall -- "${pathspec[@]}" > "$status_file"
     if [[ -s "$status_file" ]]; then
       printf '[commit-on-verify] %s: %s dirty before implementation; auto-commit disabled for this unit/root\n' \
@@ -6147,8 +6154,13 @@ commit_verified_active_workspace_changes() {
     return 1
   fi
   if [[ -s "$status_file" ]]; then
-    printf '[commit-on-verify] %s: active workspace was dirty before implementation; refusing auto-commit\n' "$unit_id" >&2
-    return 1
+    if git_root_is_clean_for_merge "$REPO_ROOT"; then
+      : > "$status_file"
+      printf '[commit-on-verify] %s: stale dirty baseline superseded by clean active workspace\n' "$unit_id"
+    else
+      printf '[commit-on-verify] %s: active workspace was dirty before implementation; refusing auto-commit\n' "$unit_id" >&2
+      return 1
+    fi
   fi
   if git_root_is_clean_for_merge "$REPO_ROOT"; then
     printf '[commit-on-verify] %s: active workspace has no product changes to commit\n' "$unit_id"
