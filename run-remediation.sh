@@ -6659,7 +6659,20 @@ commit_verified_unit_changes() {
     return 0
   }
   if unit_already_promoted "$unit_id"; then
-    printf '[commit-on-verify] %s: changes already promoted before verification\n' "$unit_id"
+    if ! repo_root_is_git_root; then
+      printf '[commit-on-verify] %s: changes already promoted before verification\n' "$unit_id"
+      return 0
+    fi
+    if git_root_is_clean_for_merge "$REPO_ROOT"; then
+      printf '[commit-on-verify] %s: changes already promoted before verification\n' "$unit_id"
+    elif [[ "$clean_before_closeout" == "1" ]]; then
+      commit_dirty_git_root "$REPO_ROOT" "chore(remediation): close verified $unit_id"
+      printf '[commit-on-verify] %s: changes already promoted; committed verifier closeout changes\n' "$unit_id"
+    else
+      printf '[commit-on-verify] %s: changes already promoted but repo was dirty before closeout; refusing mixed commit\n' \
+        "$unit_id" >&2
+      return 1
+    fi
     return 0
   fi
 
