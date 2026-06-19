@@ -6108,12 +6108,34 @@ record_commit_baseline_for_unit() {
     label="$(commit_root_label "$root_path")"
     status_file="$baseline_dir/$label.status"
     [[ -f "$status_file" ]] && continue
-    git -C "$root_path" status --porcelain=v1 -uall > "$status_file"
+    local -a pathspec=()
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && pathspec+=("$path")
+    done < <(git_root_merge_pathspec_args "$root_path")
+    git -C "$root_path" status --porcelain=v1 -uall -- "${pathspec[@]}" > "$status_file"
     if [[ -s "$status_file" ]]; then
       printf '[commit-on-verify] %s: %s dirty before implementation; auto-commit disabled for this unit/root\n' \
         "$unit_id" "$root_path"
     fi
   done
+}
+
+ensure_commit_roots_clean_for_implementation_unit() {
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
+  local unit_id="$1" failed=0
+  local IFS=',' root root_path
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    root_path="$(commit_root_path "$root")"
+    [[ -d "$root_path" ]] || continue
+    git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    if ! git_root_is_clean_for_merge "$root_path"; then
+      printf '[commit-on-verify] %s: %s has uncommitted product changes before implementation; refusing to launch a wave that cannot be merged\n' \
+        "$unit_id" "$root_path" >&2
+      failed=1
+    fi
+  done
+  [[ "$failed" == "0" ]]
 }
 
 commit_verified_active_workspace_changes() {
@@ -7489,6 +7511,12 @@ execute_workstreams() {
         log_event '[resume] skipping checkpointed unit %s (packets pending verification)\n' "implement-$unit_id"
         continue
       fi
+    fi
+    if ! ensure_commit_roots_clean_for_implementation_unit "$unit_id"; then
+      if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+        exit 1
+      fi
+      continue
     fi
     local worktree_dir
     if ! worktree_dir="$(prepare_unit_workspace "$unit_id")"; then

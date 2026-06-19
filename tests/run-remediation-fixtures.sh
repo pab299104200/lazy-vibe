@@ -663,6 +663,8 @@ grep -q 'merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" 
 grep -q 'active workspace was dirty before implementation; refusing auto-commit' "$SCRIPT_DIR/run-remediation.sh" || fail "active workspace dirty-baseline commit guard missing"
 grep -q 'REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify default must stay enabled"
 grep -q 'REMEDIATION_COMMIT_ROOTS="$REPO_ROOT"' "$SCRIPT_DIR/run-remediation.sh" || fail "git-root commit root default missing"
+grep -q 'status --porcelain=v1 -uall -- "${pathspec\[@\]}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit baseline must use merge pathspec exclusions"
+grep -q 'refusing to launch a wave that cannot be merged' "$SCRIPT_DIR/run-remediation.sh" || fail "dirty-root prelaunch guard missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi
