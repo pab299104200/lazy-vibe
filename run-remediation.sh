@@ -4977,7 +4977,7 @@ $(product_profile_block)
 
 $workspace_block
 
-For isolated git worktree mode, the editable repo root above overrides any product-profile or packet text that names \`$REPO_ROOT\` as the repo root. Treat \`$REPO_ROOT\` as the active checkout used by the harness for merge and verification, not as your implementation write target.
+For isolated git worktree mode, the editable repo root above overrides any product-profile, packet, design, evidence, or shared-instruction text that names \`$REPO_ROOT\` as the repo root. Treat \`$REPO_ROOT\` as the active checkout used by the harness for merge and verification, not as your implementation write target. When instructions cite absolute paths under \`$REPO_ROOT\`, translate those paths to the same relative path under the editable repo root before reading or writing implementation files. Only write run artifacts, packet updates, and summaries under the remediation run path when the prompt explicitly asks for those files.
 
 ## Shared Standards Gate
 
