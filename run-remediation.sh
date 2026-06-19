@@ -6040,6 +6040,14 @@ unit_worktree_branch_name() {
   printf 'remediation-%s-%s\n' "$run_label" "$unit_id"
 }
 
+unit_branch_is_merged_into_active_root() {
+  local unit_id="$1" branch_name
+  repo_root_is_git_root || return 1
+  branch_name="$(unit_worktree_branch_name "$unit_id")"
+  git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name" || return 1
+  git -C "$REPO_ROOT" merge-base --is-ancestor "$branch_name" HEAD >/dev/null 2>&1
+}
+
 commit_root_path() {
   local root="$1"
   if [[ "$root" == /* ]]; then
@@ -6311,25 +6319,40 @@ merge_branch_or_head_into_root() {
 cleanup_promoted_unit_worktree() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
-  [[ -d "$worktree_dir" ]] || return 0
-  [[ "$worktree_dir" != "$REPO_ROOT" ]] || return 0
   repo_root_is_git_root || return 0
 
   local branch_name
   branch_name="$(unit_worktree_branch_name "$unit_id")"
-  if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "worktree $worktree_dir"; then
-    git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || return 1
-  elif [[ -d "$worktree_dir" ]]; then
-    git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || rm -rf "$worktree_dir"
+  if [[ -d "$worktree_dir" && "$worktree_dir" != "$REPO_ROOT" ]]; then
+    if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "worktree $worktree_dir"; then
+      git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || return 1
+    elif [[ -d "$worktree_dir" ]]; then
+      git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || rm -rf "$worktree_dir"
+    fi
   fi
   git -C "$REPO_ROOT" branch -d "$branch_name" >/dev/null 2>&1 || true
   git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
+}
+
+adopt_previously_merged_unit_branch() {
+  local unit_id="$1"
+  unit_already_promoted "$unit_id" && return 0
+  unit_branch_is_merged_into_active_root "$unit_id" || return 1
+  if ! cleanup_promoted_unit_worktree "$unit_id"; then
+    printf '[worktree-cleanup] %s: branch is already merged but failed to clean stale worktree/branch\n' "$unit_id" >&2
+    return 1
+  fi
+  record_unit_promotion "$unit_id" "merged" "branch already merged into active checkout"
+  printf '[worktree-merge] %s: branch already merged into active checkout; recorded promotion\n' "$unit_id"
 }
 
 integrate_unit_worktree_changes() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
   unit_already_promoted "$unit_id" && return 0
+  if adopt_previously_merged_unit_branch "$unit_id"; then
+    return 0
+  fi
   [[ -d "$worktree_dir" ]] || return 0
   if [[ "$worktree_dir" == "$REPO_ROOT" ]]; then
     return 0
