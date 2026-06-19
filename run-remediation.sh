@@ -118,6 +118,7 @@ REMEDIATION_EVIDENCE_MODE="${REMEDIATION_EVIDENCE_MODE:-targeted}"
 REMEDIATION_AUTO_RERUN_FINAL_REVIEW="${REMEDIATION_AUTO_RERUN_FINAL_REVIEW:-1}"
 REMEDIATION_AUTO_VERIFY_MISSING="${REMEDIATION_AUTO_VERIFY_MISSING:-1}"
 REMEDIATION_AUTO_METADATA_CLOSEOUT="${REMEDIATION_AUTO_METADATA_CLOSEOUT:-1}"
+REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS="${REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS:-1}"
 REMEDIATION_SANDBOX_PYTEST_FALLBACK="${REMEDIATION_SANDBOX_PYTEST_FALLBACK:-1}"
 REMEDIATION_NATIVE_TEST_FIX_RETRIES="${REMEDIATION_NATIVE_TEST_FIX_RETRIES:-1}"
 REMEDIATION_STATIC_PRECHECKS="${REMEDIATION_STATIC_PRECHECKS:-1}"
@@ -209,6 +210,13 @@ Environment:
   REMEDIATION_AUTO_METADATA_CLOSEOUT
                               1 to auto-repair remediation-owned packet/summary closeout metadata
                               findings and reverify them. Defaults to 1.
+  REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS
+                              1 to run a resolver agent when a completed unit worktree
+                              conflicts while merging into the active checkout. Defaults to 1.
+  MERGE_RESOLVER_AGENT         Optional built-in resolver agent for merge conflicts.
+                              Defaults to REVIEWER_AGENT, then IMPLEMENTER_AGENT.
+  MERGE_RESOLVER_RUNNER        Optional custom resolver runner. Receives the same arguments
+                              as IMPLEMENTER_RUNNER when MERGE_RESOLVER_AGENT=runner.
   REMEDIATION_SANDBOX_PYTEST_FALLBACK
                               1 to retry pytest commands with -p no:rerunfailures when the
                               rerunfailures plugin is blocked by sandbox socket permissions.
@@ -6291,6 +6299,152 @@ commit_dirty_git_root() {
   fi
 }
 
+git_root_unmerged_files() {
+  local root="$1"
+  git -C "$root" diff --name-only --diff-filter=U 2>/dev/null || true
+}
+
+git_root_has_unmerged_files() {
+  [[ -n "$(git_root_unmerged_files "$1")" ]]
+}
+
+git_root_merge_in_progress() {
+  git -C "$1" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1
+}
+
+stage_git_root_merge_resolution() {
+  local root="$1"
+  local -a pathspec=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && pathspec+=("$path")
+  done < <(git_root_merge_pathspec_args "$root")
+  git -C "$root" add -A -- "${pathspec[@]}"
+}
+
+merge_resolver_safe_label() {
+  printf '%s' "$1" | tr -c '[:alnum:]._-' '-'
+}
+
+write_merge_conflict_resolver_prompt() {
+  local prompt_file="$1" active_root="$2" source_root="$3" unit_id="$4" label="$5" merge_ref="$6" source_ref="$7"
+  local conflict_files status_text packets_csv summary_file product_profile_note
+  conflict_files="$(git_root_unmerged_files "$active_root")"
+  status_text="$(git -C "$active_root" status --short --branch 2>/dev/null || true)"
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  summary_file="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  if [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then
+    product_profile_note="Product profile: $PRODUCT_PROFILE"
+  else
+    product_profile_note="Product profile: not configured"
+  fi
+
+  mkdir -p "$(dirname "$prompt_file")"
+  cat > "$prompt_file" <<EOF
+You are resolving an automated remediation worktree merge conflict.
+
+Repository root: $active_root
+Unit: $unit_id
+Unit packets: ${packets_csv:-unknown}
+Git root label: $label
+Merge ref: $merge_ref
+Source commit: $source_ref
+Source worktree: $source_root
+$product_profile_note
+
+The harness already ran \`git merge --no-edit --no-ff "$merge_ref"\` and it stopped on conflicts.
+Your job is to complete that merge correctly.
+
+## Current conflicted files
+
+\`\`\`
+$conflict_files
+\`\`\`
+
+## Current git status
+
+\`\`\`
+$status_text
+\`\`\`
+
+## Rules
+
+- Do not abort the merge.
+- Do not revert or discard the incoming remediation unit.
+- Preserve valid behavior from both the active checkout and the incoming unit branch.
+- Resolve all conflict markers and stage the resolved files.
+- Do not run \`git commit\`; the harness will commit the merge after checking that conflicts are resolved.
+- Run focused lint/tests when practical for files you changed, but do not start broad long-running suites unless clearly necessary.
+- If a conflict is semantic, inspect the related code and tests before choosing the resolution.
+- Leave the checkout with no unmerged paths.
+- End your response with exactly one line: \`RESULT: PASS\` if the merge is resolved and staged, otherwise \`RESULT: FAIL\`.
+
+## Implementation summary, if available
+
+EOF
+  if [[ -s "$summary_file" ]]; then
+    cat "$summary_file" >> "$prompt_file"
+  else
+    printf 'No implementation summary artifact was found for %s.\n' "$unit_id" >> "$prompt_file"
+  fi
+}
+
+auto_resolve_merge_conflict() {
+  local active_root="$1" source_root="$2" unit_id="$3" label="$4" merge_ref="$5" source_ref="$6"
+  [[ "$REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS" == "1" ]] || return 1
+
+  local safe_label prompt_file workstream
+  safe_label="$(merge_resolver_safe_label "$label")"
+  workstream="merge-resolve-$unit_id-$safe_label"
+  prompt_file="$REMEDIATION_DIR/artifacts/$workstream.md"
+
+  if ! git_root_merge_in_progress "$active_root"; then
+    printf '[worktree-merge] %s:%s merge resolver skipped; no merge in progress\n' "$unit_id" "$label" >&2
+    return 1
+  fi
+
+  write_merge_conflict_resolver_prompt "$prompt_file" "$active_root" "$source_root" "$unit_id" "$label" "$merge_ref" "$source_ref"
+  printf '[worktree-merge] %s:%s merge conflicted; launching resolver agent (prompt=%s)\n' "$unit_id" "$label" "$prompt_file"
+
+  local IMPLEMENTER_AGENT="${MERGE_RESOLVER_AGENT:-${REVIEWER_AGENT:-${IMPLEMENTER_AGENT:-codex}}}"
+  local IMPLEMENTER_RUNNER="${MERGE_RESOLVER_RUNNER:-${REVIEWER_RUNNER:-${IMPLEMENTER_RUNNER:-}}}"
+  local status=0
+  run_prompt "$prompt_file" "$workstream" "high-risk" "$active_root" || status="$?"
+
+  if git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
+    printf '[worktree-merge] %s:%s resolver committed merge successfully\n' "$unit_id" "$label"
+    return 0
+  fi
+
+  if ! git_root_merge_in_progress "$active_root"; then
+    printf '[worktree-merge] %s:%s resolver exited status=%s but merge is no longer in progress and source is not merged\n' \
+      "$unit_id" "$label" "$status" >&2
+    return 1
+  fi
+
+  if git_root_has_unmerged_files "$active_root"; then
+    printf '[worktree-merge] %s:%s resolver left unmerged paths:\n%s\n' \
+      "$unit_id" "$label" "$(git_root_unmerged_files "$active_root")" >&2
+    return 1
+  fi
+
+  if ! stage_git_root_merge_resolution "$active_root"; then
+    printf '[worktree-merge] %s:%s failed to stage resolver output\n' "$unit_id" "$label" >&2
+    return 1
+  fi
+
+  if ! git -C "$active_root" commit --no-edit >/dev/null; then
+    printf '[worktree-merge] %s:%s resolver output could not be committed\n' "$unit_id" "$label" >&2
+    return 1
+  fi
+
+  if ! git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
+    printf '[worktree-merge] %s:%s resolver commit did not include source commit %s\n' "$unit_id" "$label" "$source_ref" >&2
+    return 1
+  fi
+
+  printf '[worktree-merge] %s:%s resolver completed and committed merge\n' "$unit_id" "$label"
+}
+
 merge_branch_or_head_into_root() {
   local active_root="$1" source_root="$2" unit_id="$3" label="$4"
   local source_ref
@@ -6309,6 +6463,9 @@ merge_branch_or_head_into_root() {
 
   printf '[worktree-merge] %s:%s merging %s\n' "$unit_id" "$label" "$merge_ref"
   if git -C "$active_root" merge --no-edit --no-ff "$merge_ref" -m "Merge remediation worktree for $unit_id ($label)"; then
+    return 0
+  fi
+  if auto_resolve_merge_conflict "$active_root" "$source_root" "$unit_id" "$label" "$merge_ref" "$source_ref"; then
     return 0
   fi
   git -C "$active_root" merge --abort >/dev/null 2>&1 || true
