@@ -6133,9 +6133,22 @@ register_findings_for_packets() {
 
 start_register_remediation_for_unit() {
   [[ -s "$REGISTER_PX_TSV" && -n "$REGISTER_DIR" ]] || return 0
-  local unit_id="$1" packets_csv="$2" finding_id failed=0
+  local unit_id="$1" packets_csv="$2" finding_id disposition failed=0
   while IFS= read -r finding_id; do
     [[ -n "$finding_id" ]] || continue
+    disposition="$(register_finding_disposition "$finding_id" 2>/dev/null || true)"
+    case "$disposition" in
+      open|regressed|"")
+        ;;
+      in_remediation)
+        continue
+        ;;
+      *)
+        printf '[register] %s: skipping start-remediation for %s; disposition=%s\n' \
+          "$unit_id" "$finding_id" "$disposition"
+        continue
+        ;;
+    esac
     if ! python3 -m lazy_vibe.register start-remediation \
       --register-dir "$REGISTER_DIR" \
       --finding "$finding_id" \
