@@ -6231,6 +6231,25 @@ close_register_findings_for_unit() {
 
 finalize_verified_unit() {
   local unit_id="$1" failed=0
+  if ! verifier_accepts_unit "$unit_id"; then
+    local category
+    category="$(verifier_queue_category "$unit_id" 2>/dev/null || printf 'needs_review')"
+    case "$category" in
+      needs_targeted_revision)
+        printf '[auto-revise] %s: verifier requested revision; queued for implementer retry\n' "$unit_id"
+        ;;
+      not_verified)
+        printf '[verify] %s: verifier artifact is stale or missing; leaving for verifier rerun\n' "$unit_id"
+        ;;
+      blocked|test_harness|contract_conflict|split_required)
+        printf '[verify] %s: verifier decision requires %s handling; not committing\n' "$unit_id" "$category"
+        ;;
+      *)
+        printf '[verify] %s: verifier did not accept/fix; category=%s; not committing\n' "$unit_id" "$category"
+        ;;
+    esac
+    return 0
+  fi
   if ! close_register_findings_for_unit "$unit_id"; then
     failed=1
   fi
@@ -6507,6 +6526,11 @@ cleanup_promoted_unit_worktree() {
 adopt_previously_merged_unit_branch() {
   local unit_id="$1"
   unit_already_promoted "$unit_id" && return 0
+  local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
+  if [[ -d "$worktree_dir" ]] && git -C "$worktree_dir" rev-parse --git-dir >/dev/null 2>&1 && \
+     [[ -n "$(git -C "$worktree_dir" status --porcelain=v1 -uall)" ]]; then
+    return 1
+  fi
   unit_branch_is_merged_into_active_root "$unit_id" || return 1
   if ! cleanup_promoted_unit_worktree "$unit_id"; then
     printf '[worktree-cleanup] %s: branch is already merged but failed to clean stale worktree/branch\n' "$unit_id" >&2
@@ -6596,7 +6620,7 @@ commit_verified_unit_changes() {
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
   local unit_id="$1"
   verifier_accepts_unit "$unit_id" || {
-    printf '[commit-on-verify] %s: verifier did not accept/fix; not committing\n' "$unit_id"
+    printf '[commit-on-verify] %s: verifier did not accept/fix; refusing commit\n' "$unit_id"
     return 0
   }
   if unit_already_promoted "$unit_id"; then
@@ -6614,20 +6638,21 @@ commit_verified_unit_changes() {
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
 
   if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
-    # Commit changes in the worktree
     if [[ -n "$(git -C "$worktree_dir" status --porcelain)" ]]; then
        git -C "$worktree_dir" add -A
        git -C "$worktree_dir" commit -m "fix(remediation): complete $unit_id" || true
     fi
 
     printf '[commit-on-verify] %s: merging branch %s\n' "$unit_id" "$branch_name"
-    if git -C "$REPO_ROOT" merge --no-edit --no-ff "$branch_name" -m "Merge branch '$branch_name' into HEAD for $unit_id"; then
+    if merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"; then
       printf '[commit-on-verify] %s: successfully merged\n' "$unit_id"
-      # Cleanup
-      git -C "$REPO_ROOT" worktree remove "$worktree_dir" --force >/dev/null 2>&1 || true
-      git -C "$REPO_ROOT" branch -d "$branch_name" >/dev/null 2>&1 || true
+      cleanup_promoted_unit_worktree "$unit_id" || {
+        printf '[commit-on-verify] %s: merged but failed to clean worktree %s\n' "$unit_id" "$worktree_dir" >&2
+        return 1
+      }
+      record_unit_promotion "$unit_id" "merged" "$worktree_dir"
     else
-      printf '[commit-on-verify] %s: merge conflict on %s\n' "$unit_id" "$branch_name" >&2
+      printf '[commit-on-verify] %s: merge failed on %s\n' "$unit_id" "$branch_name" >&2
       git -C "$REPO_ROOT" merge --abort >/dev/null 2>&1 || true
       return 1
     fi
@@ -7502,6 +7527,11 @@ execute_verifier_units() {
         else
           log_event '[resume] skipping completed verify-%s\n' "$unit_id"
           grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "verify-$unit_id" >> "$CHECKPOINT_FILE"
+          if ! finalize_verified_unit "$unit_id"; then
+            if [[ "$CONTINUE_ON_FAIL" != "1" ]]; then
+              exit 1
+            fi
+          fi
           continue
         fi
       elif grep -qxF "verify-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null; then

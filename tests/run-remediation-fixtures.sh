@@ -656,6 +656,9 @@ grep -q 'browser_evidence_env_preamble' "$SCRIPT_DIR/run-remediation.sh" || fail
 grep -q 'Meridian dev VPS is split-subdomain' "$SCRIPT_DIR/run-remediation.sh" || fail "Meridian split-subdomain guard missing"
 grep -q 'ensure_browser_vps_deploy_ready' "$SCRIPT_DIR/run-remediation.sh" || fail "Meridian browser deploy preflight missing"
 grep -q 'scripts/deploy-runtime dev' "$SCRIPT_DIR/run-remediation.sh" || fail "Meridian deploy-runtime guidance missing"
+grep -q 'verifier requested revision; queued for implementer retry' "$SCRIPT_DIR/run-remediation.sh" || fail "verifier revision retry log missing"
+grep -q 'finalize_verified_unit "$unit_id"' "$SCRIPT_DIR/run-remediation.sh" || fail "checkpointed verifier finalization missing"
+grep -q 'merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify does not use resolver-capable merge helper"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
   fail "long-running command refusal must not fail the implementation step"
 fi
