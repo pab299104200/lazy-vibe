@@ -6435,7 +6435,13 @@ commit_dirty_git_root_for_git_merge() {
     [[ -n "$path" ]] && pathspec+=("$path")
   done < <(git_root_git_merge_pathspec_args "$root")
   if [[ -n "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]]; then
-    git -C "$root" add -A -- "${pathspec[@]}"
+    local -a changed_paths=()
+    while IFS= read -r -d '' path; do
+      [[ -n "$path" ]] && changed_paths+=("$path")
+    done < <(git -C "$root" ls-files -z -m -d -o --exclude-standard -- "${pathspec[@]}")
+    if [[ "${#changed_paths[@]}" -gt 0 ]]; then
+      git -C "$root" add -A -- "${changed_paths[@]}"
+    fi
     git -C "$root" commit -m "$message" >/dev/null
   fi
 }
