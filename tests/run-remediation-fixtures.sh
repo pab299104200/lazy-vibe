@@ -475,6 +475,16 @@ assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0016)" "stat
 assert_equals test_harness "$(queue_category "$queue" IU-0017)" "native artifact category"
 assert_equals split_children_pending "$(queue_category "$queue" IU-0018)" "blocked split child category"
 
+postcheck_prompt="$remediation/prompts/verify-IU-0010.md"
+grep -q 'Prior Verifier Postcheck Invalidation' "$postcheck_prompt" ||
+  fail "postcheck invalid verifier prompt did not include invalidation section"
+grep -q 'stale active-checkout evidence' "$postcheck_prompt" ||
+  fail "postcheck invalid verifier prompt did not include invalidation reason"
+grep -q 'Active-checkout evidence' "$postcheck_prompt" ||
+  fail "postcheck invalid verifier prompt did not require active-checkout evidence"
+grep -q 'must not cite worktree-local files' "$postcheck_prompt" ||
+  fail "postcheck invalid verifier prompt did not forbid worktree-local acceptance proof"
+
 assert_equals none "$(next_action "$plan" IU-0001)" "accepted next action"
 assert_equals evidence_only "$(next_action "$plan" IU-0002)" "evidence next action"
 assert_equals targeted_revision "$(next_action "$plan" IU-0003)" "api contract next action"

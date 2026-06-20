@@ -5065,6 +5065,25 @@ build_verifier_prompt() {
   packet_list="$(packet_paths_for_ids "$packets_csv")"
   local native_test_results
   native_test_results="$(native_test_results_block "$unit_id")"
+  local postcheck_retry_block=""
+  local postcheck_marker="$REMEDIATION_DIR/artifacts/verify-$unit_id.postcheck.invalid"
+  if [[ -s "$postcheck_marker" ]]; then
+    local postcheck_reason
+    postcheck_reason="$(sed -n '1,20p' "$postcheck_marker")"
+    postcheck_retry_block="$(cat <<EOF
+
+### Prior Verifier Postcheck Invalidation
+
+The previous verifier artifact for this unit was rejected by the harness postcheck:
+
+\`\`\`text
+$postcheck_reason
+\`\`\`
+
+Treat the prior \`accept\` / \`fixed\` decision as invalid. On this retry, acceptance is allowed only if you prove the claimed implementation is present in the active checkout rooted at \`$REPO_ROOT\`, not only in \`$REMEDIATION_DIR/worktrees/$unit_id\` or any other remediation worktree. Your accepted verifier artifact must include an \`Active-checkout evidence\` section listing the exact active-checkout file/status/search/test probes used for signoff, and must not cite worktree-local files, branches, commits, or tests as implementation proof. If the implementation is absent from the active checkout, write \`Decision: revise\`, \`Implementation decision: revise\`, and a findings TSV row requiring the missing worktree-only implementation to be merged or reimplemented in the active checkout.
+EOF
+)"
+  fi
 
   cat > "$prompt" <<PROMPT
 # Remediation Verification: $unit_id
@@ -5119,6 +5138,7 @@ All implementation signoff must be verified against the active checkout rooted a
 
 Before accepting, run or report active-checkout probes for the claimed changed surfaces, for example \`git -C $REPO_ROOT status --short --branch\`, \`git -C $REPO_ROOT/backend status --short --branch\` when backend is involved, and file existence/search commands from the active checkout. For nested git roots, the active branch/HEAD matters; a top-level gitlink or separate remediation worktree branch is not enough.
 
+$postcheck_retry_block
 
 When scope is \`implementation\`, answer the question: "Did the implementation fix the code/docs/tests for this packet, and do the implementation owner and verifier agree the packet is code-complete?" Do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Missing launch-readiness reruns, live VPS/browser proof, external IdP/relying-party proof, and PostgreSQL checks that cannot run in this sandbox must be recorded as \`launch-evidence-pending\` or \`sandbox-blocked\`, not as implementation failure. Still block implementation signoff for stale active tests, docs contradictions, unrun runnable local tests, failing runnable local tests, incomplete code, unsupported claims, or missing required success/failure test coverage.
 
@@ -7236,6 +7256,19 @@ run_prompt() {
       local backoff=$(( (attempt - 1) * 15 ))
       printf '[retry] %s attempt=%s/%s delay=%ss\n' "$workstream" "$attempt" "$max_attempts" "$backoff" >&2
       sleep "$backoff"
+    fi
+    if [[ "$class" == "verifier" && "$workstream" == verify-* ]]; then
+      local retry_unit_id="${workstream#verify-}"
+      if verifier_postcheck_invalid "$retry_unit_id"; then
+        local _uid _packets _group _model _severity _rationale
+        while IFS=$'\t' read -r _uid _packets _group _model _severity _rationale; do
+          [[ "$_uid" == "$retry_unit_id" ]] || continue
+          build_verifier_prompt "$_uid" "$_group" "$_model" "$_packets"
+          printf '[retry] %s: rebuilt verifier prompt with postcheck invalidation context\n' \
+            "$workstream" >>"$log_file"
+          break
+        done < <(tail -n +2 "$UNITS_TSV")
+      fi
     fi
 
     status=0
