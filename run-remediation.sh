@@ -6484,6 +6484,18 @@ checkpoint_dirty_git_root_for_git_merge_until_clean() {
   return 1
 }
 
+commit_register_closeout_changes() {
+  local root="$1" unit_id="$2"
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 1
+  [[ -n "${REGISTER_DIR:-}" && -d "$REGISTER_DIR" ]] || return 1
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  git -C "$root" add -A -- "$REGISTER_DIR"
+  if git -C "$root" diff --cached --quiet -- "$REGISTER_DIR"; then
+    return 1
+  fi
+  git -C "$root" commit -m "chore(remediation): close verified $unit_id" >/dev/null
+}
+
 git_root_unmerged_files() {
   local root="$1"
   git -C "$root" diff --name-only --diff-filter=U 2>/dev/null || true
@@ -6895,6 +6907,8 @@ commit_verified_unit_changes() {
     elif [[ "$clean_before_closeout" == "1" ]]; then
       commit_dirty_git_root "$REPO_ROOT" "chore(remediation): close verified $unit_id"
       printf '[commit-on-verify] %s: changes already promoted; committed verifier closeout changes\n' "$unit_id"
+    elif commit_register_closeout_changes "$REPO_ROOT" "$unit_id"; then
+      printf '[commit-on-verify] %s: changes already promoted; committed register closeout changes separately\n' "$unit_id"
     else
       printf '[commit-on-verify] %s: changes already promoted but repo was dirty before closeout; refusing mixed commit\n' \
         "$unit_id" >&2
@@ -6952,6 +6966,10 @@ commit_verified_unit_changes() {
     if [[ "$clean_before_closeout" == "1" ]]; then
       commit_dirty_git_root "$REPO_ROOT" "chore(remediation): close verified $unit_id"
       printf '[commit-on-verify] %s: committed verifier closeout changes\n' "$unit_id"
+      return 0
+    fi
+    if commit_register_closeout_changes "$REPO_ROOT" "$unit_id"; then
+      printf '[commit-on-verify] %s: committed register closeout changes separately\n' "$unit_id"
       return 0
     fi
     printf '[commit-on-verify] %s: branch %s not found\n' "$unit_id" "$branch_name" >&2
