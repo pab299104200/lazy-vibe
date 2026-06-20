@@ -6512,6 +6512,7 @@ merge_resolver_safe_label() {
 
 write_merge_conflict_resolver_prompt() {
   local prompt_file="$1" active_root="$2" source_root="$3" unit_id="$4" label="$5" merge_ref="$6" source_ref="$7"
+  local prior_log="${8:-}"
   local conflict_files status_text packets_csv summary_file product_profile_note
   conflict_files="$(git_root_unmerged_files "$active_root")"
   status_text="$(git -C "$active_root" status --short --branch 2>/dev/null || true)"
@@ -6551,6 +6552,19 @@ $conflict_files
 $status_text
 \`\`\`
 
+## Prior resolver attempt
+
+EOF
+  if [[ -n "$prior_log" && -s "$prior_log" ]]; then
+    printf 'A previous resolver attempt did not finish the merge. Use this only as failure context; re-check the active checkout before choosing a resolution.\n\n```text\n' >> "$prompt_file"
+    tail -120 "$prior_log" >> "$prompt_file"
+    printf '\n```\n\n' >> "$prompt_file"
+  else
+    printf 'No prior resolver attempt for this conflict.\n\n' >> "$prompt_file"
+  fi
+
+  cat >> "$prompt_file" <<EOF
+
 ## Rules
 
 - Do not abort the merge.
@@ -6577,57 +6591,72 @@ auto_resolve_merge_conflict() {
   local active_root="$1" source_root="$2" unit_id="$3" label="$4" merge_ref="$5" source_ref="$6"
   [[ "$REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS" == "1" ]] || return 1
 
-  local safe_label prompt_file workstream
+  local safe_label prompt_file workstream resolver_attempt max_attempts
   safe_label="$(merge_resolver_safe_label "$label")"
   workstream="merge-resolve-$unit_id-$safe_label"
   prompt_file="$REMEDIATION_DIR/artifacts/$workstream.md"
+  max_attempts="${REMEDIATION_MERGE_RESOLVER_MAX_ATTEMPTS:-2}"
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=2
+  ((max_attempts < 1)) && max_attempts=1
 
   if ! git_root_merge_in_progress "$active_root"; then
     printf '[worktree-merge] %s:%s merge resolver skipped; no merge in progress\n' "$unit_id" "$label" >&2
     return 1
   fi
 
-  write_merge_conflict_resolver_prompt "$prompt_file" "$active_root" "$source_root" "$unit_id" "$label" "$merge_ref" "$source_ref"
-  printf '[worktree-merge] %s:%s merge conflicted; launching resolver agent (prompt=%s)\n' "$unit_id" "$label" "$prompt_file"
-
   local IMPLEMENTER_AGENT="${MERGE_RESOLVER_AGENT:-${REVIEWER_AGENT:-${IMPLEMENTER_AGENT:-codex}}}"
   local IMPLEMENTER_RUNNER="${MERGE_RESOLVER_RUNNER:-${REVIEWER_RUNNER:-${IMPLEMENTER_RUNNER:-}}}"
-  local status=0
-  run_prompt "$prompt_file" "$workstream" "high-risk" "$active_root" || status="$?"
+  local prior_log="" log_file status
 
-  if git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
-    printf '[worktree-merge] %s:%s resolver committed merge successfully\n' "$unit_id" "$label"
+  for ((resolver_attempt = 1; resolver_attempt <= max_attempts; resolver_attempt++)); do
+    write_merge_conflict_resolver_prompt "$prompt_file" "$active_root" "$source_root" "$unit_id" "$label" "$merge_ref" "$source_ref" "$prior_log"
+    printf '[worktree-merge] %s:%s merge conflicted; launching resolver agent attempt=%s/%s (prompt=%s)\n' \
+      "$unit_id" "$label" "$resolver_attempt" "$max_attempts" "$prompt_file"
+
+    status=0
+    run_prompt "$prompt_file" "$workstream" "high-risk" "$active_root" || status="$?"
+    log_file="$REMEDIATION_DIR/logs/$workstream.log"
+    prior_log="$log_file"
+
+    if git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
+      printf '[worktree-merge] %s:%s resolver committed merge successfully\n' "$unit_id" "$label"
+      return 0
+    fi
+
+    if ! git_root_merge_in_progress "$active_root"; then
+      printf '[worktree-merge] %s:%s resolver exited status=%s but merge is no longer in progress and source is not merged\n' \
+        "$unit_id" "$label" "$status" >&2
+      return 1
+    fi
+
+    if git_root_has_unmerged_files "$active_root"; then
+      printf '[worktree-merge] %s:%s resolver attempt=%s/%s left unmerged paths:\n%s\n' \
+        "$unit_id" "$label" "$resolver_attempt" "$max_attempts" "$(git_root_unmerged_files "$active_root")" >&2
+      if ((resolver_attempt < max_attempts)); then
+        continue
+      fi
+      return 1
+    fi
+
+    if ! stage_git_root_merge_resolution "$active_root"; then
+      printf '[worktree-merge] %s:%s failed to stage resolver output\n' "$unit_id" "$label" >&2
+      return 1
+    fi
+
+    if ! git -C "$active_root" commit --no-edit >/dev/null; then
+      printf '[worktree-merge] %s:%s resolver output could not be committed\n' "$unit_id" "$label" >&2
+      return 1
+    fi
+
+    if ! git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
+      printf '[worktree-merge] %s:%s resolver commit did not include source commit %s\n' "$unit_id" "$label" "$source_ref" >&2
+      return 1
+    fi
+
+    printf '[worktree-merge] %s:%s resolver completed and committed merge\n' "$unit_id" "$label"
     return 0
-  fi
-
-  if ! git_root_merge_in_progress "$active_root"; then
-    printf '[worktree-merge] %s:%s resolver exited status=%s but merge is no longer in progress and source is not merged\n' \
-      "$unit_id" "$label" "$status" >&2
-    return 1
-  fi
-
-  if git_root_has_unmerged_files "$active_root"; then
-    printf '[worktree-merge] %s:%s resolver left unmerged paths:\n%s\n' \
-      "$unit_id" "$label" "$(git_root_unmerged_files "$active_root")" >&2
-    return 1
-  fi
-
-  if ! stage_git_root_merge_resolution "$active_root"; then
-    printf '[worktree-merge] %s:%s failed to stage resolver output\n' "$unit_id" "$label" >&2
-    return 1
-  fi
-
-  if ! git -C "$active_root" commit --no-edit >/dev/null; then
-    printf '[worktree-merge] %s:%s resolver output could not be committed\n' "$unit_id" "$label" >&2
-    return 1
-  fi
-
-  if ! git -C "$active_root" merge-base --is-ancestor "$source_ref" HEAD >/dev/null 2>&1; then
-    printf '[worktree-merge] %s:%s resolver commit did not include source commit %s\n' "$unit_id" "$label" "$source_ref" >&2
-    return 1
-  fi
-
-  printf '[worktree-merge] %s:%s resolver completed and committed merge\n' "$unit_id" "$label"
+  done
+  return 1
 }
 
 merge_branch_or_head_into_root() {
@@ -6838,6 +6867,8 @@ integrate_units_before_verification() {
     [[ -n "$unit_id" ]] || continue
     if ! integrate_unit_worktree_changes "$unit_id"; then
       failed=1
+      printf '[worktree-merge] %s: stopping promotion wave at first unresolved unit; rerun after this unit is merged\n' "$unit_id" >&2
+      break
     fi
   done
   if [[ "$failed" != "0" ]]; then
