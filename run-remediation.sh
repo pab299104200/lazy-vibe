@@ -6442,8 +6442,26 @@ commit_dirty_git_root_for_git_merge() {
     if [[ "${#changed_paths[@]}" -gt 0 ]]; then
       git -C "$root" add -A -- "${changed_paths[@]}"
     fi
-    git -C "$root" commit -m "$message" >/dev/null
+    if ! git -C "$root" diff --cached --quiet -- "${pathspec[@]}"; then
+      git -C "$root" commit -m "$message" >/dev/null
+    fi
   fi
+}
+
+checkpoint_dirty_git_root_for_git_merge_until_clean() {
+  local root="$1" message="$2"
+  local attempt
+  for attempt in 1 2 3; do
+    if git_root_is_clean_for_git_merge "$root"; then
+      return 0
+    fi
+    commit_dirty_git_root_for_git_merge "$root" "$message"
+    if git_root_is_clean_for_git_merge "$root"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 git_root_unmerged_files() {
@@ -6632,8 +6650,9 @@ checkpoint_dirty_active_root_before_worktree_merge() {
       "$unit_id" "$label" >&2
     return 1
   fi
-  commit_dirty_git_root_for_git_merge "$active_root" "chore(remediation): checkpoint active implementation wave before verification"
-  if ! git_root_is_clean_for_git_merge "$active_root"; then
+  if ! checkpoint_dirty_git_root_for_git_merge_until_clean \
+      "$active_root" \
+      "chore(remediation): checkpoint active implementation wave before verification"; then
     printf '[worktree-merge] %s:%s active git root remains dirty after pre-verify checkpoint\n' \
       "$unit_id" "$label" >&2
     return 1
@@ -6654,8 +6673,9 @@ checkpoint_dirty_active_root_before_verification() {
       "$unit_id" "$label" >&2
     return 1
   fi
-  commit_dirty_git_root_for_git_merge "$active_root" "chore(remediation): checkpoint active implementation revision before verification"
-  if ! git_root_is_clean_for_git_merge "$active_root"; then
+  if ! checkpoint_dirty_git_root_for_git_merge_until_clean \
+      "$active_root" \
+      "chore(remediation): checkpoint active implementation revision before verification"; then
     printf '[worktree-merge] %s:%s active git root remains dirty after pre-verify active-workspace checkpoint\n' \
       "$unit_id" "$label" >&2
     return 1
