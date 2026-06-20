@@ -6636,6 +6636,51 @@ checkpoint_dirty_active_root_before_worktree_merge() {
     "$unit_id" "$label"
 }
 
+checkpoint_dirty_active_root_before_verification() {
+  local active_root="$1" unit_id="$2" label="$3"
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 1
+  git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  if git_root_is_clean_for_git_merge "$active_root"; then
+    return 0
+  fi
+  if git_root_has_unmerged_files "$active_root"; then
+    printf '[worktree-merge] %s:%s active git root has unmerged files; refusing pre-verify active-workspace checkpoint\n' \
+      "$unit_id" "$label" >&2
+    return 1
+  fi
+  commit_dirty_git_root_for_git_merge "$active_root" "chore(remediation): checkpoint active implementation revision before verification"
+  if ! git_root_is_clean_for_git_merge "$active_root"; then
+    printf '[worktree-merge] %s:%s active git root remains dirty after pre-verify active-workspace checkpoint\n' \
+      "$unit_id" "$label" >&2
+    return 1
+  fi
+  printf '[worktree-merge] %s:%s checkpointed active-workspace revision before verification\n' \
+    "$unit_id" "$label"
+}
+
+checkpoint_active_workspace_revision_before_verification() {
+  local unit_id="$1" failed=0
+  if repo_root_is_git_root; then
+    if ! checkpoint_dirty_active_root_before_verification "$REPO_ROOT" "$unit_id" "repo"; then
+      failed=1
+    fi
+  fi
+
+  local IFS=',' root active_root label
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    active_root="$(commit_root_path "$root")"
+    [[ -d "$active_root" ]] || continue
+    [[ "$active_root" == "$REPO_ROOT" ]] && repo_root_is_git_root && continue
+    git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || continue
+    label="$(commit_root_label "$active_root")"
+    if ! checkpoint_dirty_active_root_before_verification "$active_root" "$unit_id" "$label"; then
+      failed=1
+    fi
+  done
+  [[ "$failed" == "0" ]]
+}
+
 cleanup_promoted_unit_worktree() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
@@ -6686,7 +6731,11 @@ integrate_unit_worktree_changes() {
   local recorded_workspace
   recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
   if [[ -n "$recorded_workspace" && "$recorded_workspace" == "$REPO_ROOT" ]]; then
-    printf '[worktree-merge] %s: active workspace revision; ignoring stale unit worktree before verification\n' "$unit_id"
+    if ! checkpoint_active_workspace_revision_before_verification "$unit_id"; then
+      printf '[worktree-merge] %s: active workspace revision could not be checkpointed before verification\n' "$unit_id" >&2
+      return 1
+    fi
+    printf '[worktree-merge] %s: active workspace revision checkpointed before verification\n' "$unit_id"
     return 0
   elif [[ -n "$recorded_workspace" && "$recorded_workspace" != "$worktree_dir" ]]; then
     printf '[worktree-merge] %s: recorded implementation workspace is %s; skipping stale worktree %s\n' \
