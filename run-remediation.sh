@@ -6384,6 +6384,16 @@ git_root_merge_pathspec_args() {
   fi
 }
 
+git_root_git_merge_pathspec_args() {
+  local root="$1"
+  printf '.\n'
+  local rel_rdir
+  rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
+  if [[ -n "$rel_rdir" ]]; then
+    printf ':(exclude)%s/worktrees\n' "$rel_rdir"
+  fi
+}
+
 git_root_is_clean_for_merge() {
   local root="$1"
   local -a pathspec=()
@@ -6401,6 +6411,29 @@ commit_dirty_git_root() {
   while IFS= read -r path; do
     [[ -n "$path" ]] && pathspec+=("$path")
   done < <(git_root_merge_pathspec_args "$root")
+  if [[ -n "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]]; then
+    git -C "$root" add -A -- "${pathspec[@]}"
+    git -C "$root" commit -m "$message" >/dev/null
+  fi
+}
+
+git_root_is_clean_for_git_merge() {
+  local root="$1"
+  local -a pathspec=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && pathspec+=("$path")
+  done < <(git_root_git_merge_pathspec_args "$root")
+  git -C "$root" diff --quiet -- "${pathspec[@]}" || return 1
+  git -C "$root" diff --cached --quiet -- "${pathspec[@]}" || return 1
+  [[ -z "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]] || return 1
+}
+
+commit_dirty_git_root_for_git_merge() {
+  local root="$1" message="$2"
+  local -a pathspec=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && pathspec+=("$path")
+  done < <(git_root_git_merge_pathspec_args "$root")
   if [[ -n "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]]; then
     git -C "$root" add -A -- "${pathspec[@]}"
     git -C "$root" commit -m "$message" >/dev/null
@@ -6585,7 +6618,7 @@ checkpoint_dirty_active_root_before_worktree_merge() {
   local active_root="$1" unit_id="$2" label="$3"
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 1
   git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  if git_root_is_clean_for_merge "$active_root"; then
+  if git_root_is_clean_for_git_merge "$active_root"; then
     return 0
   fi
   if git_root_has_unmerged_files "$active_root"; then
@@ -6593,8 +6626,8 @@ checkpoint_dirty_active_root_before_worktree_merge() {
       "$unit_id" "$label" >&2
     return 1
   fi
-  commit_dirty_git_root "$active_root" "chore(remediation): checkpoint active implementation wave before verification"
-  if ! git_root_is_clean_for_merge "$active_root"; then
+  commit_dirty_git_root_for_git_merge "$active_root" "chore(remediation): checkpoint active implementation wave before verification"
+  if ! git_root_is_clean_for_git_merge "$active_root"; then
     printf '[worktree-merge] %s:%s active git root remains dirty after pre-verify checkpoint\n' \
       "$unit_id" "$label" >&2
     return 1
@@ -6662,13 +6695,13 @@ integrate_unit_worktree_changes() {
   fi
 
   if repo_root_is_git_root; then
-    if ! git_root_is_clean_for_merge "$REPO_ROOT"; then
+    if ! git_root_is_clean_for_git_merge "$REPO_ROOT"; then
       if ! checkpoint_dirty_active_root_before_worktree_merge "$REPO_ROOT" "$unit_id" "repo"; then
         printf '[worktree-merge] %s: active repo root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" >&2
         return 1
       fi
     fi
-    commit_dirty_git_root "$worktree_dir" "fix(remediation): integrate $unit_id"
+    commit_dirty_git_root_for_git_merge "$worktree_dir" "fix(remediation): integrate $unit_id"
     if ! merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" "repo"; then
       return 1
     fi
@@ -6683,13 +6716,13 @@ integrate_unit_worktree_changes() {
     git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || continue
     git -C "$source_root" rev-parse --git-dir >/dev/null 2>&1 || continue
     label="$(commit_root_label "$active_root")"
-    if ! git_root_is_clean_for_merge "$active_root"; then
+    if ! git_root_is_clean_for_git_merge "$active_root"; then
       if ! checkpoint_dirty_active_root_before_worktree_merge "$active_root" "$unit_id" "$label"; then
         printf '[worktree-merge] %s:%s active git root has uncommitted changes; refusing pre-verify merge\n' "$unit_id" "$label" >&2
         return 1
       fi
     fi
-    commit_dirty_git_root "$source_root" "fix(remediation): integrate $unit_id ($label)"
+    commit_dirty_git_root_for_git_merge "$source_root" "fix(remediation): integrate $unit_id ($label)"
     if ! merge_branch_or_head_into_root "$active_root" "$source_root" "$unit_id" "$label"; then
       return 1
     fi
@@ -6761,9 +6794,14 @@ commit_verified_unit_changes() {
   fi
 
   if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch_name"; then
-    if [[ -n "$(git -C "$worktree_dir" status --porcelain)" ]]; then
-       git -C "$worktree_dir" add -A
-       git -C "$worktree_dir" commit -m "fix(remediation): complete $unit_id" || true
+    if [[ -n "$(git -C "$worktree_dir" status --porcelain=v1 -uall)" ]]; then
+       commit_dirty_git_root_for_git_merge "$worktree_dir" "fix(remediation): complete $unit_id"
+    fi
+    if ! git_root_is_clean_for_git_merge "$REPO_ROOT"; then
+      if ! checkpoint_dirty_active_root_before_worktree_merge "$REPO_ROOT" "$unit_id" "repo"; then
+        printf '[commit-on-verify] %s: active repo root has uncommitted changes; refusing verifier merge\n' "$unit_id" >&2
+        return 1
+      fi
     fi
 
     printf '[commit-on-verify] %s: merging branch %s\n' "$unit_id" "$branch_name"
