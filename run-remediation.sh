@@ -3891,6 +3891,28 @@ recover_packets_from_prior_remediation_runs() {
   fi
 }
 
+mark_closed_register_packets() {
+  [[ -s "$REGISTER_PX_TSV" && -n "$REGISTER_DIR" ]] || return 0
+  local -A register_packet_seen=()
+  local -A register_packet_actionable=()
+  local packet_id finding_id disposition
+
+  while IFS=$'\t' read -r packet_id finding_id _rest; do
+    [[ "$packet_id" =~ ^PX- && -n "${finding_id:-}" ]] || continue
+    register_packet_seen["$packet_id"]=1
+    disposition="$(register_finding_disposition "$finding_id" 2>/dev/null || true)"
+    if register_finding_disposition_is_actionable "$disposition"; then
+      register_packet_actionable["$packet_id"]=1
+    fi
+  done < <(tail -n +2 "$REGISTER_PX_TSV")
+
+  for packet_id in "${!register_packet_seen[@]}"; do
+    if [[ ! -v "register_packet_actionable[$packet_id]" ]]; then
+      _IMPLEMENTED_PACKETS["$packet_id"]=1
+    fi
+  done
+}
+
 build_implemented_packet_set() {
   local write_stamps="${1:-1}"
   _IMPLEMENTED_PACKETS=()
@@ -3928,6 +3950,7 @@ build_implemented_packet_set() {
   shopt -u nullglob
 
   recover_packets_from_prior_remediation_runs
+  mark_closed_register_packets
 
   [[ "$write_stamps" == "1" ]] || return 0
 
@@ -6048,24 +6071,42 @@ register_findings_for_packets() {
   ' "$REGISTER_PX_TSV"
 }
 
+register_finding_disposition_is_actionable() {
+  case "$1" in
+    open|regressed|in_remediation|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+register_unit_findings_all_closed() {
+  [[ -s "$REGISTER_PX_TSV" && -n "$REGISTER_DIR" ]] || return 1
+  local packets_csv="$1" finding_id disposition found=0
+  while IFS= read -r finding_id; do
+    [[ -n "$finding_id" ]] || continue
+    found=1
+    disposition="$(register_finding_disposition "$finding_id" 2>/dev/null || true)"
+    if register_finding_disposition_is_actionable "$disposition"; then
+      return 1
+    fi
+  done < <(register_findings_for_packets "$packets_csv")
+  [[ "$found" == "1" ]]
+}
+
 start_register_remediation_for_unit() {
   [[ -s "$REGISTER_PX_TSV" && -n "$REGISTER_DIR" ]] || return 0
   local unit_id="$1" packets_csv="$2" finding_id disposition failed=0
   while IFS= read -r finding_id; do
     [[ -n "$finding_id" ]] || continue
     disposition="$(register_finding_disposition "$finding_id" 2>/dev/null || true)"
-    case "$disposition" in
-      open|regressed|"")
-        ;;
-      in_remediation)
+    if register_finding_disposition_is_actionable "$disposition"; then
+      if [[ "$disposition" == "in_remediation" ]]; then
         continue
-        ;;
-      *)
-        printf '[register] %s: skipping start-remediation for %s; disposition=%s\n' \
-          "$unit_id" "$finding_id" "$disposition"
-        continue
-        ;;
-    esac
+      fi
+    else
+      printf '[register] %s: skipping start-remediation for %s; disposition=%s\n' \
+        "$unit_id" "$finding_id" "$disposition"
+      continue
+    fi
     if ! python3 -m lazy_vibe.register start-remediation \
       --register-dir "$REGISTER_DIR" \
       --finding "$finding_id" \
@@ -7521,6 +7562,11 @@ execute_workstreams() {
       continue
     fi
     if [[ "$REVISE_EXISTING" == "1" ]]; then
+      if register_unit_findings_all_closed "$packets_csv"; then
+        log_event '[revise] skipping register-closed unit %s\n' "implement-$unit_id"
+        grep -qxF "implement-$unit_id" "$CHECKPOINT_FILE" 2>/dev/null || printf '%s\n' "implement-$unit_id" >> "$CHECKPOINT_FILE"
+        continue
+      fi
       if verifier_accepts_unit "$unit_id"; then
         log_event '[revise] skipping verifier-accepted unit %s\n' "implement-$unit_id"
         continue
@@ -9252,6 +9298,13 @@ verifier_queue_category() {
   local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
   local findings
   findings="$(verifier_findings_tsv_for_unit "$unit_id")"
+
+  local packets_csv
+  packets_csv="$(unit_packets_csv "$unit_id" 2>/dev/null || true)"
+  if [[ -n "$packets_csv" ]] && register_unit_findings_all_closed "$packets_csv"; then
+    printf 'accepted\n'
+    return 0
+  fi
 
   local reconciliation_category
   if reconciliation_category="$(unit_reconciliation_category "$unit_id")"; then

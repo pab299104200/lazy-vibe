@@ -322,6 +322,18 @@ PY
 )"
 assert_equals $'fixed\ttests/test_register_fix.py::test_register_fix' "$closed_state" "accepted verifier did not close register finding"
 
+write_verifier "$register_remediation" PX-0002 revise revise pending
+write_findings "$register_remediation" PX-0002 \
+  $'PX-0002\tP1\tboundary_tests\tbackend/a.py\t10\tstale verifier says missing coverage\tadd the old missing test'
+write_summary "$register_remediation" PX-0002 fixed
+run_summary_only "$register_repo" "$register_audit" "$register_remediation"
+assert_equals accepted "$(queue_category "$register_remediation/07-remediation-queue.tsv" PX-0002)" \
+  "closed register finding should override stale revise verifier"
+assert_equals none "$(next_action "$register_remediation/09-next-actions.tsv" PX-0002)" \
+  "closed register finding should not queue another revision"
+grep -q 'Status: `complete`' "$register_remediation/packets/PX-0002.md" ||
+  fail "closed register finding did not stamp packet complete"
+
 repo="$tmp_root/repo"
 audit="$repo/docs/audit/fixture-launch-readiness-run"
 remediation="$repo/docs/audit/fixture-remediation-run"
