@@ -119,6 +119,7 @@ REMEDIATION_AUTO_RERUN_FINAL_REVIEW="${REMEDIATION_AUTO_RERUN_FINAL_REVIEW:-1}"
 REMEDIATION_AUTO_VERIFY_MISSING="${REMEDIATION_AUTO_VERIFY_MISSING:-1}"
 REMEDIATION_AUTO_METADATA_CLOSEOUT="${REMEDIATION_AUTO_METADATA_CLOSEOUT:-1}"
 REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS="${REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS:-1}"
+REMEDIATION_AUTO_COMMIT_RUN_STATE="${REMEDIATION_AUTO_COMMIT_RUN_STATE:-1}"
 REMEDIATION_SANDBOX_PYTEST_FALLBACK="${REMEDIATION_SANDBOX_PYTEST_FALLBACK:-1}"
 REMEDIATION_NATIVE_TEST_FIX_RETRIES="${REMEDIATION_NATIVE_TEST_FIX_RETRIES:-1}"
 REMEDIATION_STATIC_PRECHECKS="${REMEDIATION_STATIC_PRECHECKS:-1}"
@@ -5967,6 +5968,46 @@ commit_baseline_dir_for_unit() {
   printf '%s/commit-baselines/%s\n' "$REMEDIATION_DIR/artifacts" "$1"
 }
 
+git_root_remediation_pathspec_args() {
+  local root="$1" rel_rdir
+  rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
+  [[ -n "$rel_rdir" ]] || return 1
+  printf '%s\n' "$rel_rdir"
+  printf ':(exclude)%s/worktrees\n' "$rel_rdir"
+  printf ':(exclude)%s/worktrees/**\n' "$rel_rdir"
+}
+
+checkpoint_remediation_run_state_for_root() {
+  [[ "$REMEDIATION_AUTO_COMMIT_RUN_STATE" == "1" ]] || return 0
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
+  local root="$1" unit_id="$2"
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+  local -a pathspec=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && pathspec+=("$path")
+  done < <(git_root_remediation_pathspec_args "$root" || true)
+  [[ "${#pathspec[@]}" -gt 0 ]] || return 0
+
+  if [[ -z "$(git -C "$root" status --porcelain=v1 -uall -- "${pathspec[@]}")" ]]; then
+    return 0
+  fi
+
+  local -a changed_paths=()
+  while IFS= read -r -d '' path; do
+    [[ -n "$path" ]] && changed_paths+=("$path")
+  done < <(git -C "$root" ls-files -z -m -d -o --exclude-standard -- "${pathspec[@]}")
+  [[ "${#changed_paths[@]}" -gt 0 ]] || return 0
+
+  git -C "$root" add -A -- "${changed_paths[@]}"
+  if git -C "$root" diff --cached --quiet -- "${pathspec[@]}"; then
+    return 0
+  fi
+
+  git -C "$root" commit -m "chore(remediation): checkpoint run state before $unit_id" -- "${changed_paths[@]}" >/dev/null
+  printf '[remediation-state] %s: checkpointed remediation run state in %s\n' "$unit_id" "$root"
+}
+
 record_commit_baseline_for_unit() {
   [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
   local unit_id="$1" baseline_dir
@@ -6012,6 +6053,7 @@ ensure_commit_roots_clean_for_implementation_unit() {
     root_path="$(commit_root_path "$root")"
     [[ -d "$root_path" ]] || continue
     git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    checkpoint_remediation_run_state_for_root "$root_path" "$unit_id"
     if ! git_root_is_clean_for_merge "$root_path"; then
       printf '[commit-on-verify] %s: %s has uncommitted product changes before implementation; refusing to launch a wave that cannot be merged\n' \
         "$unit_id" "$root_path" >&2
@@ -6268,6 +6310,7 @@ git_root_merge_pathspec_args() {
   if [[ -n "$rel_rdir" ]]; then
     printf ':(exclude)%s\n' "$rel_rdir"
   fi
+  git_root_non_product_pathspec_excludes
 }
 
 git_root_git_merge_pathspec_args() {
@@ -6278,6 +6321,22 @@ git_root_git_merge_pathspec_args() {
   if [[ -n "$rel_rdir" ]]; then
     printf ':(exclude)%s/worktrees\n' "$rel_rdir"
   fi
+  git_root_non_product_pathspec_excludes
+}
+
+git_root_non_product_pathspec_excludes() {
+  printf ':(exclude,glob)node_modules\n'
+  printf ':(exclude,glob)node_modules/**\n'
+  printf ':(exclude,glob)**/node_modules\n'
+  printf ':(exclude,glob)**/node_modules/**\n'
+  printf ':(exclude,glob).venv\n'
+  printf ':(exclude,glob).venv/**\n'
+  printf ':(exclude,glob)**/.venv\n'
+  printf ':(exclude,glob)**/.venv/**\n'
+  printf ':(exclude,glob)__pycache__\n'
+  printf ':(exclude,glob)**/__pycache__\n'
+  printf ':(exclude,glob).pytest_cache\n'
+  printf ':(exclude,glob)**/.pytest_cache\n'
 }
 
 git_root_is_clean_for_merge() {

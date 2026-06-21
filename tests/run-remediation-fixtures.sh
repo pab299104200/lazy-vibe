@@ -533,8 +533,10 @@ git -C "$parallel_repo" init -q
 git -C "$parallel_repo" config user.email "fixture@example.test"
 git -C "$parallel_repo" config user.name "Fixture Runner"
 mkdir -p "$parallel_repo/src"
+mkdir -p "$parallel_repo/frontend"
 printf '# fixture\n' > "$parallel_repo/README.md"
-git -C "$parallel_repo" add README.md src
+ln -s .fixture-deps "$parallel_repo/frontend/node_modules"
+git -C "$parallel_repo" add README.md src frontend/node_modules
 git -C "$parallel_repo" commit -q -m "initial fixture"
 
 cat > "$parallel_remediation/00-master-px-list.tsv" <<'EOF'
@@ -554,6 +556,7 @@ EOF
 write_packet "$parallel_remediation" PX-1001 not-started
 write_packet "$parallel_remediation" PX-1002 not-started
 printf '00-coordinator\ncoordinate-parallel\n' > "$parallel_remediation/completed-units.txt"
+rm "$parallel_repo/frontend/node_modules"
 
 parallel_runner="$tmp_root/parallel-implementer.sh"
 cat > "$parallel_runner" <<'EOF'
@@ -604,6 +607,8 @@ MAX_PARALLEL=2 \
 [[ -s "$parallel_remediation/artifacts/IU-1002.promotion" ]] || fail "second promotion marker missing"
 grep -q '\[worktree-merge\] promoting completed implementation units=IU-1001,IU-1002' \
   /tmp/lazy-vibe-parallel-worktree-fixture.out || fail "parallel wave promotion log missing"
+grep -q '\[remediation-state\] IU-1001: checkpointed remediation run state' \
+  /tmp/lazy-vibe-parallel-worktree-fixture.out || fail "remediation run state was not checkpointed before implementation"
 if git -C "$parallel_repo" worktree list --porcelain | grep -q "$parallel_remediation/worktrees"; then
   fail "git worktree metadata still references promoted remediation worktrees"
 fi
@@ -685,6 +690,9 @@ grep -q 'merge_branch_or_head_into_root "$REPO_ROOT" "$worktree_dir" "$unit_id" 
 grep -q 'active workspace was dirty before implementation; refusing auto-commit' "$SCRIPT_DIR/run-remediation.sh" || fail "active workspace dirty-baseline commit guard missing"
 grep -q 'REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify default must stay enabled"
 grep -q 'REMEDIATION_COMMIT_ROOTS="$REPO_ROOT"' "$SCRIPT_DIR/run-remediation.sh" || fail "git-root commit root default missing"
+grep -q 'REMEDIATION_AUTO_COMMIT_RUN_STATE="${REMEDIATION_AUTO_COMMIT_RUN_STATE:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "remediation run-state checkpoint default missing"
+grep -q 'git_root_non_product_pathspec_excludes' "$SCRIPT_DIR/run-remediation.sh" || fail "non-product pathspec exclusions missing"
+grep -q '\*\*/node_modules' "$SCRIPT_DIR/run-remediation.sh" || fail "node_modules pathspec exclusion missing"
 grep -q 'status --porcelain=v1 -uall -- "${pathspec\[@\]}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit baseline must use merge pathspec exclusions"
 grep -q 'refusing to launch a wave that cannot be merged' "$SCRIPT_DIR/run-remediation.sh" || fail "dirty-root prelaunch guard missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then
