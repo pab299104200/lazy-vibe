@@ -723,6 +723,8 @@ grep -q 'active workspace revision checkpointed before verification' \
   /tmp/lazy-vibe-active-workspace-fixture.out || fail "active workspace revision was not checkpointed"
 [[ -s "$active_remediation/artifacts/$active_unit.promotion" ]] || fail "active workspace promotion marker missing"
 git -C "$active_repo" diff --quiet -- src/active.txt || fail "active workspace product change remained uncommitted"
+grep -q 'wait_for_git_root_unmerged_files_to_clear' "$SCRIPT_DIR/run-remediation.sh" || fail "active-workspace unmerged settle guard missing"
+grep -q 'unmerged git state cleared after' "$SCRIPT_DIR/run-remediation.sh" || fail "active-workspace unmerged settle log missing"
 
 grep -q 'command_is_long_running_server' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command guard missing"
 grep -q 'refused long-running server command' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command refusal log missing"

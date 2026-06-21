@@ -6432,6 +6432,27 @@ git_root_has_unmerged_files() {
   [[ -n "$(git_root_unmerged_files "$1")" ]]
 }
 
+wait_for_git_root_unmerged_files_to_clear() {
+  local root="$1" unit_id="$2" label="$3"
+  local timeout="${REMEDIATION_UNMERGED_SETTLE_SECONDS:-20}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=20
+  local elapsed=0
+  while git_root_has_unmerged_files "$root"; do
+    if (( elapsed >= timeout )); then
+      printf '[worktree-merge] %s:%s unmerged paths still present after %ss:\n%s\n' \
+        "$unit_id" "$label" "$timeout" "$(git_root_unmerged_files "$root")" >&2
+      return 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  if (( elapsed > 0 )); then
+    printf '[worktree-merge] %s:%s unmerged git state cleared after %ss; continuing checkpoint\n' \
+      "$unit_id" "$label" "$elapsed"
+  fi
+  return 0
+}
+
 git_root_merge_in_progress() {
   git -C "$1" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1
 }
@@ -6633,7 +6654,8 @@ checkpoint_dirty_active_root_before_worktree_merge() {
   if git_root_is_clean_for_git_merge "$active_root"; then
     return 0
   fi
-  if git_root_has_unmerged_files "$active_root"; then
+  if git_root_has_unmerged_files "$active_root" && \
+     ! wait_for_git_root_unmerged_files_to_clear "$active_root" "$unit_id" "$label"; then
     printf '[worktree-merge] %s:%s active git root has unmerged files; refusing pre-verify checkpoint\n' \
       "$unit_id" "$label" >&2
     return 1
@@ -6656,7 +6678,8 @@ checkpoint_dirty_active_root_before_verification() {
   if git_root_is_clean_for_git_merge "$active_root"; then
     return 0
   fi
-  if git_root_has_unmerged_files "$active_root"; then
+  if git_root_has_unmerged_files "$active_root" && \
+     ! wait_for_git_root_unmerged_files_to_clear "$active_root" "$unit_id" "$label"; then
     printf '[worktree-merge] %s:%s active git root has unmerged files; refusing pre-verify active-workspace checkpoint\n' \
       "$unit_id" "$label" >&2
     return 1
