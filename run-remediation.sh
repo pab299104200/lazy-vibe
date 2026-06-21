@@ -5716,8 +5716,10 @@ workspace_git_roots() {
   local seen_file
   seen_file="$(mktemp)"
 
+  local top_level
   if repo_root_is_git_root; then
-    printf '%s\n' "$REPO_ROOT" >> "$seen_file"
+    top_level="$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$top_level" ]] && printf '%s\n' "$top_level" >> "$seen_file"
   fi
 
   local IFS=',' root root_path
@@ -5725,17 +5727,15 @@ workspace_git_roots() {
     [[ -n "$root" ]] || continue
     root_path="$(commit_root_path "$root")"
     [[ -d "$root_path" ]] || continue
-    if git -C "$root_path" rev-parse --git-dir >/dev/null 2>&1; then
-      printf '%s\n' "$root_path" >> "$seen_file"
-    fi
+    top_level="$(git -C "$root_path" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$top_level" ]] && printf '%s\n' "$top_level" >> "$seen_file"
   done
 
   local child
   for child in "$REPO_ROOT"/*; do
     [[ -d "$child" ]] || continue
-    if git -C "$child" rev-parse --git-dir >/dev/null 2>&1; then
-      printf '%s\n' "$child" >> "$seen_file"
-    fi
+    top_level="$(git -C "$child" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$top_level" ]] && printf '%s\n' "$top_level" >> "$seen_file"
   done
 
   awk '!seen[$0]++' "$seen_file"
