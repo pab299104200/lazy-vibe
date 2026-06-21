@@ -7422,6 +7422,42 @@ wave_job_completed_successfully() {
   esac
 }
 
+process_tree_pids_postorder() {
+  local root="$1" child
+  while IFS= read -r child; do
+    [[ -n "$child" ]] || continue
+    process_tree_pids_postorder "$child"
+  done < <(pgrep -P "$root" 2>/dev/null || true)
+  printf '%s\n' "$root"
+}
+
+terminate_wave_job_tree() {
+  local root_pid="$1" log_file="$2" reason="$3"
+  local -a pids=()
+  while IFS= read -r _pid; do
+    [[ -n "$_pid" ]] && pids+=("$_pid")
+  done < <(process_tree_pids_postorder "$root_pid" | awk '!seen[$0]++')
+  ((${#pids[@]} > 0)) || return 0
+
+  printf '[stall-kill] terminating process tree for pid=%s reason=%s pids=%s\n' \
+    "$root_pid" "$reason" "${pids[*]}" >> "$log_file"
+  kill "${pids[@]}" 2>/dev/null || true
+  sleep 2
+
+  local -a survivors=()
+  local pid
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      survivors+=("$pid")
+    fi
+  done
+  if ((${#survivors[@]} > 0)); then
+    printf '[stall-kill] force-killing remaining process tree pids=%s\n' \
+      "${survivors[*]}" >> "$log_file"
+    kill -KILL "${survivors[@]}" 2>/dev/null || true
+  fi
+}
+
 wait_for_wave() {
   local -n pids_ref=$1
   local -n names_ref=$2
@@ -7511,7 +7547,7 @@ wait_for_wave() {
             printf '\r\033[K[!] %s: stalled after %ds - terminating\n' \
               "${names_ref[$idx]}" "$elapsed" >&2
             printf '[stall-kill] stalled after %ds\n' "$elapsed" >> "${job_log[$idx]}"
-            kill "${pids_ref[$idx]}" 2>/dev/null || true
+            terminate_wave_job_tree "${pids_ref[$idx]}" "${job_log[$idx]}" "stalled-after-${elapsed}s"
           fi
         fi
       fi
