@@ -747,6 +747,7 @@ grep -q 'REMEDIATION_COMMIT_ROOTS="$REPO_ROOT"' "$SCRIPT_DIR/run-remediation.sh"
 grep -q 'REMEDIATION_AUTO_COMMIT_RUN_STATE="${REMEDIATION_AUTO_COMMIT_RUN_STATE:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "remediation run-state checkpoint default missing"
 grep -q 'git_root_non_product_pathspec_excludes' "$SCRIPT_DIR/run-remediation.sh" || fail "non-product pathspec exclusions missing"
 grep -q '\*\*/node_modules' "$SCRIPT_DIR/run-remediation.sh" || fail "node_modules pathspec exclusion missing"
+grep -q '\*\*/\*.backup' "$SCRIPT_DIR/run-remediation.sh" || fail "backup-file pathspec exclusion missing"
 grep -q 'status --porcelain=v1 -uall -- "${pathspec\[@\]}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit baseline must use merge pathspec exclusions"
 grep -q 'refusing to launch a wave that cannot be merged' "$SCRIPT_DIR/run-remediation.sh" || fail "dirty-root prelaunch guard missing"
 if grep -q 'test_status=124' "$SCRIPT_DIR/run-remediation.sh"; then

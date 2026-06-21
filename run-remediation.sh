@@ -6337,6 +6337,8 @@ git_root_non_product_pathspec_excludes() {
   printf ':(exclude,glob)**/__pycache__\n'
   printf ':(exclude,glob).pytest_cache\n'
   printf ':(exclude,glob)**/.pytest_cache\n'
+  printf ':(exclude,glob)*.backup\n'
+  printf ':(exclude,glob)**/*.backup\n'
 }
 
 git_root_is_clean_for_merge() {
