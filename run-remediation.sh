@@ -6735,10 +6735,6 @@ integrate_unit_worktree_changes() {
   if adopt_previously_merged_unit_branch "$unit_id"; then
     return 0
   fi
-  [[ -d "$worktree_dir" ]] || return 0
-  if [[ "$worktree_dir" == "$REPO_ROOT" ]]; then
-    return 0
-  fi
 
   local recorded_workspace
   recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
@@ -6747,11 +6743,17 @@ integrate_unit_worktree_changes() {
       printf '[worktree-merge] %s: active workspace revision could not be checkpointed before verification\n' "$unit_id" >&2
       return 1
     fi
+    record_unit_promotion "$unit_id" "merged" "$REPO_ROOT"
     printf '[worktree-merge] %s: active workspace revision checkpointed before verification\n' "$unit_id"
     return 0
   elif [[ -n "$recorded_workspace" && "$recorded_workspace" != "$worktree_dir" ]]; then
     printf '[worktree-merge] %s: recorded implementation workspace is %s; skipping stale worktree %s\n' \
       "$unit_id" "$recorded_workspace" "$worktree_dir"
+    return 0
+  fi
+
+  [[ -d "$worktree_dir" ]] || return 0
+  if [[ "$worktree_dir" == "$REPO_ROOT" ]]; then
     return 0
   fi
 

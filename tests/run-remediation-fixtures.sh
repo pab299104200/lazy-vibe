@@ -670,6 +670,60 @@ if git -C "$resume_repo" worktree list --porcelain | grep -q "$resume_remediatio
   fail "git worktree metadata still references checkpointed remediation worktree"
 fi
 
+active_repo="$tmp_root/active-repo"
+active_audit="$active_repo/docs/audit/fixture-launch-readiness-run"
+active_remediation="$active_repo/docs/audit/fixture-remediation-run"
+active_unit="IU-3001"
+mkdir -p "$active_repo" "$active_audit" "$active_remediation"/{packets,prompts,logs,artifacts} "$active_repo/src"
+git -C "$active_repo" init -q
+git -C "$active_repo" config user.email "fixture@example.test"
+git -C "$active_repo" config user.name "Fixture Runner"
+printf '# fixture\n' > "$active_repo/README.md"
+printf 'base\n' > "$active_repo/src/active.txt"
+git -C "$active_repo" add README.md src/active.txt
+git -C "$active_repo" commit -q -m "initial fixture"
+
+cat > "$active_remediation/00-master-px-list.tsv" <<'EOF'
+packet_id	severity	group	title	source_file	source_line	finding	rationale
+PX-3001	P1	active	Active workspace	fixture.md	1	active	row
+EOF
+cat > "$active_remediation/02-workstreams.tsv" <<'EOF'
+group	packets	model_class	rationale
+active	PX-3001	standard	fixture
+EOF
+cat > "$active_remediation/03-implementation-units.tsv" <<'EOF'
+unit_id	packets	group	model_class	severity	rationale
+IU-3001	PX-3001	active	standard	P1	active
+EOF
+write_packet "$active_remediation" PX-3001 not-started
+write_summary "$active_remediation" "$active_unit" fixed
+printf '00-coordinator\ncoordinate-active\nimplement-%s\n' "$active_unit" > "$active_remediation/completed-units.txt"
+cat > "$active_remediation/artifacts/$active_unit.workspace" <<EOF
+unit_id	$active_unit
+workspace	$active_repo
+mode	active
+EOF
+printf 'changed by active workspace revision\n' > "$active_repo/src/active.txt"
+
+REPO_ROOT="$active_repo" \
+REMEDIATION_DIR="$active_remediation" \
+REMEDIATION_SCRIPT_SNAPSHOT=1 \
+"$SCRIPT_DIR/run-remediation.sh" \
+  --audit-run "$active_audit" \
+  --execute \
+  --no-verify-after-execute \
+  --only-unit "$active_unit" \
+  --no-catalog >/tmp/lazy-vibe-active-workspace-fixture.out 2>/tmp/lazy-vibe-active-workspace-fixture.err || {
+    sed -n '1,160p' /tmp/lazy-vibe-active-workspace-fixture.out >&2 || true
+    sed -n '1,200p' /tmp/lazy-vibe-active-workspace-fixture.err >&2 || true
+    fail "active workspace checkpoint fixture failed"
+  }
+
+grep -q 'active workspace revision checkpointed before verification' \
+  /tmp/lazy-vibe-active-workspace-fixture.out || fail "active workspace revision was not checkpointed"
+[[ -s "$active_remediation/artifacts/$active_unit.promotion" ]] || fail "active workspace promotion marker missing"
+git -C "$active_repo" diff --quiet -- src/active.txt || fail "active workspace product change remained uncommitted"
+
 grep -q 'command_is_long_running_server' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command guard missing"
 grep -q 'refused long-running server command' "$SCRIPT_DIR/run-remediation.sh" || fail "long-running command refusal log missing"
 grep -q 'npm run dev' "$SCRIPT_DIR/run-remediation.sh" || fail "npm dev-server guard missing"
