@@ -134,234 +134,59 @@ SCORECARD_ONLY_SOURCE=0
 
 usage() {
   cat <<'USAGE'
-Usage: run-remediation.sh --audit-run RUN_DIR [--feature SLUG] [--scorecard FILE] [--execute] [--verify] [--no-verify-after-execute] [--verify-only] [--finalize-only] [--summary-only] [--rerun-verifiers] [--rerun-final-review] [--revise-next] [--drain-queue] [--no-drain-queue] [--revise-existing] [--split-incomplete] [--no-auto-split] [--no-catalog] [--force-catalog] [--catalog-with-codex] [--dry-run] [--verbose] [--only-group GROUP] [--only-unit IU-0001,IU-0002]
+Usage:
+  run-remediation.sh [source] [mode] [filters]
 
-Environment:
-  REMEDIATION_DIR             Output directory for remediation plan and logs.
-  REPO_ROOT                   Product repo root. Defaults to current working directory.
-  PROFILE                     Profile name (resolved under PROFILES_DIR) or absolute path to a profile directory.
-                              Sets PRODUCT_PROFILE from the profile if not already set.
-  PROFILES_DIR                Directory containing named profile subdirectories. Defaults to profiles/ alongside the script.
-  PRODUCT_PROFILE             Optional product profile markdown. Set automatically when PROFILE is used.
-  REGISTER_DIR                 Optional product register directory. Defaults to <Repo root>/docs/audit/register
-                               for product-profile repos when register.jsonl exists.
-  REMEDIATION_REGISTER_SOURCE  auto, 1, or 0. auto uses the register when REGISTER_DIR/register.jsonl exists.
-  MAX_PARALLEL                Max workstreams per wave. Defaults to 3.
-  MAX_WORKSTREAM_PACKETS      Max packets per workstream coordinator. Oversized workstreams are
-                              split by source kind, then source file stem, then numerically.
-                              Defaults to 80.
-  CONTINUE_ON_FAIL            1 to continue after a failed workstream. Defaults to 0.
-  REMEDIATION_AUTO_REVISE     1 to rerun verifier-revised units before final review. Defaults to 1.
-  REMEDIATION_MAX_REVISION_ROUNDS
-                              Max implement/verify revision rounds after first verification. Defaults to 1.
-  REMEDIATION_MAX_AUTO_REVISE_FINDINGS
-                              Max verifier finding rows allowed for automatic revision. Defaults to 8.
-  REMEDIATION_REVISE_NEXT_LIMIT
-                              Max safe queue units selected by --revise-next. Defaults to 8.
-                              Set to 0 for all currently safe candidates.
-  REMEDIATION_REVISE_NEXT_MAX_ROUNDS
-                              Max deterministic --revise-next batches before stopping. Defaults to 10.
-                              Set to 0 to continue until no safe candidates or no queue progress.
-  REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS
-                              Max deterministic --drain-queue action rounds. Defaults to 20.
-                              Set to 0 to continue until only manual buckets remain or progress stops.
-  REMEDIATION_REVISION_MAX_PARALLEL
-                              Parallelism during revision rounds. Defaults to 2.
-  REMEDIATION_VERIFY_SCOPE    implementation or launch. Defaults to implementation.
-  REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS
-                              1 to run profile-wide native commands such as full lint/build/test
-                              after every unit. Defaults to 0 so unrelated repo drift does not
-                              fail a focused implementation unit.
-  REMEDIATION_MAX_RETRIES     Extra retry attempts per workstream on non-zero runner exit. Defaults to 2 (3 total attempts, backoff 15s/30s).
-  REMEDIATION_RAW_UNIT_ABORT_THRESHOLD
-                              Abort before execution when this many raw one-packet PX-* implementation
-                              units remain after coordination/cataloging. Defaults to 20.
-  REMEDIATION_ALLOW_RAW_UNITS 1 to allow execution of a large raw one-packet manifest. Defaults to 0.
-  REMEDIATION_REWRITE_PACKETS
-                              1 to overwrite existing packet files when reusing REMEDIATION_DIR. Defaults to 0.
-  REMEDIATION_REWRITE_WORKSTREAMS
-                              1 to overwrite existing workstream TSV when reusing REMEDIATION_DIR. Defaults to 0.
-  REMEDIATION_REWRITE_UNITS   1 to overwrite existing implementation units TSV when reusing REMEDIATION_DIR. Defaults to 0.
-  REMEDIATION_IMPORT_PRIOR_RUNS
-                              1 to recover fixed packets from sibling remediation runs for the same audit run
-                              when the packet source/line/title still matches. Defaults to 1.
-  REMEDIATION_COMMIT_ON_VERIFY
-                              1 to commit changed Git roots after a unit verifies as accepted/fixed.
-                              Defaults to 1. Set to 0 to disable commit closeout.
-                              Parallel implementation still uses isolated worktrees;
-                              completed worktree waves are merged and cleaned before verification.
-  REMEDIATION_COMMIT_ROOTS     Comma-separated repo roots under REPO_ROOT to commit when
-                              REMEDIATION_COMMIT_ON_VERIFY=1. Defaults to REPO_ROOT for git-root
-                              repos, otherwise backend,frontend for split-root repos.
-  REMEDIATION_COLLECT_EVIDENCE
-                              1 to automatically collect deterministic launch evidence after
-                              verification finds only evidence/coordination gaps. Defaults to 1.
-                              Set to 0 only to force a manual evidence pass.
-  REMEDIATION_EVIDENCE_MODE   targeted or full. Defaults to targeted. Targeted mode exports
-                              PORTAL_AUDIT_SKIP_RUNTIME_QUALITY=1 for browser evidence wrappers
-                              so proof-specific Playwright evidence is not failed by unrelated
-                              Lighthouse/runtime-quality gates.
-  REMEDIATION_EVIDENCE_MAX_ROUNDS
-                              Max collect-evidence then verify-only loops. Defaults to 1.
-  REMEDIATION_AUTO_RERUN_FINAL_REVIEW
-                              1 to rerun final review automatically when verifier inputs changed.
-                              Defaults to 1.
-  REMEDIATION_AUTO_VERIFY_MISSING
-                              1 to verify queue rows with missing/unreadable verifier artifacts
-                              during default state resume. Defaults to 1.
-  REMEDIATION_AUTO_METADATA_CLOSEOUT
-                              1 to auto-repair remediation-owned packet/summary closeout metadata
-                              findings and reverify them. Defaults to 1.
-  REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS
-                              1 to run a resolver agent when a completed unit worktree
-                              conflicts while merging into the active checkout. Defaults to 1.
-  MERGE_RESOLVER_AGENT         Optional built-in resolver agent for merge conflicts.
-                              Defaults to REVIEWER_AGENT, then IMPLEMENTER_AGENT.
-  MERGE_RESOLVER_RUNNER        Optional custom resolver runner. Receives the same arguments
-                              as IMPLEMENTER_RUNNER when MERGE_RESOLVER_AGENT=runner.
-  REMEDIATION_SANDBOX_PYTEST_FALLBACK
-                              1 to retry pytest commands with -p no:rerunfailures when the
-                              rerunfailures plugin is blocked by sandbox socket permissions.
-                              Defaults to 1.
-  REMEDIATION_STATIC_PRECHECKS
-                              1 to run deterministic static hygiene prechecks and feed their
-                              output into verifier prompts. Defaults to 1.
-  REMEDIATION_AUTO_DRAIN_QUEUE
-                              1 to drain the current remediation queue by default on resumed
-                              runs with no explicit phase. Defaults to 1. Use --no-drain-queue
-                              or set to 0 for summary/resume-only behavior.
-  REMEDIATION_VERIFY_AFTER_EXECUTE
-                              1 to run verifiers automatically after an implementation wave.
-                              Defaults to 1. Use --no-verify-after-execute or set to 0 only
-                              when intentionally generating implementation artifacts without
-                              verifier scoring.
-  REMEDIATION_ALLOW_WORKTREE_FALLBACK
-                              1 to fall back to the live REPO_ROOT when git worktree creation fails.
-                              Defaults to 0 for git-root repos because live fallback can make
-                              parallel units overwrite each other.
-  REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL
-                              1 to allow parallel execution when REPO_ROOT is not a git root.
-                              This is unsafe for general use because units edit the same live
-                              workspace without git worktree isolation.
-  REMEDIATION_AUTO_SPLIT      1 to auto-detect oversized units before execution. Defaults to 1.
-  REMEDIATION_MAX_UNIT_PACKET_COUNT
-                              Max packets per implementation unit before split preflight. Defaults to 3.
-  REMEDIATION_MAX_UNIT_PACKET_BYTES
-                              Max combined packet bytes per implementation unit before split preflight. Defaults to 120000.
-  REMEDIATION_MAX_PACKET_BYTES
-                              Max single packet bytes before split preflight. Defaults to 60000.
-  IMPLEMENTER_AGENT           Built-in implementer: codex (default), claude, or gemini.
-                              Use runner to hand off to IMPLEMENTER_RUNNER instead.
-  IMPLEMENTER_RUNNER          Custom implementer wrapper (overrides built-in agent).
-                              Receives: prompt_file remediation_dir workstream_id.
-  PLANNER_AGENT               Built-in planner agent for high-risk/complex units. Defaults to
-                              REVIEWER_AGENT, then COORDINATOR_AGENT, then IMPLEMENTER_AGENT.
-                              Planners read code and write a design doc; implementers then
-                              execute against the design.
-  PLANNER_RUNNER              Custom planner wrapper (overrides built-in agent).
-  PLAN_MODEL_CLASSES          Space-separated model classes that run through the planner phase
-                              before implementation. Defaults to "high-risk complex".
-  REVIEWER_AGENT              Built-in reviewer: codex, claude, or gemini.
-                              Defaults to IMPLEMENTER_AGENT when not set; a warning is printed when
-                              same-model review is used since it reduces independence.
-                              Use runner to hand off to REVIEWER_RUNNER instead.
-  REVIEWER_RUNNER             Custom reviewer wrapper (overrides built-in agent).
-                              Receives: prompt_file remediation_dir workstream_id.
-  REMEDIATION_RUNNER          Fallback wrapper for all roles when no role-specific runner is set.
-                              Receives: prompt_file remediation_dir workstream_id.
-  CATALOG_AGENT               Built-in cataloger agent. Defaults to IMPLEMENTER_AGENT.
-  CATALOG_RUNNER              Optional cataloger wrapper override.
-  VERIFICATION_RUNNER         Optional verifier wrapper override.
-  REVIEW_RUNNER               Optional final-review wrapper override.
+Sources:
+  --audit-run RUN_DIR          Use an existing launch/audit run directory.
+  --feature SLUG               Use docs/scorecard(s)/SLUG.md as the source.
+  --scorecard FILE             Use a specific scorecard markdown file.
 
-Codex agent (IMPLEMENTER_AGENT=codex or REVIEWER_AGENT=codex):
-  CODEX_MODEL                 Override model for all classes.
-  CODEX_MODEL_COORDINATOR     Defaults to gpt-5.5.
-  CODEX_MODEL_PLANNER         Defaults to gpt-5.5.
-  CODEX_MODEL_HIGH_RISK       Defaults to gpt-5.5.
-  CODEX_MODEL_STANDARD        Defaults to gpt-5.4.
-  CODEX_MODEL_VERIFIER        Defaults to gpt-5.5.
-  CODEX_MODEL_REVIEWER        Defaults to gpt-5.5.
-  CODEX_REASONING_EFFORT      Override reasoning effort for all classes.
-  CODEX_REASONING_COORDINATOR Defaults to high.
-  CODEX_REASONING_PLANNER     Defaults to high.
-  CODEX_REASONING_HIGH_RISK   Defaults to high.
-  CODEX_REASONING_STANDARD    Defaults to medium.
-  CODEX_REASONING_VERIFIER    Defaults to high.
-  CODEX_REASONING_REVIEWER    Defaults to high.
-  CODEX_PROFILE               Optional profile passed to codex exec.
-  CODEX_EXTRA_ARGS            Optional extra args appended to codex exec. Split on shell words.
+Main modes:
+  --execute                    Implement, then verify by default.
+  --verify                     Run verifiers after existing or newly implemented units.
+  --verify-only                Verify existing implementation artifacts.
+  --finalize-only              Refresh aggregate findings, queue, final review, and summary.
+  --summary-only               Refresh aggregate findings, queue, and summary only.
+  --dry-run                    Print the execution schedule without launching agents.
 
-Claude agent (IMPLEMENTER_AGENT=claude or REVIEWER_AGENT=claude):
-  Model is chosen automatically from the packet's model class:
-    coordinator / planner / high-risk / verifier / reviewer → claude-opus-4-7
-    standard / cataloger                                    → claude-sonnet-4-6
-  CLAUDE_MODEL                Override model for all classes.
-  CLAUDE_MODEL_HIGH           Model for high-effort classes. Defaults to claude-opus-4-7.
-  CLAUDE_MODEL_STANDARD       Model for standard/cataloger classes. Defaults to claude-sonnet-4-6.
-  CLAUDE_EFFORT               Override effort for all classes (low|medium|high|xhigh|max).
-  CLAUDE_EFFORT_CATALOGER     Effort for the cataloger. Defaults to low (avoids extended thinking on large prompts).
-  CLAUDE_EFFORT_HIGH          Effort for high-effort classes. Defaults to high.
-  CLAUDE_EFFORT_STANDARD      Effort for standard implementation classes. Defaults to medium.
-  CLAUDE_EXTRA_ARGS           Optional extra args appended to claude. Split on shell words.
-  CLAUDE_TRANSPORT            prompt or pty. Defaults to prompt, which uses claude -p.
-                              pty avoids -p by driving interactive claude through a pseudo-terminal.
-  CLAUDE_PTY_IDLE_AFTER_RESULT_SECONDS
-                              Seconds of no terminal output after RESULT before PTY mode exits. Defaults to 20.
-  CLAUDE_PTY_STARTUP_SECONDS  Seconds to wait before pasting the prompt into interactive claude. Defaults to 3.
+Resume and queue controls:
+  --rerun-verifiers            Rerun completed/stale verifier sections.
+  --rerun-final-review         Rerun final review even if its input fingerprint matches.
+  --revise-next                Implement and verify the next safe needs_targeted_revision units.
+  --drain-queue                Keep deriving safe next actions from the current queue.
+  --no-drain-queue             Disable the default queue drain on a reused run directory.
+  --only-unit LIST             Limit execution/verification to comma-separated unit ids.
+  --only-group GROUP           Limit execution/verification to one implementation group.
 
-Gemini agent (IMPLEMENTER_AGENT=gemini or REVIEWER_AGENT=gemini):
-  Model is chosen automatically from the packet's model class:
-    coordinator / planner / high-risk / verifier / reviewer → gemini-2.5-pro
-    standard / cataloger                                    → gemini-2.5-flash
-  GEMINI_MODEL                Override model for all classes.
-  GEMINI_MODEL_HIGH           Model for high-effort classes. Defaults to gemini-2.5-pro.
-  GEMINI_MODEL_STANDARD       Model for standard/cataloger. Defaults to gemini-2.5-flash.
-  GEMINI_EXTRA_ARGS           Optional extra args appended to gemini. Split on shell words.
-  SPLIT_CHILD_MAX_PARALLEL    Max parallelism after auto-splitting. Defaults to 1 to avoid shared-file conflicts.
-  REMEDIATION_HEARTBEAT_SECONDS
-                              Progress heartbeat interval while an agent is running. Defaults to 60.
-  REMEDIATION_STALL_INTERVALS Number of unchanged-log heartbeat intervals before a stall-kill is triggered.
-                              Defaults to 5 (5 minutes at 60s heartbeat). Set to 0 to disable stall detection.
+Catalog and recovery controls:
+  --no-catalog                 Reuse the existing implementation-unit catalog.
+  --force-catalog              Rerun the cataloger and allow catalog state refresh.
+  --revise-existing            Rerun implementation from existing packet/verifier artifacts.
+  --split-incomplete           Split oversized/incomplete/revise units and run children.
+  --no-auto-split              Disable automatic oversized-unit split preflight.
+  --recoordinate               Rerun workstream coordinators for incomplete packets.
+  --no-normalize               Skip workstream source-kind normalization.
+  --catalog-with-codex         Run the cataloger explicitly without --execute.
+  --no-verify-after-execute    Implementation-only pass; do not run verifiers.
 
-Default behavior builds the master Px list, work packets, grouping, and prompts only.
-Use --execute to run the coordinator and workstream agents, then verifier/final-review agents by default.
-Use --no-verify-after-execute only for an intentional implementation-only pass.
-Use --no-catalog to skip the cataloger when --execute is set (useful when packets were hand-edited or the cataloger already ran).
-Use --recoordinate to strip coordinate-* checkpoint entries and re-run workstream coordinators against incomplete packets only. Combine with --no-catalog --no-auto-split --execute to resume from open packets without touching the catalog or splitting logic.
-Use --no-normalize to skip workstream source-kind splitting on resume runs where normalization has already been done.
-Use --catalog-with-codex to run the cataloger explicitly without --execute (plan-only mode with catalog refinement).
-Use --verify to run read-only verifier agents after workstream implementation.
-Use --verify-only to run only verifier and final-review agents against an existing remediation directory.
-Use --finalize-only to skip implementation/verifier agents and regenerate aggregate findings,
-run or skip the final review based on its input fingerprint, and write summary/queue outputs.
-Use --summary-only to skip all agents and only regenerate aggregate findings, run summary,
-and remediation queue outputs.
-By default, a reused remediation directory drains deterministically from current state:
-missing/stale verifiers are refreshed, safe targeted revisions are implemented and verified,
-pending split children are executed, deterministic evidence is collected, final review is
-refreshed, and summaries/queues are regenerated. It stops when only manual buckets remain.
-Use --no-drain-queue to skip those automatic actions and only do resume bookkeeping.
-Use --rerun-verifiers to explicitly rerun completed/stale verifier sections.
-Use --rerun-final-review to explicitly rerun a completed/stale final review.
-Use --revise-next to implement and verify the next safe needs_targeted_revision units
-from the current remediation queue, leaving blocked/contract/test-harness/split work untouched.
-It selects at most REMEDIATION_REVISE_NEXT_LIMIT units per batch in queue order by default,
-then repeats deterministically until safe candidates are exhausted, the queue stops improving,
-or REMEDIATION_REVISE_NEXT_MAX_ROUNDS is reached.
-Use --drain-queue to keep deriving safe next actions from the current queue:
-refresh not_verified units, revise safe needs_targeted_revision units, execute pending split
-children, repair remediation metadata, collect deterministic evidence, and refresh final review.
-It stops when only manual buckets remain, such as blocked, contract_conflict, true test_harness,
-or launch evidence that cannot be collected deterministically.
-Use --no-drain-queue to disable the default queue drain on a reused remediation directory.
-Use --revise-existing with REMEDIATION_DIR to rerun implementation against existing packet/verifier artifacts instead of regenerating packets.
-When --revise-existing is combined with --execute, the selected verifier sections are rerun automatically so the queue cannot remain on stale verifier artifacts.
-Use --feature or --scorecard to seed remediation from a feature scorecard. When no --audit-run is supplied, the scorecard becomes the source of truth for packet extraction.
-Use --split-incomplete to detect oversized/incomplete/revise units, create child implementation units, and run those children when --execute is set.
-Oversized unit detection runs automatically before execution by default; use --no-auto-split to disable it.
-Use --only-unit to limit execution or verification to specific implementation units.
-Use --dry-run to print the generated execution schedule without running agents.
+Common environment:
+  PROFILE                      Product profile name under profiles/, e.g. portal.
+  REPO_ROOT                    Product repo root. Defaults to current directory/profile root.
+  REMEDIATION_DIR              Existing or output remediation run directory.
+  REGISTER_DIR                 Product register directory. Auto-detected from profile roots.
+  REMEDIATION_REGISTER_SOURCE  auto, 1, or 0. Defaults to auto.
+  MAX_PARALLEL                 Parallel implementation/verifier wave size. Defaults to 3.
+  IMPLEMENTER_AGENT            codex, claude, gemini, or runner. Defaults to codex.
+  REVIEWER_AGENT               codex, claude, gemini, or runner. Defaults to implementer.
+  REMEDIATION_COMMIT_ON_VERIFY 1 to commit accepted/fixed unit changes. Defaults to 1.
+  REMEDIATION_COMMIT_ROOTS     Comma-separated git roots to commit. Auto-detected.
+
+Less common tuning remains available through environment variables in the
+script, but it is intentionally omitted from this operator help. Defaults are
+chosen for resumed register-remediation runs: drain the safe queue, auto-revise
+bounded verifier findings, collect deterministic evidence when possible, and
+stop when only manual buckets remain.
 USAGE
 }
 
