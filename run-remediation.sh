@@ -6757,9 +6757,6 @@ integrate_unit_worktree_changes() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
   unit_already_promoted "$unit_id" && return 0
-  if adopt_previously_merged_unit_branch "$unit_id"; then
-    return 0
-  fi
 
   local recorded_workspace
   recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
@@ -6774,6 +6771,10 @@ integrate_unit_worktree_changes() {
   elif [[ -n "$recorded_workspace" && "$recorded_workspace" != "$worktree_dir" ]]; then
     printf '[worktree-merge] %s: recorded implementation workspace is %s; skipping stale worktree %s\n' \
       "$unit_id" "$recorded_workspace" "$worktree_dir"
+    return 0
+  fi
+
+  if adopt_previously_merged_unit_branch "$unit_id"; then
     return 0
   fi
 

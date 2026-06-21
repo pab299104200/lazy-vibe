@@ -703,6 +703,10 @@ unit_id	$active_unit
 workspace	$active_repo
 mode	active
 EOF
+# Reproduce active-workspace revision resume with a stale merged unit branch:
+# the recorded workspace must win over branch adoption, otherwise dirty active
+# checkout changes are incorrectly left uncommitted.
+git -C "$active_repo" branch "remediation-$(basename "$active_remediation")-$active_unit"
 printf 'changed by active workspace revision\n' > "$active_repo/src/active.txt"
 
 REPO_ROOT="$active_repo" \
@@ -722,6 +726,7 @@ REMEDIATION_SCRIPT_SNAPSHOT=1 \
 grep -q 'active workspace revision checkpointed before verification' \
   /tmp/lazy-vibe-active-workspace-fixture.out || fail "active workspace revision was not checkpointed"
 [[ -s "$active_remediation/artifacts/$active_unit.promotion" ]] || fail "active workspace promotion marker missing"
+grep -q "detail	$active_repo" "$active_remediation/artifacts/$active_unit.promotion" || fail "active workspace promotion marker used stale branch detail"
 git -C "$active_repo" diff --quiet -- src/active.txt || fail "active workspace product change remained uncommitted"
 grep -q 'wait_for_git_root_unmerged_files_to_clear' "$SCRIPT_DIR/run-remediation.sh" || fail "active-workspace unmerged settle guard missing"
 grep -q 'unmerged git state cleared after' "$SCRIPT_DIR/run-remediation.sh" || fail "active-workspace unmerged settle log missing"
