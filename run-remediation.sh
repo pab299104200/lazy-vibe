@@ -104,6 +104,7 @@ RECOORDINATE=0
 NO_NORMALIZE=0
 SPLIT_RUN_UNITS=""
 REMEDIATION_MAX_RETRIES="${REMEDIATION_MAX_RETRIES:-2}"
+REMEDIATION_TRANSIENT_MAX_RETRIES="${REMEDIATION_TRANSIENT_MAX_RETRIES:-8}"
 REMEDIATION_RAW_UNIT_ABORT_THRESHOLD="${REMEDIATION_RAW_UNIT_ABORT_THRESHOLD:-20}"
 REMEDIATION_ALLOW_RAW_UNITS="${REMEDIATION_ALLOW_RAW_UNITS:-0}"
 REMEDIATION_REWRITE_PACKETS="${REMEDIATION_REWRITE_PACKETS:-0}"
@@ -5612,6 +5613,12 @@ runner_log_has_hard_error() {
   grep -aqE '(^|[^[:alnum:]_])(ERROR|Error):|\"type\"[[:space:]]*:[[:space:]]*\"error\"|\"code\"[[:space:]]*:[[:space:]]*\"[^\"]+\"|invalid_value|model .* does not exist|rate_limit_exceeded|authentication_error|permission_error' "$log_file" 2>/dev/null
 }
 
+runner_log_has_transient_provider_error() {
+  local log_file="$1"
+  [[ -s "$log_file" ]] || return 1
+  grep -aqEi 'API Error:[[:space:]]*(429|500|502|503|504|529)|(^|[^[:alnum:]_])(429|500|502|503|504|529)[^[:alnum:]_].*(overloaded|temporar|timeout|unavailable|rate[ -]?limit)|overloaded|server-side issue|temporarily unavailable|upstream request timeout|connection reset|ECONNRESET|ETIMEDOUT|rate_limit_exceeded' "$log_file" 2>/dev/null
+}
+
 planner_design_looks_complete() {
   local design="$1"
   [[ -s "$design" ]] || return 1
@@ -7256,8 +7263,10 @@ run_prompt() {
   fi
 
   local max_attempts=$((REMEDIATION_MAX_RETRIES + 1))
+  local transient_max_attempts=$((REMEDIATION_TRANSIENT_MAX_RETRIES + 1))
   local attempt=1
   local status=0
+  local previous_attempt_transient=0
   local readonly_integrity=0 readonly_before_file="" readonly_before_hash="" readonly_before_size=0
   if [[ "$class" =~ ^(cataloger|coordinator|verifier|reviewer)$ ]] && workspace_has_git_roots; then
     readonly_integrity=1
@@ -7270,9 +7279,14 @@ run_prompt() {
   while ((attempt <= max_attempts)); do
     if ((attempt > 1)); then
       local backoff=$(( (attempt - 1) * 15 ))
+      if ((previous_attempt_transient)); then
+        backoff=$(( (attempt - 1) * 60 ))
+        ((backoff > 300)) && backoff=300
+      fi
       printf '[retry] %s attempt=%s/%s delay=%ss\n' "$workstream" "$attempt" "$max_attempts" "$backoff" >&2
       sleep "$backoff"
     fi
+    previous_attempt_transient=0
     if [[ "$class" == "verifier" && "$workstream" == verify-* ]]; then
       local retry_unit_id="${workstream#verify-}"
       if verifier_postcheck_invalid "$retry_unit_id"; then
@@ -7320,6 +7334,15 @@ run_prompt() {
 
     if ((status == 0)); then
       break
+    fi
+    if runner_log_has_transient_provider_error "$log_file"; then
+      previous_attempt_transient=1
+      if ((max_attempts < transient_max_attempts)); then
+        max_attempts="$transient_max_attempts"
+        printf '[retry] %s: transient provider/API error detected; extending retry budget to %s attempts\n' \
+          "$workstream" "$max_attempts" >>"$log_file"
+      fi
+      cp "$log_file" "$log_file.attempt-$attempt.transient" 2>/dev/null || true
     fi
     attempt=$((attempt + 1))
   done
