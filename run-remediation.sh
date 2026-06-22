@@ -9851,7 +9851,12 @@ elif [[ "$EXECUTE" == "1" || "$DRY_RUN" == "1" ]]; then
     execute_metadata_closeout_repairs
     execute_missing_verifiers_from_queue
     execute_evidence_collection_rounds
-    execute_final_review
+    if [[ "$REMEDIATION_AUTO_DRAIN_QUEUE" == "1" ]]; then
+      log_event '[execute] verifier closeout complete; draining deterministic queue actions\n'
+      execute_queue_drain
+    else
+      execute_final_review
+    fi
   fi
 else
   printf 'Plan generated only. Re-run with --execute to launch remediation agents.\n'
