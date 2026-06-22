@@ -7200,6 +7200,10 @@ run_prompt() {
     return 0
   fi
 
+  local run_prompt_restore_errexit=0
+  [[ "$-" == *e* ]] && run_prompt_restore_errexit=1
+  set +e
+
   # Resolve runner and effective agent. Custom wrappers take precedence over
   # built-in agents. REMEDIATION_RUNNER is the universal fallback for all roles.
   local runner="" effective_agent=""
@@ -7301,7 +7305,6 @@ run_prompt() {
 
     status=0
     local unknown_agent=0
-    set +e
     if [[ -n "$runner" ]]; then
       run_command_with_heartbeat "$workstream" "$log_file" \
         "$runner" "$prompt_file" "$REMEDIATION_DIR" "$workstream"
@@ -7328,8 +7331,8 @@ run_prompt() {
           ;;
       esac
     fi
-    set -e
     if ((unknown_agent)); then
+      ((run_prompt_restore_errexit)) && set -e
       return 2
     fi
 
@@ -7422,6 +7425,7 @@ run_prompt() {
     fi
   fi
 
+  ((run_prompt_restore_errexit)) && set -e
   return "$status"
 }
 
