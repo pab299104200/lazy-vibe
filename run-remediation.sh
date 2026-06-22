@@ -5395,14 +5395,12 @@ run_command_with_heartbeat() {
     local heartbeat_pid="$!"
     wait "$cmd_pid"
     local status="$?"
-    set -e
     kill "$heartbeat_pid" >/dev/null 2>&1 || true
     wait "$heartbeat_pid" >/dev/null 2>&1 || true
     printf '\n'
   else
     wait "$cmd_pid"
     local status="$?"
-    set -e
   fi
 
   if [[ "${VERBOSE:-0}" == "1" && -f "$log_file" ]]; then
