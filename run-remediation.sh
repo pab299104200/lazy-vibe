@@ -7302,6 +7302,8 @@ run_prompt() {
     fi
 
     status=0
+    local unknown_agent=0
+    set +e
     if [[ -n "$runner" ]]; then
       run_command_with_heartbeat "$workstream" "$log_file" \
         "$runner" "$prompt_file" "$REMEDIATION_DIR" "$workstream"
@@ -7323,9 +7325,14 @@ run_prompt() {
         *)
           printf 'Unknown agent "%s" for class %s — set IMPLEMENTER_AGENT/REVIEWER_AGENT to codex, claude, gemini, or runner\n' \
             "${effective_agent}" "$class" >&2
-          return 2
+          unknown_agent=1
+          status=2
           ;;
       esac
+    fi
+    set -e
+    if ((unknown_agent)); then
+      return 2
     fi
 
     if ((status == 0)); then
