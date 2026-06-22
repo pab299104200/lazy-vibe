@@ -1329,6 +1329,19 @@ product_profile_block() {
   fi
 }
 
+implementation_product_profile_block() {
+  local worktree_dir="$1"
+  if [[ -n "$PRODUCT_PROFILE" && -f "$PRODUCT_PROFILE" ]]; then
+    if repo_root_is_git_root && [[ "$worktree_dir" != "$REPO_ROOT" ]]; then
+      sed "s#${REPO_ROOT//\#/\\#}#${worktree_dir//\#/\\#}#g" "$PRODUCT_PROFILE"
+    else
+      cat "$PRODUCT_PROFILE"
+    fi
+  else
+    printf 'No product profile was provided. Infer cautiously from the audit run and repo docs, and mark assumptions explicitly.\n'
+  fi
+}
+
 trim_inline_value() {
   local value="$1"
   value="${value#\`}"
@@ -4575,15 +4588,16 @@ mark_parent_split_decomposed() {
 
 workspace_prompt_block() {
   local unit_id="${1:-}"
+  local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
   local roots
   roots="$(workspace_git_roots | sed 's/^/- `/; s/$/`/' || true)"
   if repo_root_is_git_root; then
     cat <<EOF
-- Product root: \`$REPO_ROOT\` (active checkout; read-only reference during implementation)
+- Product root: \`$worktree_dir\`
 - Workspace mode: isolated git worktree.
-- Editable repo root: \`$REMEDIATION_DIR/worktrees/$unit_id\`
-- Planned unit worktree: \`$REMEDIATION_DIR/worktrees/$unit_id\`
-- Do not edit files under \`$REPO_ROOT\` directly for this implementation unit. All code, docs, tests, packet updates, and summary artifacts for this unit must be written under the editable repo root above. The harness merges that worktree into the active checkout before verification.
+- Editable repo root: \`$worktree_dir\`
+- Planned unit worktree: \`$worktree_dir\`
+- Do not edit the active checkout. All code, docs, tests, packet updates, and summary artifacts for this unit must be written under the editable repo root above. The harness merges that worktree into the active checkout before verification.
 EOF
   elif [[ -n "$roots" ]]; then
     cat <<EOF
@@ -4820,13 +4834,13 @@ $(cat "$SHARED_PROMPT")
 
 ## Product Profile
 
-$(product_profile_block)
+$(implementation_product_profile_block "$REMEDIATION_DIR/worktrees/$unit_id")
 
 ## Workspace Boundary
 
 $workspace_block
 
-For isolated git worktree mode, the editable repo root above overrides any product-profile, packet, design, evidence, or shared-instruction text that names \`$REPO_ROOT\` as the repo root. Treat \`$REPO_ROOT\` as the active checkout used by the harness for merge and verification, not as your implementation write target. When instructions cite absolute paths under \`$REPO_ROOT\`, translate those paths to the same relative path under the editable repo root before reading or writing implementation files. Only write run artifacts, packet updates, and summaries under the remediation run path when the prompt explicitly asks for those files.
+For isolated git worktree mode, the editable repo root above is the only product repo root for implementation. If packet, design, evidence, or shared-instruction text cites an absolute product path outside the editable repo root, translate it to the same relative path under the editable repo root before reading or writing implementation files. Only write run artifacts, packet updates, and summaries under the remediation run path when the prompt explicitly asks for those files.
 
 ## Shared Standards Gate
 

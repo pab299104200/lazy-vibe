@@ -752,6 +752,8 @@ grep -q 'active workspace was dirty before implementation; refusing auto-commit'
 grep -q 'REMEDIATION_COMMIT_ON_VERIFY="${REMEDIATION_COMMIT_ON_VERIFY:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "commit-on-verify default must stay enabled"
 grep -q 'REMEDIATION_COMMIT_ROOTS="$REPO_ROOT"' "$SCRIPT_DIR/run-remediation.sh" || fail "git-root commit root default missing"
 grep -q 'REMEDIATION_AUTO_COMMIT_RUN_STATE="${REMEDIATION_AUTO_COMMIT_RUN_STATE:-1}"' "$SCRIPT_DIR/run-remediation.sh" || fail "remediation run-state checkpoint default missing"
+grep -q 'implementation_product_profile_block' "$SCRIPT_DIR/run-remediation.sh" || fail "implementation product-profile worktree rewrite missing"
+grep -q 'Product root: \\`\$worktree_dir\\`' "$SCRIPT_DIR/run-remediation.sh" || fail "implementation prompt must use worktree as product root"
 grep -q 'git_root_non_product_pathspec_excludes' "$SCRIPT_DIR/run-remediation.sh" || fail "non-product pathspec exclusions missing"
 grep -q '\*\*/node_modules' "$SCRIPT_DIR/run-remediation.sh" || fail "node_modules pathspec exclusion missing"
 grep -q '\*\*/\*.backup' "$SCRIPT_DIR/run-remediation.sh" || fail "backup-file pathspec exclusion missing"
