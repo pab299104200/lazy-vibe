@@ -459,14 +459,14 @@ if [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && 
     printf '[workspace] REPO_ROOT is not a git root; using live split-root workspace and forcing MAX_PARALLEL=1 so implementation units do not edit backend/frontend concurrently\n'
     MAX_PARALLEL=1
   fi
-  if [[ "${REMEDIATION_REVISION_MAX_PARALLEL:-2}" != "1" ]]; then
+  if [[ "${REMEDIATION_REVISION_MAX_PARALLEL:-$MAX_PARALLEL}" != "1" ]]; then
     printf '[workspace] REPO_ROOT is not a git root; forcing REMEDIATION_REVISION_MAX_PARALLEL=1 for the same reason\n'
     REMEDIATION_REVISION_MAX_PARALLEL=1
   fi
 elif [[ "$VERIFY_ONLY" != "1" && ( "$EXECUTE" == "1" || "$DRY_RUN" == "1" ) ]] && \
      ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   printf '[workspace] REPO_ROOT is not a git root; REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL=1 set for live split-root workspace, preserving MAX_PARALLEL=%s and REMEDIATION_REVISION_MAX_PARALLEL=%s\n' \
-    "$MAX_PARALLEL" "${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
+    "$MAX_PARALLEL" "${REMEDIATION_REVISION_MAX_PARALLEL:-$MAX_PARALLEL}"
 fi
 
 # Auto-enable the cataloger for fresh execution only. Existing implementation
@@ -8451,7 +8451,7 @@ execute_revise_next_batch() {
   ONLY_UNIT="$revised_units"
   REVISE_EXISTING=1
   FORCE_VERIFY=1
-  MAX_PARALLEL="${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
+  MAX_PARALLEL="${REMEDIATION_REVISION_MAX_PARALLEL:-$previous_parallel}"
   if workspace_has_child_git_roots; then
     MAX_PARALLEL=1
     printf '[revise-next] split-root workspace detected; forcing serialized active-workspace revision\n'
@@ -8600,7 +8600,7 @@ execute_revision_rounds() {
     local previous_parallel="$MAX_PARALLEL"
     ONLY_UNIT="$revised_units"
     REVISE_EXISTING=1
-    MAX_PARALLEL="${REMEDIATION_REVISION_MAX_PARALLEL:-2}"
+    MAX_PARALLEL="${REMEDIATION_REVISION_MAX_PARALLEL:-$previous_parallel}"
     if workspace_has_child_git_roots; then
       MAX_PARALLEL=1
       printf '[auto-revise] split-root workspace detected; forcing serialized active-workspace revision\n'
