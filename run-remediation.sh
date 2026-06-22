@@ -6614,6 +6614,11 @@ auto_resolve_merge_conflict() {
       return 1
     fi
 
+    # Resolver agents may run in a sandbox that can edit files but cannot write
+    # the git index. Stage from the parent harness before checking whether the
+    # merge still has unmerged paths.
+    stage_git_root_merge_resolution "$active_root" || true
+
     if git_root_has_unmerged_files "$active_root"; then
       printf '[worktree-merge] %s:%s resolver attempt=%s/%s left unmerged paths:\n%s\n' \
         "$unit_id" "$label" "$resolver_attempt" "$max_attempts" "$(git_root_unmerged_files "$active_root")" >&2
