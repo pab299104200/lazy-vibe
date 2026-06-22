@@ -6482,7 +6482,13 @@ stage_git_root_merge_resolution() {
   while IFS= read -r path; do
     [[ -n "$path" ]] && pathspec+=("$path")
   done < <(git_root_merge_pathspec_args "$root")
-  git -C "$root" add -A -- "${pathspec[@]}"
+  local -a changed_paths=()
+  while IFS= read -r -d '' path; do
+    [[ -n "$path" ]] && changed_paths+=("$path")
+  done < <(git -C "$root" ls-files -z -m -d -o --exclude-standard -- "${pathspec[@]}")
+  if [[ "${#changed_paths[@]}" -gt 0 ]]; then
+    git -C "$root" add -A -- "${changed_paths[@]}"
+  fi
 }
 
 merge_resolver_safe_label() {
