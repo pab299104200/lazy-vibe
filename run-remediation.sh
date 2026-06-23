@@ -5620,6 +5620,12 @@ runner_log_has_transient_provider_error() {
   grep -aqEi 'API Error:[[:space:]]*(429|500|502|503|504|529)|(^|[^[:alnum:]_])(429|500|502|503|504|529)[^[:alnum:]_].*(overloaded|temporar|timeout|unavailable|rate[ -]?limit)|overloaded|server-side issue|temporarily unavailable|upstream request timeout|connection reset|ECONNRESET|ETIMEDOUT|rate_limit_exceeded' "$log_file" 2>/dev/null
 }
 
+runner_log_has_nonretryable_provider_error() {
+  local log_file="$1"
+  [[ -s "$log_file" ]] || return 1
+  grep -aqEi 'weekly limit|monthly limit|usage limit|quota exceeded|insufficient_quota|authentication_error|permission_error|invalid_value|model .* does not exist' "$log_file" 2>/dev/null
+}
+
 planner_design_looks_complete() {
   local design="$1"
   [[ -s "$design" ]] || return 1
@@ -7439,6 +7445,11 @@ run_prompt() {
     fi
 
     if ((status == 0)); then
+      break
+    fi
+    if runner_log_has_nonretryable_provider_error "$log_file"; then
+      printf '[retry] %s: non-retryable provider error detected; not retrying this agent invocation\n' \
+        "$workstream" >>"$log_file"
       break
     fi
     if runner_log_has_transient_provider_error "$log_file"; then
