@@ -5638,16 +5638,67 @@ recover_planner_design_result() {
     "$unit_id" >> "$log_file"
 }
 
-implementation_summary_is_fixed() {
+implementation_summary_result() {
   local summary="$1"
   [[ -s "$summary" ]] || return 1
-  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?fixed`?([[:space:]`*_,.;:-]|$)' "$summary" 2>/dev/null
+  awk '
+    function clean_marker(s) {
+      s = tolower(s)
+      gsub(/[`*#]/, "", s)
+      sub(/^[[:space:]-]+/, "", s)
+      sub(/[[:space:]-]+$/, "", s)
+      return s
+    }
+    function clean_value(s) {
+      s = tolower(s)
+      gsub(/[`*#]/, "", s)
+      sub(/^[^[:alpha:]]+/, "", s)
+      sub(/[^[:alpha:]_-]+$/, "", s)
+      return s
+    }
+    function emit_if_result(s, value) {
+      value = clean_value(s)
+      if (value ~ /^fixed([^[:alpha:]_-]|$)/) {
+        print "fixed"
+        exit 0
+      }
+      if (value ~ /^partial([^[:alpha:]_-]|$)/) {
+        print "partial"
+        exit 0
+      }
+      if (value ~ /^blocked([^[:alpha:]_-]|$)/) {
+        print "blocked"
+        exit 0
+      }
+    }
+    {
+      line = clean_marker($0)
+      if (line ~ /implementation_result[[:space:]]*:/) {
+        sub(/^.*implementation_result[[:space:]]*:[[:space:]]*/, "", line)
+        emit_if_result(line)
+      }
+      if (pending > 0) {
+        emit_if_result($0)
+        pending--
+      }
+      if (line == "implementation_result") {
+        pending = 5
+      }
+    }
+  ' "$summary" 2>/dev/null | head -1
+}
+
+implementation_summary_is_fixed() {
+  local summary="$1"
+  [[ "$(implementation_summary_result "$summary")" == "fixed" ]]
 }
 
 implementation_summary_is_terminal() {
   local summary="$1"
-  [[ -s "$summary" ]] || return 1
-  grep -aqiE '^[[:space:]#*_`-]*IMPLEMENTATION_RESULT:[[:space:]]*`?(fixed|partial|blocked)`?([[:space:]`*_,.;:-]|$)' "$summary" 2>/dev/null
+  case "$(implementation_summary_result "$summary")" in
+    fixed|partial|blocked) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 log_final_response() {
