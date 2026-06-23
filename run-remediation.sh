@@ -6748,6 +6748,39 @@ checkpoint_active_workspace_revision_before_verification() {
   [[ "$failed" == "0" ]]
 }
 
+checkpoint_promoted_wave_before_next_launch() {
+  local units="$1" primary_unit failed=0
+  [[ "$REMEDIATION_COMMIT_ON_VERIFY" == "1" ]] || return 0
+  [[ -n "$units" ]] || return 0
+  primary_unit="${units%%,*}"
+  [[ -n "$primary_unit" ]] || primary_unit="$units"
+
+  if repo_root_is_git_root; then
+    if ! checkpoint_dirty_active_root_before_verification "$REPO_ROOT" "$primary_unit" "repo"; then
+      failed=1
+    fi
+  fi
+
+  local IFS=',' root active_root label
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    active_root="$(commit_root_path "$root")"
+    [[ -d "$active_root" ]] || continue
+    [[ "$active_root" == "$REPO_ROOT" ]] && repo_root_is_git_root && continue
+    git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || continue
+    label="$(commit_root_label "$active_root")"
+    if ! checkpoint_dirty_active_root_before_verification "$active_root" "$primary_unit" "$label"; then
+      failed=1
+    fi
+  done
+
+  if [[ "$failed" != "0" ]]; then
+    printf '[worktree-merge] promoted units=%s left dirty active roots that could not be checkpointed; refusing next launch\n' \
+      "$units" >&2
+    return 1
+  fi
+}
+
 cleanup_promoted_unit_worktree() {
   local unit_id="$1"
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
@@ -7655,7 +7688,8 @@ promote_completed_implementation_units() {
   local units="$1"
   [[ -n "$units" ]] || return 0
   log_event '[worktree-merge] promoting completed implementation units=%s\n' "$units"
-  integrate_units_before_verification "$units"
+  integrate_units_before_verification "$units" || return 1
+  checkpoint_promoted_wave_before_next_launch "$units"
 }
 
 execute_workstreams() {
