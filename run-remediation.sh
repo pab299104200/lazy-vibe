@@ -442,6 +442,29 @@ mkdir -p "$REMEDIATION_DIR"/{packets,prompts,logs,artifacts}
 CHECKPOINT_FILE="$REMEDIATION_DIR/completed-units.txt"
 RUN_LOG="${RUN_LOG:-$REMEDIATION_DIR/run.log}"
 
+acquire_product_repo_lock() {
+  [[ "${REMEDIATION_PRODUCT_LOCK:-1}" == "1" ]] || return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  local lock_root lock_key lock_file
+  lock_root="$(realpath -m "$REPO_ROOT" 2>/dev/null || printf '%s' "$REPO_ROOT")"
+  lock_key="$(printf '%s' "$lock_root" | sha256sum | awk '{print $1}')"
+  lock_file="${TMPDIR:-/tmp}/lazy-vibe-remediation-${lock_key}.lock"
+  exec {REMEDIATION_PRODUCT_LOCK_FD}>"$lock_file"
+  if ! flock -n "$REMEDIATION_PRODUCT_LOCK_FD"; then
+    log_event_err '[fatal] another remediation harness already holds the product lock for %s\n' "$lock_root"
+    log_event_err '[fatal] lock file: %s\n' "$lock_file"
+    log_event_err '[fatal] stop the other run or wait for it to finish before starting another harness against this checkout.\n'
+    exit 1
+  fi
+  printf 'pid=%s\nrepo=%s\nstarted_at=%s\ncmd=%s\n' \
+    "$$" "$lock_root" "$(date -Is)" "$0 $*" >&"$REMEDIATION_PRODUCT_LOCK_FD"
+  log_event '[lock] acquired product remediation lock for %s\n' "$lock_root"
+}
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  acquire_product_repo_lock "$@"
+fi
+
 # Ensure lazy_vibe is importable. The module lives alongside this script, so
 # prepend SCRIPT_DIR to PYTHONPATH automatically — callers need not set it.
 export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -6511,6 +6534,38 @@ git_root_has_unmerged_files() {
   [[ -n "$(git_root_unmerged_files "$1")" ]]
 }
 
+active_remediation_git_roots() {
+  local root active_root
+  if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s\n' "$REPO_ROOT"
+  fi
+
+  local IFS=,
+  for root in $REMEDIATION_COMMIT_ROOTS; do
+    [[ -n "$root" ]] || continue
+    active_root="$(commit_root_path "$root")"
+    [[ -d "$active_root" ]] || continue
+    git -C "$active_root" rev-parse --git-dir >/dev/null 2>&1 || continue
+    printf '%s\n' "$active_root"
+  done | awk '!seen[$0]++'
+}
+
+assert_no_unmerged_active_git_roots() {
+  local context="$1" root failed=0
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if git_root_has_unmerged_files "$root"; then
+      printf '[fatal] %s: active git root has unresolved merge paths: %s\n%s\n' \
+        "$context" "$root" "$(git_root_unmerged_files "$root")" >&2
+      failed=1
+    fi
+  done < <(active_remediation_git_roots)
+  if [[ "$failed" != "0" ]]; then
+    printf '[fatal] refusing to continue while a previous merge is unresolved. Resolve or abort the merge, then rerun the harness.\n' >&2
+    return 1
+  fi
+}
+
 wait_for_git_root_unmerged_files_to_clear() {
   local root="$1" unit_id="$2" label="$3"
   local timeout="${REMEDIATION_UNMERGED_SETTLE_SECONDS:-20}"
@@ -6950,6 +7005,7 @@ integrate_unit_worktree_changes() {
 
 integrate_units_before_verification() {
   local units_csv="$1" unit_id failed=0
+  assert_no_unmerged_active_git_roots "pre-verify worktree promotion"
   local IFS=,
   for unit_id in $units_csv; do
     [[ -n "$unit_id" ]] || continue
@@ -7759,6 +7815,7 @@ promote_completed_implementation_units() {
 
 execute_workstreams() {
   local coordinator="$REMEDIATION_DIR/prompts/00-coordinator.md"
+  assert_no_unmerged_active_git_roots "implementation launch"
   execute_native_test_script_repairs
   if [[ "$REVISE_EXISTING" != "1" ]]; then
     if grep -qxF "00-coordinator" "$CHECKPOINT_FILE" 2>/dev/null; then
