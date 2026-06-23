@@ -120,6 +120,7 @@ REMEDIATION_AUTO_RERUN_FINAL_REVIEW="${REMEDIATION_AUTO_RERUN_FINAL_REVIEW:-1}"
 REMEDIATION_AUTO_VERIFY_MISSING="${REMEDIATION_AUTO_VERIFY_MISSING:-1}"
 REMEDIATION_AUTO_METADATA_CLOSEOUT="${REMEDIATION_AUTO_METADATA_CLOSEOUT:-1}"
 REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS="${REMEDIATION_AUTO_RESOLVE_MERGE_CONFLICTS:-1}"
+REMEDIATION_AUTO_REPAIR_UNMERGED_MERGES="${REMEDIATION_AUTO_REPAIR_UNMERGED_MERGES:-1}"
 REMEDIATION_AUTO_COMMIT_RUN_STATE="${REMEDIATION_AUTO_COMMIT_RUN_STATE:-1}"
 REMEDIATION_SANDBOX_PYTEST_FALLBACK="${REMEDIATION_SANDBOX_PYTEST_FALLBACK:-1}"
 REMEDIATION_NATIVE_TEST_FIX_RETRIES="${REMEDIATION_NATIVE_TEST_FIX_RETRIES:-1}"
@@ -6555,6 +6556,9 @@ assert_no_unmerged_active_git_roots() {
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     if git_root_has_unmerged_files "$root"; then
+      if repair_unresolved_active_git_root "$root" "$context"; then
+        continue
+      fi
       printf '[fatal] %s: active git root has unresolved merge paths: %s\n%s\n' \
         "$context" "$root" "$(git_root_unmerged_files "$root")" >&2
       failed=1
@@ -6685,6 +6689,159 @@ EOF
   else
     printf 'No implementation summary artifact was found for %s.\n' "$unit_id" >> "$prompt_file"
   fi
+}
+
+infer_active_merge_unit_id() {
+  local active_root="$1" merge_msg
+  merge_msg="$(git -C "$active_root" rev-parse --git-path MERGE_MSG 2>/dev/null || true)"
+  if [[ -n "$merge_msg" && -s "$merge_msg" ]]; then
+    grep -Eao 'IU-[0-9]+(-S[0-9]+)?' "$merge_msg" | head -1
+  fi
+}
+
+write_active_merge_repair_prompt() {
+  local prompt_file="$1" active_root="$2" context="$3" label="$4" unit_id="$5" prior_log="${6:-}"
+  local conflict_files status_text merge_msg merge_head summary_file
+  conflict_files="$(git_root_unmerged_files "$active_root")"
+  status_text="$(git -C "$active_root" status --short --branch 2>/dev/null || true)"
+  merge_msg="$(git -C "$active_root" rev-parse --git-path MERGE_MSG 2>/dev/null || true)"
+  merge_head="$(git -C "$active_root" rev-parse -q --verify MERGE_HEAD 2>/dev/null || true)"
+  summary_file=""
+  [[ -n "$unit_id" ]] && summary_file="$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+
+  mkdir -p "$(dirname "$prompt_file")"
+  cat > "$prompt_file" <<EOF
+You are repairing an unresolved remediation merge in the active product checkout.
+
+Repository root: $active_root
+Git root label: $label
+Context: $context
+Inferred unit: ${unit_id:-unknown}
+Merge head: ${merge_head:-unknown}
+
+The harness found unresolved git merge paths before it could safely continue.
+Your job is to finish this existing merge correctly.
+
+## Current conflicted files
+
+\`\`\`
+$conflict_files
+\`\`\`
+
+## Current git status
+
+\`\`\`
+$status_text
+\`\`\`
+
+## Current MERGE_MSG
+
+EOF
+  if [[ -n "$merge_msg" && -s "$merge_msg" ]]; then
+    printf '```text\n' >> "$prompt_file"
+    cat "$merge_msg" >> "$prompt_file"
+    printf '\n```\n\n' >> "$prompt_file"
+  else
+    printf 'No MERGE_MSG is available.\n\n' >> "$prompt_file"
+  fi
+
+  cat >> "$prompt_file" <<EOF
+## Prior resolver attempt
+
+EOF
+  if [[ -n "$prior_log" && -s "$prior_log" ]]; then
+    printf 'A previous resolver attempt did not finish the merge. Use this as failure context only; inspect the active checkout before editing.\n\n```text\n' >> "$prompt_file"
+    tail -160 "$prior_log" >> "$prompt_file"
+    printf '\n```\n\n' >> "$prompt_file"
+  else
+    printf 'No prior active-merge repair attempt for this conflict.\n\n' >> "$prompt_file"
+  fi
+
+  cat >> "$prompt_file" <<EOF
+## Rules
+
+- Do not abort the merge.
+- Do not discard either side wholesale.
+- Preserve valid behavior from both the active checkout and incoming remediation branch unless the code makes them mutually exclusive.
+- Resolve every conflict marker in every conflicted file.
+- Stage the resolved files.
+- Do not run \`git commit\`; the harness will commit after checking that no unmerged paths remain.
+- Prefer focused syntax/lint/test checks for touched files. Do not start broad suites.
+- If you cannot resolve the merge safely, write what is still blocked and end with \`RESULT: FAIL\`.
+- End your final response with exactly one line: \`RESULT: PASS\` if the merge is resolved and staged, otherwise \`RESULT: FAIL\`.
+
+## Implementation summary, if available
+
+EOF
+  if [[ -n "$summary_file" && -s "$summary_file" ]]; then
+    cat "$summary_file" >> "$prompt_file"
+  else
+    printf 'No implementation summary artifact was found for %s.\n' "${unit_id:-unknown}" >> "$prompt_file"
+  fi
+}
+
+repair_unresolved_active_git_root() {
+  local active_root="$1" context="$2"
+  [[ "$REMEDIATION_AUTO_REPAIR_UNMERGED_MERGES" == "1" ]] || return 1
+  git_root_merge_in_progress "$active_root" || return 1
+
+  local label unit_id safe_label workstream prompt_file prior_log="" log_file status
+  local attempt max_attempts
+  label="$(commit_root_label "$active_root")"
+  unit_id="$(infer_active_merge_unit_id "$active_root" || true)"
+  [[ -n "$unit_id" ]] || unit_id="unknown"
+  safe_label="$(merge_resolver_safe_label "$label-$unit_id")"
+  workstream="merge-repair-$safe_label"
+  prompt_file="$REMEDIATION_DIR/artifacts/$workstream.md"
+  max_attempts="${REMEDIATION_MERGE_REPAIR_MAX_ATTEMPTS:-2}"
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=2
+  ((max_attempts < 1)) && max_attempts=1
+
+  local IMPLEMENTER_AGENT="${MERGE_RESOLVER_AGENT:-${REVIEWER_AGENT:-${IMPLEMENTER_AGENT:-codex}}}"
+  local IMPLEMENTER_RUNNER="${MERGE_RESOLVER_RUNNER:-${REVIEWER_RUNNER:-${IMPLEMENTER_RUNNER:-}}}"
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    write_active_merge_repair_prompt "$prompt_file" "$active_root" "$context" "$label" "$unit_id" "$prior_log"
+    printf '[merge-repair] %s: unresolved merge detected; launching resolver attempt=%s/%s (prompt=%s)\n' \
+      "$label" "$attempt" "$max_attempts" "$prompt_file"
+    status=0
+    run_prompt "$prompt_file" "$workstream" "high-risk" "$active_root" || status="$?"
+    log_file="$REMEDIATION_DIR/logs/$workstream.log"
+    prior_log="$log_file"
+
+    if ! git_root_merge_in_progress "$active_root"; then
+      if git_root_has_unmerged_files "$active_root"; then
+        printf '[merge-repair] %s: resolver exited status=%s but unmerged paths remain outside an active merge:\n%s\n' \
+          "$label" "$status" "$(git_root_unmerged_files "$active_root")" >&2
+        return 1
+      fi
+      printf '[merge-repair] %s: resolver completed and merge is no longer in progress\n' "$label"
+      return 0
+    fi
+
+    stage_git_root_merge_resolution "$active_root" || true
+    if git_root_has_unmerged_files "$active_root"; then
+      printf '[merge-repair] %s: resolver attempt=%s/%s left unmerged paths:\n%s\n' \
+        "$label" "$attempt" "$max_attempts" "$(git_root_unmerged_files "$active_root")" >&2
+      continue
+    fi
+    if ! git -C "$active_root" diff --check >/dev/null 2>&1; then
+      printf '[merge-repair] %s: resolver output has whitespace/conflict-marker errors; retrying\n' "$label" >&2
+      continue
+    fi
+    if ! git -C "$active_root" diff --cached --check >/dev/null 2>&1; then
+      printf '[merge-repair] %s: staged resolver output has whitespace/conflict-marker errors; retrying\n' "$label" >&2
+      continue
+    fi
+    if ! git -C "$active_root" commit --no-edit >/dev/null; then
+      printf '[merge-repair] %s: resolved merge could not be committed\n' "$label" >&2
+      return 1
+    fi
+    printf '[merge-repair] %s: resolver completed and committed active merge\n' "$label"
+    return 0
+  done
+
+  return 1
 }
 
 auto_resolve_merge_conflict() {
