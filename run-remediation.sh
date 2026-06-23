@@ -1491,6 +1491,9 @@ command_is_unscoped_broad_native_test() {
       return 0
       ;;
   esac
+  if [[ "$lower" == *pytest* && "$lower" == *"tests/test_"*"*"* ]]; then
+    return 0
+  fi
   return 1
 }
 
