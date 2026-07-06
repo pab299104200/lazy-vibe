@@ -65,6 +65,7 @@ CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-0}"
 AUTO_REVISE="${REMEDIATION_AUTO_REVISE:-1}"
 MAX_REVISION_ROUNDS="${REMEDIATION_MAX_REVISION_ROUNDS:-1}"
 MAX_AUTO_REVISE_FINDINGS="${REMEDIATION_MAX_AUTO_REVISE_FINDINGS:-8}"
+MAX_AUTO_REVISE_ATTEMPTS="${REMEDIATION_MAX_AUTO_REVISE_ATTEMPTS:-3}"
 REVISE_NEXT_LIMIT="${REMEDIATION_REVISE_NEXT_LIMIT:-8}"
 REVISE_NEXT_MAX_ROUNDS="${REMEDIATION_REVISE_NEXT_MAX_ROUNDS:-10}"
 QUEUE_DRAIN_MAX_ROUNDS="${REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS:-20}"
@@ -8760,6 +8761,102 @@ queue_action_signature() {
   ' "$queue" | sort | paste -sd ';' -
 }
 
+revision_attempts_file() {
+  printf '%s\n' "$REMEDIATION_DIR/10-revision-attempts.tsv"
+}
+
+revision_attempt_ledger_count() {
+  local unit_id="$1" file
+  file="$(revision_attempts_file)"
+  [[ -s "$file" ]] || {
+    printf '0\n'
+    return 0
+  }
+  awk -F '\t' -v unit="$unit_id" '
+    NR > 1 && $1 == unit && $2 ~ /^[0-9]+$/ { count = $2 }
+    END { printf "%d\n", count + 0 }
+  ' "$file"
+}
+
+revision_attempt_run_log_count() {
+  local unit_id="$1"
+  [[ -s "$RUN_LOG" ]] || {
+    printf '0\n'
+    return 0
+  }
+  grep -F -c "[revise] re-running implement-$unit_id from verifier decision" "$RUN_LOG" 2>/dev/null || true
+}
+
+unit_auto_revision_attempt_count() {
+  local unit_id="$1" ledger_count run_log_count
+  ledger_count="$(revision_attempt_ledger_count "$unit_id")"
+  run_log_count="$(revision_attempt_run_log_count "$unit_id")"
+  if (( run_log_count > ledger_count )); then
+    printf '%s\n' "$run_log_count"
+  else
+    printf '%s\n' "$ledger_count"
+  fi
+}
+
+unit_auto_revision_stalled() {
+  local unit_id="$1" max_count attempts
+  [[ "$MAX_AUTO_REVISE_ATTEMPTS" =~ ^[0-9]+$ ]] || max_count=3
+  max_count="${max_count:-$MAX_AUTO_REVISE_ATTEMPTS}"
+  (( max_count > 0 )) || return 1
+  attempts="$(unit_auto_revision_attempt_count "$unit_id")"
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=0
+  (( attempts >= max_count ))
+}
+
+needs_targeted_revision_category_for_unit() {
+  local unit_id="$1"
+  if unit_auto_revision_stalled "$unit_id"; then
+    printf 'revision_stalled\n'
+  else
+    printf 'needs_targeted_revision\n'
+  fi
+}
+
+queue_unit_category() {
+  local unit_id="$1" queue="$REMEDIATION_DIR/07-remediation-queue.tsv"
+  [[ -s "$queue" ]] || return 1
+  awk -F '\t' -v unit="$unit_id" 'NR > 1 && $1 == unit { print $5; found = 1; exit } END { if (!found) exit 1 }' "$queue"
+}
+
+record_auto_revision_attempts() {
+  local units_csv="$1"
+  [[ -n "$units_csv" ]] || return 0
+  [[ "$DRY_RUN" == "1" ]] && return 0
+
+  local file
+  file="$(revision_attempts_file)"
+  mkdir -p "$(dirname "$file")"
+  if [[ ! -s "$file" ]]; then
+    printf 'unit_id\tattempts\tcategory\tupdated_at\n' > "$file"
+  fi
+
+  local IFS=, unit_id category current_attempts next_attempts updated_at
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for unit_id in $units_csv; do
+    [[ -n "$unit_id" ]] || continue
+    category="$(queue_unit_category "$unit_id" 2>/dev/null || true)"
+    if [[ "$category" != "needs_targeted_revision" && "$category" != "revision_stalled" ]]; then
+      continue
+    fi
+    current_attempts="$(unit_auto_revision_attempt_count "$unit_id")"
+    [[ "$current_attempts" =~ ^[0-9]+$ ]] || current_attempts=0
+    next_attempts="$current_attempts"
+    if (( next_attempts <= 0 )); then
+      next_attempts=1
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$unit_id" "$next_attempts" "$category" "$updated_at" >> "$file"
+    if [[ "$MAX_AUTO_REVISE_ATTEMPTS" =~ ^[0-9]+$ ]] && (( MAX_AUTO_REVISE_ATTEMPTS > 0 && next_attempts >= MAX_AUTO_REVISE_ATTEMPTS )); then
+      printf '[revise-next] %s remains %s after %s auto-revision attempts; future queue plans will route it to manual stalled-revision triage\n' \
+        "$unit_id" "$category" "$next_attempts"
+    fi
+  done
+}
+
 drain_action_was_stalled() {
   local stalled_keys="$1" action_key="$2"
   [[ "$stalled_keys" == *$'\n'"$action_key"$'\n'* ]]
@@ -8787,6 +8884,8 @@ execute_revise_next_batch() {
   execute_verifier_units
   execute_metadata_closeout_repairs
   aggregate_verifier_findings
+  write_remediation_queue_summary >/dev/null
+  record_auto_revision_attempts "$revised_units"
 
   ONLY_UNIT="$previous_only"
   REVISE_EXISTING="$previous_revise"
@@ -9571,7 +9670,7 @@ write_run_summary() {
     total=$((total + 1))
     case "$queue_category" in
       accepted|accepted_evidence_pending|accepted_with_carry_over|accept-via-named-children) fixed=$((fixed + 1)) ;;
-      split_children_pending|needs_targeted_revision|coordinator_cleanup|not_verified|needs_review|evidence_failed) partial=$((partial + 1)) ;;
+      split_children_pending|needs_targeted_revision|revision_stalled|coordinator_cleanup|not_verified|needs_review|evidence_failed) partial=$((partial + 1)) ;;
       *) blocked=$((blocked + 1)) ;;
     esac
   done < <(tail -n +2 "$UNITS_TSV")
@@ -9806,7 +9905,7 @@ verifier_queue_category() {
   fi
 
   if verifier_postcheck_invalid "$unit_id"; then
-    printf 'needs_targeted_revision\n'
+    needs_targeted_revision_category_for_unit "$unit_id"
     return 0
   fi
 
@@ -9826,7 +9925,7 @@ verifier_queue_category() {
 
   if verifier_accepts_unit "$unit_id"; then
     if verifier_has_non_evidence_findings "$findings"; then
-      printf 'needs_targeted_revision\n'
+      needs_targeted_revision_category_for_unit "$unit_id"
     elif verifier_has_unresolved_evidence_findings "$unit_id" "$findings"; then
       printf 'accepted_evidence_pending\n'
     elif unit_evidence_has_failed_status "$unit_id"; then
@@ -9852,7 +9951,7 @@ verifier_queue_category() {
   elif file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(stop)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(blocked)' "$verifier"; then
     printf 'blocked\n'
   elif file_matches '(^|[-*[:space:]])(\*\*)?Decision[^[:alnum:]]+`?(revise)|(^|[-*[:space:]])(\*\*)?Implementation decision[^[:alnum:]]+`?(revise)' "$verifier"; then
-    printf 'needs_targeted_revision\n'
+    needs_targeted_revision_category_for_unit "$unit_id"
   else
     printf 'needs_review\n'
   fi
@@ -9860,7 +9959,7 @@ verifier_queue_category() {
 
 manual_triage_category() {
   case "$1" in
-    blocked|test_harness|contract_conflict|split_required) return 0 ;;
+    blocked|test_harness|contract_conflict|split_required|revision_stalled) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -9874,6 +9973,7 @@ manual_triage_reason() {
       test_harness) preferred_type="test_harness" ;;
       contract_conflict) preferred_type="contract_conflict" ;;
       split_required) preferred_type="split_required" ;;
+      revision_stalled) preferred_type="" ;;
     esac
     awk -F '\t' -v preferred="$preferred_type" '
       NR > 1 && $1 != "" {
@@ -9922,6 +10022,9 @@ manual_triage_next_action() {
     split_required)
       printf 'Split the unit into smaller coherent child units before implementation. Do not revise the oversized parent directly.\n'
       ;;
+    revision_stalled)
+      printf 'Automatic targeted revision has repeated without closing the verifier findings. Inspect the current verifier findings and either split the unit, make a contract decision, or apply a focused manual fix before another agent pass.\n'
+      ;;
     *)
       printf 'Review verifier findings and choose a targeted next action.\n'
       ;;
@@ -9954,6 +10057,9 @@ queue_next_action_for_unit() {
       else
         printf 'split_or_manual_revision\tmanual\tVerifier finding set exceeds the automatic revision bound; split the work or triage before rerun.\n'
       fi
+      ;;
+    revision_stalled)
+      printf 'manual_stalled_revision\tmanual\tAutomatic targeted revision reached the attempt ceiling without closing this unit; inspect verifier findings and split, decide, or apply a focused fix before rerun.\n'
       ;;
     coordinator_cleanup)
       printf 'metadata_closeout\tautomated\tFindings are remediation-owned packet/process/evidence metadata; repair closeout metadata and reverify.\n'

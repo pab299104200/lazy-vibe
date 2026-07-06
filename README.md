@@ -462,6 +462,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_AUTO_REVISE` | `1` | Re-run units that verifier marks `revise` when findings are safe for targeted automatic revision. |
 | `REMEDIATION_MAX_REVISION_ROUNDS` | `1` | Maximum automatic revision loops before final review. |
 | `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` | `8` | Maximum verifier finding rows allowed for automatic revision; larger units are left for manual triage or splitting. |
+| `REMEDIATION_MAX_AUTO_REVISE_ATTEMPTS` | `3` | Maximum automatic targeted-revision attempts for one unit before the queue emits `revision_stalled` and routes the unit to manual stalled-revision triage instead of rerunning agents. Set `0` to disable the ceiling. |
 | `REMEDIATION_REVISE_NEXT_LIMIT` | `8` | Maximum safe queue rows selected by one `--revise-next` batch. Set `0` for all currently safe rows. |
 | `REMEDIATION_REVISE_NEXT_MAX_ROUNDS` | `10` | Maximum deterministic revise-next batches before stopping. Set `0` to continue until no safe candidates or no queue progress. |
 | `REMEDIATION_QUEUE_DRAIN_MAX_ROUNDS` | `20` | Maximum deterministic queue-drain action rounds. Set `0` to continue until only manual buckets remain or progress stops. |
@@ -535,14 +536,14 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `06-run-summary.tsv` | Implementation and verifier decision summary by unit. |
 | `07-remediation-queue.tsv` | Triage queue that classifies units as accepted, targeted revision, contract conflict, test harness, split required, blocked, or not verified. |
 | `08-manual-triage.md` | Human-readable index for manual buckets, with extracted verifier failure reasons and required next actions. |
-| `09-next-actions.tsv` / `09-next-actions.md` | Deterministic queue plan that maps every unit to `verify_only`, `implement_then_verify`, `targeted_revision`, `artifact_repair`, `evidence_only`, `child_manual_blockers`, `split_parent_noop`, or a manual action before the harness runs more agents. |
+| `09-next-actions.tsv` / `09-next-actions.md` | Deterministic queue plan that maps every unit to `verify_only`, `implement_then_verify`, `targeted_revision`, `manual_stalled_revision`, `artifact_repair`, `evidence_only`, `child_manual_blockers`, `split_parent_noop`, or another manual action before the harness runs more agents. |
 | `artifacts/triage-*.md` | Per-unit manual triage notes for `blocked`, `test_harness`, `contract_conflict`, and `split_required` units. |
 | `logs/*.log` | Full agent logs. |
 | `04-final-remediation-review.md` | Final read-only signoff. |
 
 The normal remediation lifecycle is deterministic: catalog, coordinate, implement, verify, auto-revise safe implementation findings, collect deterministic launch evidence, rerun affected verifiers, then write the final queue and next-action plan. Operators should not need to copy commands out of verifier reports. Environment variables are force/escape hatches, not required steps for the standard path.
 
-Queue planning is intentionally stricter than queue classification. The queue says what state a unit is in; `09-next-actions.*` says what the harness will do next. Bad remediation-owned native-test scripts, stale native-test logs, packet-work-log contradictions, and metadata-only closeout problems are routed to `artifact_repair` or `metadata_closeout` rather than broad product-code remediation. True harness, contract, split, or blocked rows remain manual with `08-manual-triage.md` and `artifacts/triage-*.md` explaining why another blind agent pass is not deterministic.
+Queue planning is intentionally stricter than queue classification. The queue says what state a unit is in; `09-next-actions.*` says what the harness will do next. Bad remediation-owned native-test scripts, stale native-test logs, packet-work-log contradictions, and metadata-only closeout problems are routed to `artifact_repair` or `metadata_closeout` rather than broad product-code remediation. True harness, contract, split, blocked, or repeated no-progress revision rows remain manual with `08-manual-triage.md` and `artifacts/triage-*.md` explaining why another blind agent pass is not deterministic.
 
 Closure is verifier-derived, not packet-state-derived. A split parent is not considered decomposed just because parent packets say `split-into-child-units`; every direct child must have accepted verifier state. If any child has blocked, contract, split-required, or test-harness findings, the parent remains `split_children_pending` and the next-action plan emits `child_manual_blockers` until the child row is closed.
 

@@ -511,6 +511,17 @@ assert_equals manual_blocked "$(next_action "$plan" IU-0013)" "blocked next acti
 assert_equals artifact_repair "$(next_action "$plan" IU-0017)" "native-test artifact next action"
 assert_equals child_manual_blockers "$(next_action "$plan" IU-0018)" "blocked split child next action"
 
+cat >> "$remediation/run.log" <<'EOF'
+[revise] re-running implement-IU-0014 from verifier decision
+[revise] re-running implement-IU-0014 from verifier decision
+[revise] re-running implement-IU-0014 from verifier decision
+EOF
+run_summary_only "$repo" "$audit" "$remediation"
+assert_equals revision_stalled "$(queue_category "$queue" IU-0014)" "stalled revision category"
+assert_equals manual_stalled_revision "$(next_action "$plan" IU-0014)" "stalled revision next action"
+grep -q 'Automatic targeted revision has repeated without closing the verifier findings' \
+  "$remediation/artifacts/triage-IU-0014.md" || fail "stalled revision triage action missing"
+
 assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0001)" "accepted summary"
 assert_equals $'blocked\tstop' "$(summary_decision "$summary" IU-0013)" "blocked summary"
 assert_equals $'fixed\taccept' "$(summary_decision "$summary" IU-0016)" "bold implementation result summary"
