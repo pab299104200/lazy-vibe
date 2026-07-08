@@ -95,6 +95,8 @@ PRODUCT_REPO_ROOT="${PRODUCT_REPO_ROOT:-$SCRIPT_DIR}"
 
 PACKETS_DIR="$REGISTER_DIR/triage/packets"
 RESULTS_DIR="$REGISTER_DIR/triage/results"
+VERIFIED_HISTORY_IDS_FILE="$(mktemp)"
+trap 'rm -f "$VERIFIED_HISTORY_IDS_FILE"' EXIT
 
 # 1. (Re)generate packets for current `new` findings unless the caller has
 # pre-bounded packets for a sampled dry-run.
@@ -103,6 +105,24 @@ if [[ "$GENERATE_PACKETS" == 1 ]]; then
 fi
 mkdir -p "$RESULTS_DIR"
 
+python3 - "$REGISTER_DIR/register.jsonl" > "$VERIFIED_HISTORY_IDS_FILE" <<'PY'
+import json
+import sys
+
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        finding = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if finding.get("disposition") != "new":
+        continue
+    if any(h.get("event") == "verification" for h in finding.get("history", [])):
+        print(finding.get("finding_id", ""))
+PY
+
 # 2. For each packet without a result, dispatch the agent (bounded parallel).
 run_one() {
   local packet="$1" fid result
@@ -110,6 +130,10 @@ run_one() {
   result="$RESULTS_DIR/$fid.json"
   # Skip if a fresh result is already waiting to be consumed.
   [[ -f "$result" ]] && return 0
+  # Verification history is canonical register state. A consumed result file is
+  # just the usual artifact trail and may be absent after copying/restoring a
+  # register; do not spend another verifier pass when history already exists.
+  grep -qxF "$fid" "$VERIFIED_HISTORY_IDS_FILE" 2>/dev/null && return 0
   # A consumed result (results/consumed/, moved there by verify-consume) means
   # this finding was already verified on a previous run and is awaiting
   # policy/Pete — do not re-dispatch the agent for it. Findings the queue
@@ -136,13 +160,14 @@ run_one() {
   fi
 }
 export -f run_one
-export RESULTS_DIR TRIAGE_AGENT PRODUCT_REPO_ROOT
+export RESULTS_DIR TRIAGE_AGENT PRODUCT_REPO_ROOT VERIFIED_HISTORY_IDS_FILE
 
 pending_packets=()
 if compgen -G "$PACKETS_DIR/*.md" > /dev/null 2>&1; then
   for packet in "$PACKETS_DIR"/*.md; do
     fid="$(basename "$packet" .md)"
     [[ -f "$RESULTS_DIR/$fid.json" ]] && continue
+    grep -qxF "$fid" "$VERIFIED_HISTORY_IDS_FILE" 2>/dev/null && continue
     [[ -f "$RESULTS_DIR/consumed/$fid.json" ]] && continue
     pending_packets+=("$packet")
     if [[ -n "$TRIAGE_LIMIT" && "${#pending_packets[@]}" -ge "$TRIAGE_LIMIT" ]]; then
