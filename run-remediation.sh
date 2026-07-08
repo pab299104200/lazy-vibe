@@ -2902,6 +2902,15 @@ register_source_enabled() {
   esac
 }
 
+tsv_data_row_count() {
+  local file="$1"
+  [[ -f "$file" ]] || {
+    printf '0\n'
+    return 0
+  }
+  awk -F '\t' 'NR > 1 && $1 != "" { count += 1 } END { print count + 0 }' "$file"
+}
+
 write_register_findings_inventory() {
   [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]] || {
     printf 'Register not found: %s/register.jsonl\n' "$REGISTER_DIR" >&2
@@ -3075,9 +3084,21 @@ PY
     return 0
   fi
   log_event '[triage] applying policy (deterministic promote new->open/false_positive)\n'
-  local -a policy_arg=()
-  [[ -f "$REGISTER_DIR/triage-policy.yaml" ]] && policy_arg=(--policy "$REGISTER_DIR/triage-policy.yaml")
-  python3 -m lazy_vibe.register triage --register-dir "$REGISTER_DIR" --accept-all "${policy_arg[@]}" \
+  local policy_file="$REGISTER_DIR/triage-policy.yaml"
+  if [[ ! -f "$policy_file" ]]; then
+    mkdir -p "$REMEDIATION_DIR"
+    policy_file="$REMEDIATION_DIR/triage-default-policy.yaml"
+    cat > "$policy_file" <<'EOF'
+rules:
+  - id: remediation-open-verified-in-scope
+    match: {verified: true, in_scope: true}
+    action: open
+default: queue
+EOF
+    log_event '[triage] no product triage-policy.yaml found; using remediation default policy: %s\n' "$policy_file"
+  fi
+  python3 -m lazy_vibe.register triage --register-dir "$REGISTER_DIR" --accept-all \
+    --policy "$policy_file" \
     >>"${RUN_LOG:-/dev/stderr}" 2>&1 \
     || log_event_err '[triage] policy apply reported issues; continuing with whatever was promoted\n'
 }
@@ -9668,7 +9689,11 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
   _previous_px_tsv=""
   _preserve_existing_inventory=0
   if [[ -f "$PX_TSV" && "$REMEDIATION_REWRITE_PACKETS" != "1" ]] && remediation_state_exists; then
-    _preserve_existing_inventory=1
+    if (( $(tsv_data_row_count "$PX_TSV") > 0 )); then
+      _preserve_existing_inventory=1
+    else
+      log_event '[resume] existing master PX inventory is header-only; regenerating from source: %s\n' "$PX_TSV"
+    fi
   fi
 
   if [[ "$_preserve_existing_inventory" == "1" ]]; then
@@ -9698,6 +9723,9 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
   # may already contain cataloged/combined units; regenerating the raw PX list
   # here would disconnect resume state from completed artifacts.
   if [[ "$REMEDIATION_REWRITE_UNITS" == "1" || ! -f "$UNITS_TSV" ]]; then
+    write_default_units
+  elif (( $(tsv_data_row_count "$UNITS_TSV") == 0 && $(tsv_data_row_count "$PX_TSV") > 0 )); then
+    log_event '[resume] existing implementation units are header-only while PX inventory has rows; regenerating default units: %s\n' "$UNITS_TSV"
     write_default_units
   elif [[ "$FORCE_CATALOG" == "1" && "$EXECUTE" == "1" && "$NO_CATALOG" != "1" ]]; then
     printf '[catalog] preserving existing implementation units as catalog seed; --force-catalog will rerun 00-cataloger: %s\n' "$UNITS_TSV"

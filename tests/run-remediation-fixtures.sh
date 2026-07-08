@@ -105,6 +105,22 @@ run_backlog_dry_run() {
     }
 }
 
+run_register_generation_with_noop_triage() {
+  local repo="$1" register="$2" remediation="$3"
+  REPO_ROOT="$repo" \
+  REGISTER_DIR="$register" \
+  REMEDIATION_REGISTER_SOURCE=1 \
+  REMEDIATION_DIR="$remediation" \
+  REMEDIATION_SCRIPT_SNAPSHOT=1 \
+  TRIAGE_AGENT=true \
+  "$SCRIPT_DIR/run-remediation.sh" \
+    --no-catalog >/tmp/lazy-vibe-register-execute-fixture.out 2>/tmp/lazy-vibe-register-execute-fixture.err || {
+      sed -n '1,120p' /tmp/lazy-vibe-register-execute-fixture.out >&2 || true
+      sed -n '1,160p' /tmp/lazy-vibe-register-execute-fixture.err >&2 || true
+      fail "register generation with no-op triage failed"
+    }
+}
+
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/lazy-vibe-remediation-fixtures.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
 
@@ -137,6 +153,68 @@ grep -q $'PX-0001\tP0\ttenancy\thigh-risk' "$backlog_remediation/00-master-px-li
   fail "backlog P0/opus row was not converted to high-risk tenancy packet"
 grep -q 'TEN-01:docs/audit/backlog-audit/findings/03-tenancy.md:1' "$backlog_remediation/00-blocker-ledger.tsv" ||
   fail "backlog ledger did not preserve finding_id source reference"
+
+triage_repo="$tmp_root/register-triage-repo"
+triage_register="$triage_repo/docs/audit/register"
+triage_remediation="$triage_repo/docs/audit/register-triage-remediation-run"
+mkdir -p "$triage_register"
+python3 - "$triage_register" <<'PY'
+import sys
+from pathlib import Path
+
+from lazy_vibe.register.store import RegisterStore
+from tests.register.test_model import make_finding
+
+register_dir = Path(sys.argv[1])
+verified = make_finding(
+    finding_id="R-0001",
+    fingerprint="sha256:verified",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "connectors",
+        "path": "backend/connectors/gcp.py",
+        "symbol": "-",
+    },
+    title="Verified register finding",
+    description="A verified register finding should be opened by remediation policy.",
+    evidence=[{"type": "code", "ref": "backend/connectors/gcp.py:1130", "run_id": "audit"}],
+)
+verified.history.append({
+    "ts": "2026-07-08T00:00:00+00:00",
+    "event": "verification",
+    "verdict": "VERIFIED",
+    "by": "agent:verifier",
+    "evidence": ["backend/connectors/gcp.py:1130"],
+})
+unverified = make_finding(
+    finding_id="R-0002",
+    fingerprint="sha256:unverified",
+    fingerprint_inputs={
+        "category": "product_gap",
+        "theme": "connectors",
+        "path": "backend/connectors/aws.py",
+        "symbol": "-",
+    },
+    title="Unverified register finding",
+    description="An unverified finding must stay out of remediation.",
+    evidence=[{"type": "code", "ref": "backend/connectors/aws.py:10", "run_id": "audit"}],
+)
+RegisterStore(register_dir).save({
+    verified.finding_id: verified,
+    unverified.finding_id: unverified,
+})
+PY
+
+run_register_generation_with_noop_triage "$triage_repo" "$triage_register" "$triage_remediation"
+assert_equals "1" "$(tail -n +2 "$triage_remediation/00-register-px-map.tsv" | wc -l | tr -d ' ')" \
+  "default register triage policy should open verified findings"
+grep -q $'PX-0001\tR-0001\topen' "$triage_remediation/00-register-px-map.tsv" ||
+  fail "verified register finding was not opened into remediation map"
+if grep -q 'R-0002' "$triage_remediation/00-register-px-map.tsv"; then
+  fail "unverified register finding was incorrectly opened"
+fi
+grep -q 'triage-default-policy.yaml' /tmp/lazy-vibe-register-execute-fixture.out ||
+  fail "default register triage policy was not reported"
 
 register_repo="$tmp_root/register-repo"
 register_audit="$register_repo/docs/audit/fixture-launch-readiness-run"
