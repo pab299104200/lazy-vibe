@@ -89,8 +89,54 @@ run_summary_only() {
     }
 }
 
+run_backlog_dry_run() {
+  local repo="$1" audit="$2" remediation="$3"
+  REPO_ROOT="$repo" \
+  REMEDIATION_DIR="$remediation" \
+  REMEDIATION_REGISTER_SOURCE=0 \
+  REMEDIATION_SCRIPT_SNAPSHOT=1 \
+  "$SCRIPT_DIR/run-remediation.sh" \
+    --audit-run "$audit" \
+    --dry-run \
+    --no-catalog >/tmp/lazy-vibe-remediation-fixture.out 2>/tmp/lazy-vibe-remediation-fixture.err || {
+      sed -n '1,120p' /tmp/lazy-vibe-remediation-fixture.out >&2 || true
+      sed -n '1,160p' /tmp/lazy-vibe-remediation-fixture.err >&2 || true
+      fail "backlog dry-run failed"
+    }
+}
+
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/lazy-vibe-remediation-fixtures.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
+
+backlog_repo="$tmp_root/backlog-repo"
+backlog_audit="$backlog_repo/docs/audit/backlog-audit"
+backlog_remediation="$backlog_repo/docs/audit/backlog-remediation-run"
+mkdir -p "$backlog_audit/findings"
+cat > "$backlog_audit/BACKLOG.tsv" <<'EOF'
+sev	domain_file	finding_id	model	effort	type	title
+P0	03-tenancy.md	TEN-01	opus	M	security	Tenant helper allows cross-account grants
+P1	06-connectors.md	CONN-09	sonnet	M	bug	Connector failures are indistinguishable from evidence failures
+P2	10-governance.md	GOV-03	haiku	S	gap	Policy audience has no frontend surface
+EOF
+cat > "$backlog_audit/findings/03-tenancy.md" <<'EOF'
+### [TEN-01] Tenant helper allows cross-account grants
+EOF
+cat > "$backlog_audit/findings/06-connectors.md" <<'EOF'
+### [CONN-09] Connector failures are indistinguishable from evidence failures
+EOF
+cat > "$backlog_audit/findings/10-governance.md" <<'EOF'
+### [GOV-03] Policy audience has no frontend surface
+EOF
+
+run_backlog_dry_run "$backlog_repo" "$backlog_audit" "$backlog_remediation"
+assert_equals 4 "$(wc -l < "$backlog_remediation/00-master-px-list.tsv")" "backlog master row count"
+assert_equals 4 "$(wc -l < "$backlog_remediation/00-raw-px-list.tsv")" "backlog raw row count"
+assert_equals 4 "$(wc -l < "$backlog_remediation/00-blocker-ledger.tsv")" "backlog ledger row count"
+assert_equals 4 "$(wc -l < "$backlog_remediation/03-implementation-units.tsv")" "backlog unit row count"
+grep -q $'PX-0001\tP0\ttenancy\thigh-risk' "$backlog_remediation/00-master-px-list.tsv" ||
+  fail "backlog P0/opus row was not converted to high-risk tenancy packet"
+grep -q 'TEN-01:docs/audit/backlog-audit/findings/03-tenancy.md:1' "$backlog_remediation/00-blocker-ledger.tsv" ||
+  fail "backlog ledger did not preserve finding_id source reference"
 
 register_repo="$tmp_root/register-repo"
 register_audit="$register_repo/docs/audit/fixture-launch-readiness-run"

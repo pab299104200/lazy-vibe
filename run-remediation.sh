@@ -2179,9 +2179,21 @@ audit_source_files() {
   } | sort -u
 }
 
+audit_backlog_file() {
+  [[ "$AUDIT_RUN" == register:* || "$AUDIT_RUN" == scorecard:* ]] && return 1
+  local backlog="$AUDIT_RUN/BACKLOG.tsv"
+  [[ -s "$backlog" ]] || return 1
+  printf '%s\n' "$backlog"
+}
+
 write_audit_source_manifest() {
   {
     printf 'source_kind\tsource\n'
+    local backlog
+    if backlog="$(audit_backlog_file 2>/dev/null)"; then
+      printf 'backlog\t%s\n' "$(normalize_source_path "$backlog")"
+      return 0
+    fi
     while IFS= read -r file; do
       [[ -f "$file" ]] || continue
       local rel
@@ -2698,6 +2710,177 @@ extract_findings() {
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$severity" "$group" "$model_class" "$source" "$line" "$title" "$packet"
     done < "$tmp"
   } > "$PX_TSV"
+}
+
+extract_backlog_findings() {
+  local backlog
+  backlog="$(audit_backlog_file)" || return 1
+  write_audit_source_manifest
+
+  python3 - "$backlog" "$REPO_ROOT" "$AUDIT_RUN" "$PX_TSV" "$RAW_PX_TSV" "$BLOCKER_LEDGER_TSV" <<'PY'
+import csv
+import re
+import sys
+from pathlib import Path
+
+backlog = Path(sys.argv[1])
+repo_root = Path(sys.argv[2]).resolve()
+audit_arg = Path(sys.argv[3])
+audit_dir = audit_arg if audit_arg.is_absolute() else (repo_root / audit_arg)
+px_tsv = Path(sys.argv[4])
+raw_tsv = Path(sys.argv[5])
+ledger_tsv = Path(sys.argv[6])
+
+
+def clean(value: str | None) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def group_for(domain_file: str, finding_type: str) -> str:
+    stem = Path(domain_file).stem
+    stem = re.sub(r"^\d+[-_]", "", stem)
+    group = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_").lower()
+    if not group:
+        group = clean(finding_type).lower() or "audit_backlog"
+    return group
+
+
+def model_class_for(severity: str, model: str, effort: str, finding_type: str) -> str:
+    sev = severity.upper()
+    model = model.lower()
+    effort = effort.upper()
+    finding_type = finding_type.lower()
+    if model == "opus" or sev == "P0" or finding_type == "security":
+        return "high-risk"
+    if effort == "L":
+        return "complex"
+    return "standard"
+
+
+def rel_source(domain_file: str) -> str:
+    candidate = audit_dir / "findings" / domain_file
+    if not candidate.exists():
+        candidate = audit_dir / domain_file
+    try:
+        return str(candidate.resolve().relative_to(repo_root))
+    except ValueError:
+        return str(candidate)
+
+
+def source_line(source: str, finding_id: str, title: str) -> str:
+    source_path = Path(source)
+    if not source_path.is_absolute():
+        source_path = repo_root / source_path
+    if not source_path.exists():
+        return "-"
+    needles = [finding_id, title]
+    lines = source_path.read_text(errors="replace").splitlines()
+    for needle in needles:
+        needle = clean(needle)
+        if not needle:
+            continue
+        for idx, line in enumerate(lines, start=1):
+            if needle in line:
+                return str(idx)
+    return "-"
+
+
+rows = []
+with backlog.open(newline="") as fh:
+    reader = csv.DictReader(fh, delimiter="\t")
+    required = {"sev", "domain_file", "finding_id", "model", "effort", "type", "title"}
+    missing = required - set(reader.fieldnames or [])
+    if missing:
+        raise SystemExit(f"{backlog}: missing required columns: {', '.join(sorted(missing))}")
+    for row in reader:
+        severity = clean(row.get("sev"))
+        finding_id = clean(row.get("finding_id"))
+        title = clean(row.get("title"))
+        if not severity or not finding_id or not title:
+            continue
+        domain_file = clean(row.get("domain_file"))
+        finding_type = clean(row.get("type"))
+        model = clean(row.get("model"))
+        effort = clean(row.get("effort"))
+        group = group_for(domain_file, finding_type)
+        model_class = model_class_for(severity, model, effort, finding_type)
+        source = rel_source(domain_file)
+        line = source_line(source, finding_id, title)
+        rows.append({
+            "severity": severity,
+            "finding_id": finding_id,
+            "domain_file": domain_file,
+            "group": group,
+            "model": model,
+            "effort": effort,
+            "type": finding_type,
+            "model_class": model_class,
+            "source": source,
+            "line": line,
+            "title": title,
+        })
+
+
+def write_px(path: Path) -> None:
+    with path.open("w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        writer.writerow(["id", "severity", "group", "model_class", "source", "line", "title", "packet"])
+        for idx, row in enumerate(rows, start=1):
+            px_id = f"PX-{idx:04d}"
+            title = f"[{row['finding_id']} {row['type']} model={row['model']} effort={row['effort']}] {row['title']}"
+            writer.writerow([
+                px_id,
+                row["severity"],
+                row["group"],
+                row["model_class"],
+                row["source"],
+                row["line"],
+                title,
+                f"packets/{px_id}.md",
+            ])
+
+
+write_px(px_tsv)
+write_px(raw_tsv)
+
+with ledger_tsv.open("w", newline="") as fh:
+    writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
+    writer.writerow([
+        "blocker_id",
+        "category",
+        "theme",
+        "severity",
+        "group",
+        "model_class",
+        "finding_count",
+        "representative_source",
+        "representative_line",
+        "representative_title",
+        "raw_px_ids",
+        "references",
+    ])
+    for idx, row in enumerate(rows, start=1):
+        blocker_id = f"B-{idx:04d}"
+        px_id = f"PX-{idx:04d}"
+        ref = f"{row['finding_id']}:{row['source']}:{row['line']}"
+        writer.writerow([
+            blocker_id,
+            "product_gap",
+            row["finding_id"],
+            row["severity"],
+            row["group"],
+            row["model_class"],
+            "1",
+            row["source"],
+            row["line"],
+            row["title"],
+            px_id,
+            ref,
+        ])
+
+print(f"[backlog] findings={len(rows)} backlog={backlog} inventory={px_tsv}")
+PY
+  write_blocker_ledger_markdown
 }
 
 register_source_enabled() {
@@ -6476,6 +6659,7 @@ git_root_merge_pathspec_args() {
   rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
   if [[ -n "$rel_rdir" ]]; then
     printf ':(exclude)%s\n' "$rel_rdir"
+    printf ':(exclude)%s/**\n' "$rel_rdir"
   fi
   git_root_non_product_pathspec_excludes
 }
@@ -6487,6 +6671,7 @@ git_root_git_merge_pathspec_args() {
   rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
   if [[ -n "$rel_rdir" ]]; then
     printf ':(exclude)%s/worktrees\n' "$rel_rdir"
+    printf ':(exclude)%s/worktrees/**\n' "$rel_rdir"
   fi
   git_root_non_product_pathspec_excludes
 }
@@ -9495,7 +9680,9 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
       _previous_px_tsv="$(mktemp)"
       cp "$PX_TSV" "$_previous_px_tsv"
     fi
-    if register_source_enabled; then
+    if audit_backlog_file >/dev/null 2>&1; then
+      extract_backlog_findings
+    elif register_source_enabled; then
       run_register_triage_stage
       write_register_findings_inventory
     else
