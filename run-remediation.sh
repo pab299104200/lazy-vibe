@@ -57,6 +57,12 @@ PROFILE="${PROFILE:-}"
 PRODUCT_REPO_ROOT="${PRODUCT_REPO_ROOT:-}"
 REGISTER_DIR="${REGISTER_DIR:-}"
 REMEDIATION_REGISTER_SOURCE="${REMEDIATION_REGISTER_SOURCE:-auto}"
+# Plan 3: consolidate triage into remediation. When register-sourced, verify
+# `new` findings (model inference) and apply policy to promote confirmed ones
+# to `open` BEFORE selecting the remediation set — so a 2-step audit->remediate
+# flow needs no separate triage babysitting. Best-effort: any failure degrades
+# to the prior open/regressed-only behavior. Disable with --no-triage.
+REGISTER_TRIAGE="${REMEDIATION_REGISTER_TRIAGE:-1}"
 AUDIT_RUN=""
 REMEDIATION_DIR="${REMEDIATION_DIR:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
@@ -171,6 +177,11 @@ Catalog and recovery controls:
   --no-auto-split              Disable automatic oversized-unit split preflight.
   --recoordinate               Rerun workstream coordinators for incomplete packets.
   --no-normalize               Skip workstream source-kind normalization.
+  --triage                      (default, register source) Verify+policy-triage
+                                new register findings (promote real ones to open)
+                                before remediation. Deterministic no-op if none.
+  --no-triage                   Skip the triage stage; remediate only the
+                                already open/regressed register findings.
   --catalog-with-codex         Run the cataloger explicitly without --execute.
   --no-verify-after-execute    Implementation-only pass; do not run verifiers.
 
@@ -273,6 +284,14 @@ while (($#)); do
       ;;
     --no-normalize)
       NO_NORMALIZE=1
+      shift
+      ;;
+    --triage)
+      REGISTER_TRIAGE=1
+      shift
+      ;;
+    --no-triage)
+      REGISTER_TRIAGE=0
       shift
       ;;
     --no-auto-split)
@@ -2834,6 +2853,50 @@ PY
   log_event '[register] open_or_regressed=%s register=%s map=%s\n' \
     "$(awk 'NR > 1 { count += 1 } END { print count + 0 }' "$REGISTER_PX_TSV")" \
     "$REGISTER_DIR" "$REGISTER_PX_TSV"
+}
+
+# Plan 3: consolidate triage into remediation. Verify `new` register findings
+# (model inference confirms real vs false-positive) then apply policy to promote
+# confirmed ones to `open`, so the inventory selection below picks them up.
+# Best-effort — on any failure we log and fall through to the prior
+# open/regressed-only behavior, so this can never brick an existing run.
+run_register_triage_stage() {
+  [[ "$REGISTER_TRIAGE" == "1" ]] || return 0
+  [[ -n "$REGISTER_DIR" && -f "$REGISTER_DIR/register.jsonl" ]] || return 0
+  local new_count
+  new_count="$(python3 - "$REGISTER_DIR/register.jsonl" <<'PY' 2>/dev/null || printf 0
+import json,sys
+n=0
+for line in open(sys.argv[1]):
+    line=line.strip()
+    if not line: continue
+    try:
+        if json.loads(line).get("disposition")=="new": n+=1
+    except Exception: pass
+print(n)
+PY
+)"
+  if [[ "${new_count:-0}" == "0" ]]; then
+    log_event '[triage] no new findings to triage; skipping (deterministic no-op, no tokens spent)\n'
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log_event '[triage] DRY-RUN: would verify + policy-triage %s new register findings before remediation\n' "$new_count"
+    return 0
+  fi
+  log_event '[triage] Plan-3 consolidation: verifying %s new findings (model inference) before remediation\n' "$new_count"
+  if ! TRIAGE_AGENT="${TRIAGE_AGENT:-claude}" MAX_PARALLEL="${MAX_PARALLEL:-3}" PROFILE="${PROFILE:-}" \
+       PRODUCT_PROFILE="${PRODUCT_PROFILE:-}" PRODUCT_REPO_ROOT="${PRODUCT_REPO_ROOT:-}" \
+       "$SCRIPT_DIR/run-triage.sh" --register-dir "$REGISTER_DIR" ${TRIAGE_LIMIT:+--limit "$TRIAGE_LIMIT"}; then
+    log_event_err '[triage] verification stage failed; continuing with existing open/regressed set\n'
+    return 0
+  fi
+  log_event '[triage] applying policy (deterministic promote new->open/false_positive)\n'
+  local -a policy_arg=()
+  [[ -f "$REGISTER_DIR/triage-policy.yaml" ]] && policy_arg=(--policy "$REGISTER_DIR/triage-policy.yaml")
+  python3 -m lazy_vibe.register triage --register-dir "$REGISTER_DIR" --accept-all "${policy_arg[@]}" \
+    >>"${RUN_LOG:-/dev/stderr}" 2>&1 \
+    || log_event_err '[triage] policy apply reported issues; continuing with whatever was promoted\n'
 }
 
 dedupe_findings_into_blocker_ledger() {
@@ -9433,6 +9496,7 @@ if [[ "$STATE_RESUME" != "1" && "$VERIFY_ONLY" != "1" && "$FINALIZE_ONLY" != "1"
       cp "$PX_TSV" "$_previous_px_tsv"
     fi
     if register_source_enabled; then
+      run_register_triage_stage
       write_register_findings_inventory
     else
       extract_findings
