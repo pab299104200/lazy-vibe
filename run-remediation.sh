@@ -8061,6 +8061,14 @@ wave_job_completed_successfully() {
   esac
 }
 
+verifier_job_has_queueable_postcheck_invalid() {
+  local name="$1"
+  [[ "$name" == verify-* ]] || return 1
+  local unit_id="${name#verify-}"
+  local verifier="$REMEDIATION_DIR/artifacts/verify-$unit_id.md"
+  verifier_postcheck_invalid "$unit_id" && [[ -s "$verifier" ]]
+}
+
 process_tree_pids_postorder() {
   local root="$1" child
   while IFS= read -r child; do
@@ -8143,6 +8151,18 @@ wait_for_wave() {
         printf '\r%-*s\r' $(( _tw - 1 )) ''
         if [[ $s -eq 0 ]]; then
           log_event '[ok] %s\n' "${names_ref[$idx]}"
+          if [[ "$DRY_RUN" != "1" ]]; then
+            printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
+            if [[ "${names_ref[$idx]}" == verify-* ]]; then
+              if ! finalize_verified_unit "${names_ref[$idx]#verify-}"; then
+                failed=1
+              fi
+            fi
+          fi
+        elif verifier_job_has_queueable_postcheck_invalid "${names_ref[$idx]}"; then
+          log_event '[ok] %s (postcheck invalid; queued for verifier rerun)\n' "${names_ref[$idx]}"
+          printf '\n[auto-recover] %s: verifier artifact exists but failed postcheck — checkpointing as not_verified queue item\n' \
+            "${names_ref[$idx]}" >>"${job_log[$idx]}"
           if [[ "$DRY_RUN" != "1" ]]; then
             printf '%s\n' "${names_ref[$idx]}" >> "$CHECKPOINT_FILE"
             if [[ "${names_ref[$idx]}" == verify-* ]]; then
@@ -10184,7 +10204,7 @@ verifier_queue_category() {
   fi
 
   if verifier_postcheck_invalid "$unit_id"; then
-    needs_targeted_revision_category_for_unit "$unit_id"
+    printf 'not_verified\n'
     return 0
   fi
 

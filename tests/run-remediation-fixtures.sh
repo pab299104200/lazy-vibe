@@ -601,7 +601,7 @@ assert_equals contract_conflict "$(queue_category "$queue" IU-0006)" "contract c
 assert_equals split_children_pending "$(queue_category "$queue" IU-0007)" "split pending category"
 assert_equals split_decomposed "$(queue_category "$queue" IU-0008)" "split decomposed category"
 assert_equals not_verified "$(queue_category "$queue" IU-0009)" "stale verifier category"
-assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0010)" "postcheck invalid category"
+assert_equals not_verified "$(queue_category "$queue" IU-0010)" "postcheck invalid category"
 assert_equals evidence_failed "$(queue_category "$queue" IU-0011)" "failed evidence category"
 assert_equals accepted "$(queue_category "$queue" IU-0012)" "dependency-resolved evidence category"
 assert_equals blocked "$(queue_category "$queue" IU-0013)" "blocked category"
