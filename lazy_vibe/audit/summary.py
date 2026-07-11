@@ -18,6 +18,12 @@ RUNNER_UNAVAILABLE_RE = re.compile(
     r"provider.*(down|unavailable|overloaded)|HTTP\s*(429|503).*model",
     re.IGNORECASE,
 )
+HARNESS_FAILURE_RE = re.compile(
+    r"^error: the argument |^error: unexpected argument |^Usage: codex exec|"
+    r"unknown argument|command not found|Traceback \(most recent call last\)|"
+    r"\[stall-kill\]|\[missing-output\]",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -76,7 +82,12 @@ def extract_result(log_path: Path) -> str:
 
 def job_result(job_id: str, log_path: Path, completed: set[str]) -> str:
     if job_id in completed:
-        return extract_result(log_path)
+        result = extract_result(log_path)
+        if result == "completed" and log_path.exists():
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            if HARNESS_FAILURE_RE.search(text):
+                return "FAIL"
+        return result
     if log_path.exists():
         text = log_path.read_text(encoding="utf-8", errors="replace")
         if not RESULT_RE.search(text) and RUNNER_UNAVAILABLE_RE.search(text):
@@ -136,7 +147,7 @@ def output_artifact_path(run_dir: Path, row: JobRow) -> Path | None:
     output = Path(row.output)
     if output.is_absolute():
         return output
-    return run_dir / "artifacts" / output
+    return run_dir / output
 
 
 def native_summary_paths(run_dir: Path, row: JobRow) -> list[Path]:

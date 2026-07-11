@@ -1,0 +1,23 @@
+# Shared User-Journey Audit Rules
+
+This is an end-user usability audit, not a code review and not a feature-presence checklist.
+
+- Audit the deployed product named by the profile. Local code and documentation are discovery aids, never substitutes for browser evidence.
+- Read credentials from the profile-designated credential file only when needed. Never print, copy, or persist secrets in reports, prompts, traces, screenshots, or logs.
+- Infer journeys from product claims, navigation, routes, domain objects, permissions, documentation, and visible actions. Do not require a founder-authored script for each task.
+- Judge whether a competent target user can understand and complete the work without product-specific coaching. Existing implementation choices are not proof that the workflow is acceptable.
+- Use the supplied `playwright` MCP tools for every execution job. Never launch a browser from the agent shell. Capture a screenshot before the first action, at every material decision point, on errors, and at completion. Record visible labels and user actions, not DOM implementation details.
+- Never claim PASS from route availability, HTTP success, selectors, or test IDs alone. PASS requires comprehensible state, a clear next action, truthful feedback, and a verifiable business outcome.
+- Mark blocked or unavailable evidence as UNVERIFIED with the exact cause. Never silently downgrade missing browser proof.
+- Do not modify product code or data outside reversible audit fixtures. This harness produces evidence and a remediation register; remediation is a separate authorized run.
+- Create uniquely prefixed fixtures when creation is required. Record cleanup status. Do not alter existing customer or financial records unless the profile explicitly identifies disposable fixtures.
+- Cite evidence with journey id, screenshot or trace path, visible text, and step number. Findings without reproducible evidence are invalid.
+- Rank problems by user harm and journey frequency: blocked completion, wrong financial action, ambiguity, recovery failure, unnecessary expertise, avoidable effort, then cosmetic quality.
+- Use plain language. Describe what the user sees, why it is confusing, and what outcome the interface must make obvious. Do not prescribe superficial restyling when the workflow or information model is wrong.
+- A job result describes whether that job completed its assigned evidence artifact, not whether the product passed the whole UX audit. Discovery and planning jobs return PASS when their inventory or plan is complete and evidence-grounded, even when they identify severe product risks. Execution jobs return PASS only when every assigned journey has a valid terminal result and required evidence; individual journeys may still FAIL. Only the independent review and final synthesis issue the product-level UX verdict.
+- Execution ownership is exclusive. Read the harness-generated `Assigned Journeys` section in the job prompt and execute exactly those rows. Never execute, summarize, score, or write evidence for a journey assigned to another execution job.
+- Store journey traces only under the lane-owned path named in the prompt: `artifacts/<execution-job>/journeys/<journey-id>/trace.md`. Shared `artifacts/journeys/` paths are forbidden because concurrent jobs can overwrite one another.
+- Every execution job must write `artifacts/<execution-job>/journey-results.tsv` using the exact header supplied by the prompt. A report table is commentary; the TSV and lane-owned traces are the machine-readable evidence contract.
+- Do not substitute an empty-state walkthrough for a fixture-backed journey. Follow the planned fixture strategy. If the fixture cannot be created or a specifically designated disposable fixture cannot be used, mark the journey BLOCKED and explain the exact missing capability. Never mutate an existing record merely because its name looks test-like.
+- A journey PASS requires `fixture_status` and `oracle_status` that prove the planned starting state and completion outcome. Route visibility, existing data inspection, or a partial workflow cannot satisfy a creation, mutation, approval, recovery, or lifecycle oracle.
+- The browser preflight at `$RUN_DIR/artifacts/browser-preflight/summary.md` is mandatory evidence for execution jobs. If it is absent or not PASS, do not attempt improvised browser fallbacks; report a harness failure.

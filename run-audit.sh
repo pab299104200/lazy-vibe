@@ -228,7 +228,7 @@ extract_section() {
 }
 
 audit_readonly_kind() {
-  [[ "$1" =~ ^(discovery|synthesis|web|deep-dive)$ ]]
+  [[ "$1" =~ ^(discovery|synthesis|web|deep-dive|simulation)$ ]]
 }
 
 audit_relative_run_dir() {
@@ -787,6 +787,65 @@ group_selected() {
   return 0
 }
 
+append_ux_journey_assignment() {
+  local prompt_file="$1" job_id="$2"
+  local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
+  [[ "${UX_PLAYWRIGHT_MCP:-0}" == "1" && -s "$plan_file" ]] || return 0
+
+  local assigned_rows
+  assigned_rows="$(awk -F'\t' -v job="$job_id" 'NR > 1 && $2 == job { print }' "$plan_file")"
+  [[ -n "$assigned_rows" ]] || return 0
+
+  cat >> "$prompt_file" <<ASSIGNMENT
+## Assigned Journeys
+
+The harness, not the agent, owns journey allocation. Execute exactly the rows below and no others:
+
+\`\`\`tsv
+$(head -n 1 "$plan_file")
+$assigned_rows
+\`\`\`
+
+Write each trace to:
+
+\`$RUN_DIR/artifacts/$job_id/journeys/<journey_id>/trace.md\`
+
+Write the machine-readable result manifest to:
+
+\`$RUN_DIR/artifacts/$job_id/journey-results.tsv\`
+
+with this exact tab-separated header:
+
+\`journey_id<TAB>result<TAB>fixture_status<TAB>oracle_status<TAB>trace_path<TAB>cleanup_status<TAB>blocker\`
+
+Allowed values:
+
+- \`result\`: \`PASS\`, \`FAIL\`, \`BLOCKED\`, or \`UNVERIFIED\`
+- \`fixture_status\`: \`CREATED\`, \`REUSED_DISPOSABLE\`, \`NOT_REQUIRED\`, or \`BLOCKED\`
+- \`oracle_status\`: \`PROVEN\`, \`FAILED\`, \`BLOCKED\`, or \`UNVERIFIED\`
+- \`cleanup_status\`: \`CLEANED\`, \`RETAINED_DISPOSABLE\`, \`NOT_NEEDED\`, or \`FAILED\`
+
+The trace path must be relative to \`$RUN_DIR\` and must equal
+\`artifacts/$job_id/journeys/<journey_id>/trace.md\`. Include \`RESULT: <result>\`
+in every trace. A PASS requires \`oracle_status=PROVEN\` and a usable fixture state.
+The launcher validates this contract before accepting the job.
+
+ASSIGNMENT
+}
+
+write_ux_journey_evidence_index() {
+  [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
+  local index_file="$RUN_DIR/artifacts/journey-evidence-index.tsv"
+  printf 'execution_job\tjourney_id\tresult\tfixture_status\toracle_status\ttrace_path\tcleanup_status\tblocker\n' > "$index_file"
+  local result_file job_id
+  shopt -s nullglob
+  for result_file in "$RUN_DIR"/artifacts/*/journey-results.tsv; do
+    job_id="$(basename "$(dirname "$result_file")")"
+    awk -F'\t' -v job="$job_id" 'BEGIN { OFS="\t" } NR > 1 { print job, $0 }' "$result_file" >> "$index_file"
+  done
+  shopt -u nullglob
+}
+
 build_prompt() {
   local group="$1" job_id="$2" kind="$3" title="$4" output="$5" ref="$6"
   local prompt_file="$RUN_DIR/prompts/$job_id.md"
@@ -850,6 +909,22 @@ HEADER
   else
     printf 'WARNING: Section "%s" was not found in %s. Locate it manually, read only that section, and proceed.\n\n' \
       "$ref" "$MASTER_PROMPT" >> "$prompt_file"
+  fi
+
+  if [[ "$kind" == "simulation" ]]; then
+    append_ux_journey_assignment "$prompt_file" "$job_id"
+  elif [[ "$kind" =~ ^(adversarial|final)$ ]]; then
+    write_ux_journey_evidence_index
+    if [[ -s "$RUN_DIR/artifacts/journey-evidence-index.tsv" ]]; then
+      cat >> "$prompt_file" <<EVIDENCEINDEX
+## Canonical Journey Evidence Index
+
+Read \`$RUN_DIR/artifacts/journey-evidence-index.tsv\` before execution reports.
+It is the canonical lane-owned result set. Treat report statements that contradict
+the index or its trace paths as invalid evidence, and report the contradiction.
+
+EVIDENCEINDEX
+    fi
   fi
 
   # Synthesis, adversarial, and final jobs must ground their analysis in the
@@ -925,7 +1000,7 @@ For discovery and synthesis jobs, do not run tests or start servers. For runtime
 
 \`$RUN_DIR/artifacts/$job_id/\`
 
-For dev VPS browser or customer-path work, read \`docs/ux/.creds\` only as needed and redact secrets from all outputs.
+For deployed browser or customer-path work, the Playwright MCP server receives the profile-designated secrets file through its native \`--secrets\` option. Use MCP secret references without printing secret values. Do not claim authentication is impossible merely because secrets must remain redacted; report a credential blocker only when the configured secret reference is absent or rejected.
 INSTRUCTIONS
 
   # ── Accessibility scanning (runtime and simulation jobs) ─────────────────
@@ -1145,13 +1220,58 @@ print(json.dumps(args))
 PY
 }
 
+playwright_mcp_codex_args_json() {
+  local job_id="$1" executable_path="$2"
+  python3 - "$RUN_DIR" "$job_id" "$executable_path" "$REPO_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+run_dir, job_id, executable_path, repo_root = sys.argv[1:]
+args = [
+    "--yes",
+    "@playwright/mcp@latest",
+    "--headless",
+    "--isolated",
+    "--no-sandbox",
+    "--executable-path",
+    executable_path,
+    "--output-dir",
+    str(Path(run_dir) / "artifacts" / job_id / "playwright-mcp"),
+    "--output-mode",
+    "file",
+    "--save-session",
+    "--viewport-size",
+    "1440x1000",
+]
+credentials = Path(repo_root) / "docs" / "ux" / ".creds"
+if credentials.is_file():
+    args.extend(["--secrets", str(credentials)])
+print(json.dumps(args))
+PY
+}
+
+repo_playwright_chromium_path() {
+  local frontend_root="$REPO_ROOT/frontend"
+  [[ -f "$frontend_root/package.json" ]] || return 1
+  (
+    cd "$frontend_root"
+    node -e 'const { chromium } = require("playwright"); process.stdout.write(chromium.executablePath())'
+  )
+}
+
 _run_codex() {
   local prompt_file="$1" job_id="$2" kind="$3" log_file="$4"
   local cmd=(codex)
   if [[ "$kind" == "web" ]]; then
     cmd+=(--search)
   fi
-  cmd+=(exec --ephemeral --full-auto --skip-git-repo-check -C "$REPO_ROOT")
+  cmd+=(exec --ephemeral --skip-git-repo-check -C "$REPO_ROOT")
+  if [[ "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" && "${CODEX_BYPASS_SIMULATION:-0}" == "1" ]]; then
+    cmd+=(--dangerously-bypass-approvals-and-sandbox)
+  else
+    cmd+=(--full-auto)
+  fi
   local selected_model
   selected_model="$(_model_for_kind "$kind" "${CODEX_MODEL:-}" \
     "${CODEX_MODEL_DISCOVERY:-gpt-5.4}" "${CODEX_MODEL_SYNTHESIS:-gpt-5.5}" \
@@ -1164,6 +1284,15 @@ _run_codex() {
     "${CODEX_REASONING_RUNTIME:-medium}"  "${CODEX_REASONING_SIMULATION:-medium}" \
     "${CODEX_REASONING_ADVERSARIAL:-high}" "${CODEX_REASONING_FINAL:-high}")"
   [[ -n "$selected_reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$selected_reasoning\"")
+  if [[ "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
+    local chromium_path playwright_output_dir
+    chromium_path="$(repo_playwright_chromium_path)"
+    playwright_output_dir="$RUN_DIR/artifacts/$job_id/playwright-mcp"
+    mkdir -p "$playwright_output_dir"
+    cmd+=(-c 'mcp_servers.playwright.command="npx"')
+    cmd+=(-c "mcp_servers.playwright.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path")")
+    cmd+=(-c "mcp_servers.playwright.cwd=\"$REPO_ROOT\"")
+  fi
   if [[ "${LATTICE_MCP_AUTO:-1}" == "1" ]]; then
     local lattice_cmd="${LATTICE_MCP_COMMAND:-/home/pete/cadres/lattice/daemon/target/release/lattice}"
     cmd+=(-c "mcp_servers.lattice.command=\"$lattice_cmd\"")
@@ -2080,6 +2209,16 @@ write_ux_browser_gate_summary() {
   printf 'job_id\tlane\tstatus\tsummary\n' > "$summary_tsv"
 
   local summary_file job_id lane status reason
+  summary_file="$RUN_DIR/artifacts/browser-preflight/summary.md"
+  if [[ -s "$summary_file" ]]; then
+    status="PASS"
+    grep -qi 'STATUS:[[:space:]]*FAIL' "$summary_file" && status="FAIL"
+    grep -qi 'STATUS:[[:space:]]*UNVERIFIED' "$summary_file" && status="UNVERIFIED"
+    reason="$(grep -E 'STATUS:|entry point|Browser engine' "$summary_file" | head -3 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' || true)"
+    [[ -n "$reason" ]] || reason="browser preflight summary available"
+    printf 'preflight\tbrowser-preflight\t%s\t%s\n' "$status" "$reason" >> "$summary_tsv"
+  fi
+
   shopt -s nullglob
   for summary_file in "$RUN_DIR"/artifacts/*/accessibility/summary.md "$RUN_DIR"/artifacts/*/e2e/summary.md "$RUN_DIR"/artifacts/*/lighthouse/summary.md; do
     [[ -s "$summary_file" ]] || continue
@@ -2099,15 +2238,24 @@ write_ux_browser_gate_summary() {
     [[ -n "$reason" ]] || reason="summary available"
     printf '%s\t%s\t%s\t%s\n' "$job_id" "$lane" "$status" "$reason" >> "$summary_tsv"
   done
+  local mcp_dir evidence_count
+  for mcp_dir in "$RUN_DIR"/artifacts/*/playwright-mcp; do
+    [[ -d "$mcp_dir" ]] || continue
+    job_id="$(basename "$(dirname "$mcp_dir")")"
+    evidence_count="$(find "$mcp_dir" -type f \( -name '*.png' -o -name '*snapshot*.md' -o -name '*network*.log' -o -name '*console*.log' \) | wc -l | tr -d ' ')"
+    [[ "$evidence_count" -gt 0 ]] || continue
+    printf '%s\tplaywright-mcp\tEVIDENCE\t%s durable screenshot/snapshot/console/network artifact(s) captured\n' \
+      "$job_id" "$evidence_count" >> "$summary_tsv"
+  done
   shopt -u nullglob
 
   {
     printf '# UX Browser Gate Summary\n\n'
-    printf 'This file is generated by the audit harness from native accessibility, E2E browser proof, and Lighthouse artifacts. Final release decisions must treat this as first-class evidence.\n\n'
+    printf 'This file is generated by the audit harness from browser preflight, Playwright MCP journey evidence, accessibility, E2E browser proof, and Lighthouse artifacts. Final decisions must treat this as first-class evidence.\n\n'
     printf '| Job | Lane | Status | Summary |\n'
     printf '| --- | --- | --- | --- |\n'
     if [[ "$(wc -l < "$summary_tsv" | tr -d ' ')" == "1" ]]; then
-      printf '| _none_ | _none_ | UNVERIFIED | No native UX/browser/E2E summaries were produced. |\n'
+      printf '| _none_ | _none_ | UNVERIFIED | No browser preflight, journey, accessibility, E2E, or Lighthouse evidence was produced. |\n'
     else
       tail -n +2 "$summary_tsv" | while IFS=$'\t' read -r job_id lane status reason; do
         printf '| `%s` | `%s` | `%s` | %s |\n' "$job_id" "$lane" "$status" "$reason"
@@ -2213,6 +2361,105 @@ declare -a group_names=()
 declare -a group_outputs=()
 active_count=0
 
+validate_ux_execution_evidence() {
+  local job_id="$1"
+  local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
+  local result_file="$RUN_DIR/artifacts/$job_id/journey-results.tsv"
+  local validation_file="$RUN_DIR/artifacts/$job_id/evidence-validation.md"
+  [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" && -s "$plan_file" ]] || return 0
+  awk -F'\t' -v job="$job_id" 'NR > 1 && $2 == job { found = 1 } END { exit found ? 0 : 1 }' "$plan_file" || return 0
+
+  mkdir -p "$(dirname "$validation_file")"
+  python3 - "$RUN_DIR" "$plan_file" "$result_file" "$job_id" "$validation_file" <<'PY'
+import csv
+import re
+import sys
+from pathlib import Path
+
+run_dir = Path(sys.argv[1])
+plan_file = Path(sys.argv[2])
+result_file = Path(sys.argv[3])
+job_id = sys.argv[4]
+validation_file = Path(sys.argv[5])
+errors = []
+
+with plan_file.open(newline="", encoding="utf-8") as handle:
+    expected = {
+        row["journey_id"]: row
+        for row in csv.DictReader(handle, delimiter="\t")
+        if row["execution_job"] == job_id
+    }
+
+required_header = [
+    "journey_id", "result", "fixture_status", "oracle_status",
+    "trace_path", "cleanup_status", "blocker",
+]
+rows = []
+if not result_file.is_file():
+    errors.append(f"missing result manifest: {result_file}")
+else:
+    with result_file.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames != required_header:
+            errors.append(f"invalid result manifest header: {reader.fieldnames}")
+        else:
+            rows = list(reader)
+
+actual_ids = [row["journey_id"] for row in rows]
+if len(actual_ids) != len(set(actual_ids)):
+    errors.append("result manifest contains duplicate journey ids")
+missing = sorted(set(expected) - set(actual_ids))
+unexpected = sorted(set(actual_ids) - set(expected))
+if missing:
+    errors.append("missing assigned journeys: " + ", ".join(missing))
+if unexpected:
+    errors.append("contains journeys owned by another lane: " + ", ".join(unexpected))
+
+allowed = {
+    "result": {"PASS", "FAIL", "BLOCKED", "UNVERIFIED"},
+    "fixture_status": {"CREATED", "REUSED_DISPOSABLE", "NOT_REQUIRED", "BLOCKED"},
+    "oracle_status": {"PROVEN", "FAILED", "BLOCKED", "UNVERIFIED"},
+    "cleanup_status": {"CLEANED", "RETAINED_DISPOSABLE", "NOT_NEEDED", "FAILED"},
+}
+for row in rows:
+    journey_id = row["journey_id"]
+    if journey_id not in expected:
+        continue
+    for field, values in allowed.items():
+        if row[field] not in values:
+            errors.append(f"{journey_id}: invalid {field}={row[field]!r}")
+    expected_trace = f"artifacts/{job_id}/journeys/{journey_id}/trace.md"
+    if row["trace_path"] != expected_trace:
+        errors.append(f"{journey_id}: trace_path must be {expected_trace}")
+        continue
+    trace_file = run_dir / expected_trace
+    if not trace_file.is_file():
+        errors.append(f"{journey_id}: missing trace {expected_trace}")
+    else:
+        trace = trace_file.read_text(encoding="utf-8", errors="replace")
+        if not re.search(rf"(?im)^\s*RESULT:\s*{re.escape(row['result'])}\s*$", trace):
+            errors.append(f"{journey_id}: trace RESULT does not match manifest")
+    if row["result"] == "PASS":
+        if row["oracle_status"] != "PROVEN":
+            errors.append(f"{journey_id}: PASS requires oracle_status=PROVEN")
+        if row["fixture_status"] == "BLOCKED":
+            errors.append(f"{journey_id}: PASS cannot use fixture_status=BLOCKED")
+    if row["fixture_status"] == "CREATED" and row["cleanup_status"] == "FAILED":
+        errors.append(f"{journey_id}: created fixture cleanup failed")
+
+status = "FAIL" if errors else "PASS"
+lines = ["# UX Execution Evidence Validation", "", f"STATUS: {status}", ""]
+if errors:
+    lines.extend(f"- {error}" for error in errors)
+else:
+    lines.append(f"Validated {len(rows)} exclusively owned journey result(s) for `{job_id}`.")
+validation_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+if errors:
+    print(f"[ux-evidence-invalid] {job_id}: see {validation_file}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 wait_for_group() {
   local -n pids_ref=$1
   local -n names_ref=$2
@@ -2270,6 +2517,10 @@ wait_for_group() {
               failed=1
               job_passed=0
             fi
+          fi
+          if ((job_passed)) && ! validate_ux_execution_evidence "$job_name"; then
+            failed=1
+            job_passed=0
           fi
           if ((job_passed)); then
             local audit_result
@@ -2740,6 +2991,12 @@ audit_should_skip_checkpointed_job() {
     prior_result="$(audit_summary_result_for_job "$job_id" 2>/dev/null || true)"
     case "$prior_result" in
       PASS|completed)
+        local current_log="$RUN_DIR/logs/$job_id.log"
+        if [[ -s "$current_log" ]] && ! grep -q 'RESULT:[[:space:]]*\(PASS\|completed\)' "$current_log" && \
+          grep -qiE '^error: the argument |^error: unexpected argument |^Usage: codex exec|unknown argument|command not found|Traceback \(most recent call last\)|\[stall-kill\]|\[missing-output\]' "$current_log"; then
+          printf '[resume] re-running %s; current log contradicts stale completed summary\n' "$job_id"
+          return 1
+        fi
         printf '[resume] skipping completed job %s\n' "$job_id"
         return 0
         ;;
@@ -2822,7 +3079,8 @@ while (( _DRAIN_STARTED > 0 )); do
   drain_pending_jobs
 done
 
-  write_ux_browser_gate_summary || true
+write_ux_journey_evidence_index || true
+write_ux_browser_gate_summary || true
 write_run_summary
 write_audit_blocker_ledger
 reconcile_audit_register

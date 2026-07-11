@@ -486,6 +486,8 @@ PX-0016	P1	quality	Static analysis	fixture.md	18	static	row
 PX-0017	P1	quality	Native artifact repair	fixture.md	19	native artifact	row
 PX-0018	P1	quality	Split parent blocked child	fixture.md	20	split row
 PX-0018-S01	P1	quality	Split child blocked	fixture.md	21	child blocked row
+PX-0019	P1	quality	Advisory accepted	fixture.md	22	advisory row
+PX-0020	P1	quality	Scope addition revise	fixture.md	23	scope row
 EOF
 
 cat > "$remediation/02-workstreams.tsv" <<'EOF'
@@ -516,9 +518,11 @@ IU-0016	PX-0016	quality	standard	P1	static analysis
 IU-0017	PX-0017	quality	standard	P1	native artifact repair
 IU-0018	PX-0018	quality	standard	P1	split parent blocked child
 IU-0018-S01	PX-0018-S01	quality	standard	P1	split child blocked
+IU-0019	PX-0019	quality	standard	P1	advisory accepted
+IU-0020	PX-0020	quality	standard	P1	scope addition revise
 EOF
 
-for packet in PX-0001 PX-0002 PX-0003 PX-0004 PX-0005 PX-0006 PX-0009 PX-0010 PX-0011 PX-0012 PX-0013 PX-0014 PX-0015 PX-0016 PX-0017; do
+for packet in PX-0001 PX-0002 PX-0003 PX-0004 PX-0005 PX-0006 PX-0009 PX-0010 PX-0011 PX-0012 PX-0013 PX-0014 PX-0015 PX-0016 PX-0017 PX-0019 PX-0020; do
   write_packet "$remediation" "$packet" complete
 done
 write_packet "$remediation" PX-0007 split-into-child-units
@@ -558,6 +562,20 @@ EOF
 write_verifier "$remediation" IU-0018-S01 stop blocked blocked
 write_findings "$remediation" IU-0018-S01 $'IU-0018-S01\tP1\tblocked\texternal\t1\tneeds production credential\tprovide credential'
 write_summary "$remediation" IU-0018-S01 blocked
+# Accepted unit carrying only advisory rows (P3 polish + scope_addition):
+# must stay accepted, not be re-queued for revision.
+write_verifier "$remediation" IU-0019 accept fixed complete
+write_findings "$remediation" IU-0019 \
+  $'IU-0019\tP3\tcode\tsrc/widget.tsx\t10\tempty-state copy could be friendlier\tpolish empty state copy' \
+  $'IU-0019\tP2\tscope_addition\tsrc/feature.py\t20\tpacket never contracted bulk export\tadd bulk export as new register finding'
+write_summary "$remediation" IU-0019 fixed
+# Revise unit with a blocking P1 plus a scope_addition row: still revises,
+# and the scope_addition row lands in the scope-additions ledger.
+write_verifier "$remediation" IU-0020 revise revise pending
+write_findings "$remediation" IU-0020 \
+  $'IU-0020\tP1\tcode\tsrc/auth.py\t5\ttenant check missing\tadd account_id predicate' \
+  $'IU-0020\tP2\tscope_addition\tsrc/auth.py\t9\tpacket never contracted SSO step-up\tfile SSO step-up as new register finding'
+write_summary "$remediation" IU-0020 fixed
 
 for verifier in "$remediation"/artifacts/verify-*.md; do
   [[ "$verifier" == *verify-IU-0009.md ]] && continue
@@ -610,6 +628,25 @@ assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0015)" "oper
 assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0016)" "static_analysis category"
 assert_equals test_harness "$(queue_category "$queue" IU-0017)" "native artifact category"
 assert_equals split_children_pending "$(queue_category "$queue" IU-0018)" "blocked split child category"
+assert_equals accepted "$(queue_category "$queue" IU-0019)" "advisory-rows accepted category"
+assert_equals needs_targeted_revision "$(queue_category "$queue" IU-0020)" "scope_addition rides along revise category"
+
+scope_ledger="$remediation/artifacts/scope-additions-ledger.tsv"
+[[ -s "$scope_ledger" ]] || fail "scope-additions ledger was not generated"
+assert_equals 3 "$(wc -l < "$scope_ledger")" "scope-additions ledger row count (header + 2 rows)"
+head -1 "$scope_ledger" | grep -qx $'blocker_id\tcategory\ttheme\tseverity\tgroup\tmodel_class\tfinding_count\trepresentative_source\trepresentative_line\trepresentative_title\traw_px_ids\treferences' ||
+  fail "scope-additions ledger header does not match register ingest contract"
+grep -q $'^SCOPE-IU-0019-1\tscope_addition\tverifier-scope-addition\tP2\tquality\tstandard\t1\tsrc/feature.py\t20\t' "$scope_ledger" ||
+  fail "scope-additions ledger missing IU-0019 row"
+grep -q $'^SCOPE-IU-0020-1\tscope_addition\tverifier-scope-addition\tP2\tquality\tstandard\t1\tsrc/auth.py\t9\t' "$scope_ledger" ||
+  fail "scope-additions ledger missing IU-0020 row"
+python3 -c "
+from pathlib import Path
+from lazy_vibe.register.ingest import parse_ledger
+candidates = parse_ledger(Path('$scope_ledger'), run_id='fixture-run')
+assert len(candidates) == 2, f'expected 2 candidates, got {len(candidates)}'
+assert {c.blocker_id for c in candidates} == {'SCOPE-IU-0019-1', 'SCOPE-IU-0020-1'}
+" || fail "scope-additions ledger is not parseable by register ingest"
 
 postcheck_prompt="$remediation/prompts/verify-IU-0010.md"
 grep -q 'Prior Verifier Postcheck Invalidation' "$postcheck_prompt" ||

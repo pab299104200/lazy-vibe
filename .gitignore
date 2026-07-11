@@ -12,3 +12,6 @@ __pycache__/
 # Credential files
 *.creds
 .creds
+
+# Local Lattice indexes and runtime state
+.lattice/

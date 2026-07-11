@@ -1,0 +1,10 @@
+group	job_id	kind	title	output	ref
+00	00-ux-contract	discovery	Establish product roles outcomes and evidence constraints	00-ux-contract.md	UX PHASE 0
+01	01-interface-inventory	discovery	Inventory operator surfaces routes actions and vocabulary	01-domain/01-interface-inventory.md	UX PHASE 1A
+01	01-journey-portfolio	discovery	Infer and rank the end-user journey portfolio	01-domain/01-journey-portfolio.md	UX PHASE 1B
+02	02-journey-plan	synthesis	Define executable journey tasks fixtures and evaluation criteria	02-cross-cutting/02-journey-plan.md	UX PHASE 2
+03	03-primary-work	simulation	Execute critical frequent end-user journeys	01-domain/03-primary-work.md	UX PHASE 3A
+03	03-exceptions	simulation	Execute exception recovery and ambiguity journeys	01-domain/03-exceptions.md	UX PHASE 3B
+03	03-administration	simulation	Execute setup administration and handoff journeys	01-domain/03-administration.md	UX PHASE 3C
+04	04-evidence-review	adversarial	Evaluate recorded journeys from the end-user perspective	02-cross-cutting/04-evidence-review.md	UX PHASE 4
+05	05-ux-decision	final	Synthesize usability scorecard and remediation register	05-ux-scorecard.md	UX PHASE 5

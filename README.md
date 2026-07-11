@@ -1,6 +1,6 @@
 # lazy-vibe
 
-Agent-driven launch-readiness audit, remediation, and feature-build toolkit. `run-audit.sh`, `run-remediation.sh`, and `run-feature-build.sh` orchestrate multi-agent sessions that audit a codebase for launch readiness, catalogue and fix findings, and build approved feature specs through a task-isolated harness.
+Agent-driven launch-readiness, end-user journey, remediation, and feature-build toolkit. `run-audit.sh`, `run-ux-audit.sh`, `run-remediation.sh`, and `run-feature-build.sh` orchestrate bounded sessions that audit a product, catalogue and fix findings, and build approved feature specs through a task-isolated harness.
 
 Supports Codex CLI, Claude CLI, and Gemini CLI as agent backends. Profiles let you drop in product-specific job lists and prompts without modifying the scripts.
 
@@ -11,10 +11,12 @@ Supports Codex CLI, Claude CLI, and Gemini CLI as agent backends. Profiles let y
 ```
 lazy-vibe/
 ├── run-audit.sh                        # audit orchestrator
+├── run-ux-audit.sh                     # deployed end-user journey audit
 ├── run-remediation.sh                  # remediation orchestrator
 ├── run-feature-build.sh                # one-shot feature build orchestrator
-├── run-keystone-accounting-audit.sh     # fixed-domain GAAP/IFRS audit harness
-├── run-rmm-ops-automation-audit.sh      # fixed-domain RMM automation-chain audit harness
+├── run-<domain>-audit.sh                # optional fixed-domain audit wrappers
+│                                        # (thin wrappers around a domain skill;
+│                                        #  add your own per specialized domain)
 ├── claude_pty_runner.py                 # interactive Claude PTY transport used when claude -p is not viable
 ├── lazy_vibe/                          # Python workflow engines used by the shell entrypoints
 │   ├── audit/
@@ -30,6 +32,10 @@ lazy-vibe/
 ├── generic-shared.md                   # shared rules injected into every audit job
 ├── generic-jobs.tsv                    # default job manifest (used when no profile sets one)
 ├── generic-launch-readiness-audit-prompt.md
+├── generic-user-journey-audit-prompt.md
+├── generic-ux-jobs.tsv
+├── generic-ux-shared.md
+├── generic-ux-profile-template.md
 ├── generic-product-profile-template.md
 ├── tests/
 │   ├── run-audit-summary-fixtures.sh   # audit summary/remediation-context regression fixtures
@@ -39,6 +45,7 @@ lazy-vibe/
     └── <your-product>/
         ├── jobs.tsv          # optional — overrides generic-jobs.tsv
         ├── product-profile.md
+        ├── ux-profile.md     # optional — durable UX context, never click scripts
         └── shared.md         # optional — overrides generic-shared.md
 ```
 
@@ -53,9 +60,10 @@ The major harnesses are:
 | Harness | Entry point | Engine | Purpose |
 |---|---|---|---|
 | Launch-readiness audit | `run-audit.sh` | shell + native probes | Runs discovery, runtime, browser, adversarial, and final-decision jobs against a product profile. |
+| End-user journey audit | `run-ux-audit.sh` | shared audit orchestration + Playwright agents | Infers important work from product context, executes deployed journeys, independently evaluates evidence, and produces a UX scorecard and remediation register. |
 | Remediation | `run-remediation.sh` | shell state machine | Converts audit findings into blocker-ledger packets, plans implementation units, runs implementers/verifiers, drains safe queue actions, and writes summary/queue artifacts. |
 | Feature build | `run-feature-build.sh` | `lazy_vibe/feature_build/runner.py` | Decomposes an approved feature spec into tasks, creates a feature branch, runs task-scoped agents, verifies declared commands, commits by default, and optionally pushes/deploys. |
-| Fixed-domain audits | `run-keystone-accounting-audit.sh`, `run-rmm-ops-automation-audit.sh` | shell wrappers | Run one specialized prompt for a narrow domain when the full launch-readiness pipeline is too broad. |
+| Fixed-domain audits | optional `run-<domain>-audit.sh` wrappers | shell wrappers | Run one specialized prompt for a narrow domain (e.g. a regulated accounting or automation-chain audit) when the full launch-readiness pipeline is too broad. |
 | Committee loop | `commitee/agent_loop.py` | Python prototype | Experimental multi-agent deliberation harness using prompts and JSON schemas under `commitee/`. |
 
 The harness layer is responsible for deterministic behavior:
@@ -102,7 +110,41 @@ This is intentionally deterministic. The cataloger may merge or split blocker-le
 
 The feature-build phase reads an approved `docs/new-feature/<slug>.md` spec, asks a planner agent to decompose it into machine-readable tasks, creates or switches to `feature/<slug>` by default for execution, executes tasks with isolated prompts, verifies declared exit commands, auto-commits successful verified builds, and can push or deploy when explicitly requested.
 
-Feature-specific UX audit and feature remediation are not separate control planes. UX, accessibility, and browser proof belong in `run-audit.sh`; scorecard and finding remediation belongs in `run-remediation.sh`. Thin feature-scoped wrappers are acceptable, but the audit and remediation scripts own state, retries, model routing, evidence, and final verdicts.
+Launch browser proof and end-user usability answer different questions. `run-audit.sh` proves release readiness and basic browser health. `run-ux-audit.sh` separately tests whether target users can understand and complete real work without product-specific coaching. Both reuse the same orchestration, retries, checkpoints, integrity checks, model routing, and artifact conventions; remediation remains an explicitly authorized later step.
+
+## End-user journey audit
+
+The UX harness does not require a founder-authored script for every workflow. It combines the existing product profile with an optional, deliberately small `ux-profile.md`, then discovers routes, roles, domain objects, visible actions, and lifecycle transitions to infer a maximum of 12 high-value journeys.
+
+```bash
+cd /path/to/product
+/path/to/lazy-vibe/run-ux-audit.sh --profile myproduct
+```
+
+The audit runs six ordered phases:
+
+| Phase | Purpose |
+|---|---|
+| Contract | Establish roles, promised outcomes, safety boundaries, runtime target, and evidence availability. |
+| Discovery | Inventory actual UI surfaces and infer a ranked journey portfolio from business outcomes rather than pages. |
+| Planning | Turn journeys into role-based tasks with fixtures, completion oracles, and evidence checkpoints, without revealing click sequences. |
+| Execution | Run primary, exception/recovery, and administration/handoff tasks against the deployed product with Playwright. |
+| Independent review | Score screenshots and traces before consulting source code, including orientation, comprehension, effort, recovery, safety, and outcome confidence. |
+| Synthesis | Produce `05-ux-scorecard.md` and `artifacts/ux-remediation-register.tsv`, merging symptoms that share a workflow or information-model cause. |
+
+Execution evidence is lane-owned under `artifacts/<execution-job>/journeys/<journey-id>/`. Phase 2 allocates every journey to exactly one execution job; the launcher injects only that job's plan rows, validates its `journey-results.tsv`, rejects missing or foreign journeys and false PASS results, and builds `artifacts/journey-evidence-index.tsv` for independent review. Fixture and completion-oracle status are mandatory, so an empty-state walkthrough cannot masquerade as an executed lifecycle. Before any agents run, the harness resolves the product's installed Playwright version, installs its matching Chromium revision when needed, launches it outside the agent sandbox, probes the deployed entry point, and writes `artifacts/browser-preflight/{summary.md,summary.json,entry-page.png}`. A failed preflight stops the run before it spends agent time. Codex simulation jobs receive an official Playwright MCP server configured with that exact Chromium executable, the profile-designated secrets file, and a job-specific output directory. Non-interactive Codex requires `--dangerously-bypass-approvals-and-sandbox` to authorize external MCP calls; the wrapper applies it only to simulation jobs and the launcher enforces a repository snapshot around those jobs, failing any source-tree modification outside `RUN_DIR`. Discovery and evaluation remain sandboxed, browser-free, and read-only.
+
+Missing credentials, unavailable browsers, unsafe fixtures, and inaccessible roles are `UNVERIFIED`, never implicit passes. Audit agents may create uniquely prefixed reversible fixtures but cannot modify product code. The harness disables launch-security, dependency, load, Lighthouse, and generic E2E probes by default because those remain owned by `run-audit.sh`.
+
+Create the optional UX overlay only for context the harness cannot safely infer:
+
+```bash
+cp generic-ux-profile-template.md profiles/myproduct/ux-profile.md
+```
+
+Keep it to durable roles, non-negotiable outcomes, mutation safety boundaries, canonical product language, and unusual entry points. Do not encode routes, selectors, or expected clicks. `RUN_DIR`, `RUNNER`, model overrides, resume selectors, retries, and `AUDIT_RUNNER` work as they do for `run-audit.sh`.
+
+Set `UX_BROWSER_PREFLIGHT=0` only for prompt-only diagnostics; a real audit without preflight is invalid. Set `UX_BROWSER_AUTO_INSTALL=0` in a network-isolated environment only after provisioning the exact Chromium revision expected by the product's Playwright package. `UX_BROWSER_BASE_URL` overrides URL discovery from `AUDIT_BROWSER_BASE_URL`, `E2E_BASE_URL`, or `docs/ux/.creds`.
 
 Read-only audit jobs (`discovery`, `synthesis`, `web`, and dynamic `deep-*` jobs) diff against a pre-run repository snapshot. If one of those jobs edits product files, the launcher fails the job. On a clean repo it restores only the unexpected product-file changes; on a dirty repo it preserves the existing user diff and reports the integrity violation without reverting unrelated work.
 
@@ -122,7 +164,7 @@ The harness treats "good enough" as working, debuggable, documented, and maintai
 
 Verifier findings have dedicated categories for these gaps: `api_contract`, `boundary_tests`, `operability`, and `static_analysis`. Those categories flow back into the normal targeted-revision queue instead of becoming vague final-review advice.
 
-Harness health is treated the same way. `tests/run-audit-summary-fixtures.sh` verifies that audit summaries preserve source job metadata and classify failures into remediation-usable context such as browser evidence and missing output. `tests/run-feature-build-fixtures.sh` verifies that feature-build tasks cannot close without runnable verification commands and complete result artifacts. `tests/run-remediation-fixtures.sh` builds a temporary remediation ledger and verifies queue classification plus summary behavior for accepted units, evidence-pending units, API contract findings, boundary-test findings, operability findings, static-analysis findings, missing verifiers, stale verifier inputs, split child pending/decomposed states, split parents with blocked child units, postcheck-invalid worktree evidence, failed deterministic evidence, contract conflicts, test-harness blockers, and blocked units.
+Harness health is treated the same way. `tests/run-audit-summary-fixtures.sh` verifies that audit summaries preserve source job metadata and classify failures into remediation-usable context such as browser evidence and missing output. `tests/run-feature-build-fixtures.sh` verifies that feature-build tasks cannot close without runnable verification commands and complete result artifacts. `tests/run-remediation-fixtures.sh` builds a temporary remediation ledger and verifies queue classification plus summary behavior for accepted units, evidence-pending units, API contract findings, boundary-test findings, operability findings, static-analysis findings, missing verifiers, stale verifier inputs, split child pending/decomposed states, split parents with blocked child units, postcheck-invalid worktree evidence, failed deterministic evidence, contract conflicts, test-harness blockers, blocked units, accepted units carrying advisory P3/`scope_addition` rows, and scope-additions ledger generation in register-ingest format.
 
 ### What the audit relies on
 
@@ -469,7 +511,7 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_REVISION_MAX_PARALLEL` | `1` | Parallelism during revision rounds. |
 | `REMEDIATION_VERIFY_SCOPE` | — | `implementation` checks code/docs/tests; `launch` requires full proof. |
 | `REMEDIATION_COLLECT_EVIDENCE` | `1` | Automatically collect deterministic launch evidence after verification surfaces `launch_evidence` or `sandbox_blocked` findings. Set to `0` only to force a manual evidence pass. |
-| `REMEDIATION_EVIDENCE_MODE` | `targeted` | Evidence collection mode for browser/live proof. `targeted` exports `PORTAL_AUDIT_SKIP_RUNTIME_QUALITY=1` so proof-specific Playwright evidence is not failed by unrelated Lighthouse/runtime-quality gates. Use `full` when the evidence item is itself runtime quality. |
+| `REMEDIATION_EVIDENCE_MODE` | `targeted` | Evidence collection mode for browser/live proof. `targeted` skips unrelated Lighthouse/runtime-quality gates so proof-specific Playwright evidence is not failed by them. Use `full` when the evidence item is itself runtime quality. |
 | `REMEDIATION_EVIDENCE_MAX_ROUNDS` | `1` | Maximum collect-evidence then verify-only loops. |
 | `REMEDIATION_AUTO_RERUN_FINAL_REVIEW` | `1` | Rerun final review automatically when verifier inputs changed. |
 | `REMEDIATION_AUTO_VERIFY_MISSING` | `1` | During deterministic resume, run verifier agents for queue rows with missing or unreadable verifier artifacts. |
@@ -478,8 +520,9 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `REMEDIATION_STATIC_PRECHECKS` | `1` | Run deterministic static hygiene prechecks and include their output in verifier prompts. Profiles may add an executable `prechecks.sh`; the built-in scan flags obvious frontend inline-English JSX literals. |
 | `REMEDIATION_AUTO_DRAIN_QUEUE` | `1` | On a resumed remediation directory with no explicit phase, drain safe queue actions by default. Set `0` or pass `--no-drain-queue` for bookkeeping-only resume. |
 | `REMEDIATION_VERIFY_AFTER_EXECUTE` | `1` | Run verifiers automatically after an implementation wave. Set `0` or pass `--no-verify-after-execute` only for implementation-only artifact generation. |
-| `REMEDIATION_REQUIRE_BROWSER_DEPLOY` | `1` | For profiles that require VPS browser evidence, refuse Playwright/Lighthouse proof until the current code has been deployed or deployment is explicitly disabled. Meridian uses this to avoid stale VPS evidence. |
-| `REMEDIATION_AUTO_DEPLOY_BROWSER_VPS` | `0` | When set to `1`, allow the harness to run a product deploy command before VPS browser evidence. Meridian runs `scripts/deploy-runtime dev` and then marks browser evidence as deployment-ready for the current harness process. |
+| `REMEDIATION_REGISTER_TRIAGE` | `1` | When remediating from a register source, first triage the `new` backlog (verify each finding, then promote confirmed ones to `open`) before selecting the remediation set, so a two-step `run-audit -> run-remediation` flow is hands-off. Deterministic no-op when there are no `new` findings; best-effort (failure degrades to the prior `open`/`regressed`/`in_remediation`-only behavior). Set `0` or pass `--no-triage` to disable. |
+| `REMEDIATION_REQUIRE_BROWSER_DEPLOY` | `1` | For profiles that require remote/VPS browser evidence, refuse Playwright/Lighthouse proof until the current code has been deployed or deployment is explicitly disabled. Prevents stale remote evidence. |
+| `REMEDIATION_AUTO_DEPLOY_BROWSER_VPS` | `0` | When set to `1`, allow the harness to run the profile's deploy command before remote browser evidence, then mark browser evidence as deployment-ready for the current harness process. |
 | `REMEDIATION_VPS_DEPLOYED` | `0` | Set to `1` only after the relevant product code has been deployed to the VPS for the current run. Used when deployment was performed outside the harness. |
 | `REMEDIATION_RUN_GLOBAL_NATIVE_CHECKS` | `0` | Set to `1` to run profile-wide native checks such as full lint/build/test after each implementation unit. By default the remediation runner skips those broad commands so unrelated repo drift does not fail focused unit remediation. |
 | `REMEDIATION_ALLOW_LIVE_WORKSPACE_PARALLEL` | `0` | Set to `1` to preserve `MAX_PARALLEL` when `REPO_ROOT` is not a git root. This deliberately allows parallel units to edit the same live workspace without git worktree isolation. Use only when the remediation runner is the only writer. |
@@ -515,6 +558,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `--split-incomplete` | Detect and split oversized or incomplete units before re-running. |
 | `--no-catalog` | Skip the cataloger when `--execute` is set. |
 | `--force-catalog` | Run the cataloger even when an existing implementation-unit catalog is present. |
+| `--triage` | (Register source, default on.) Triage the `new` register backlog — verify each finding, then promote confirmed ones to `open` — before selecting the remediation set. Deterministic no-op when there are no `new` findings. |
+| `--no-triage` | Skip the triage stage; remediate only the already `open`/`regressed`/`in_remediation` register findings. |
 | `--dry-run` | Print the execution schedule without running agents. |
 | `--verbose` | Print log size and path after each unit completes. |
 | `--rules FILE` | Override the shared rules file. |
@@ -531,7 +576,8 @@ Reads a completed audit run, extracts findings into remediation packets, groups 
 | `packets/PX-*.md` | Remediation packets with status, scope, and work log. |
 | `artifacts/*-summary.md` | Post-implementation summaries (changed files, tests, docs, risks). |
 | `artifacts/verify-*.md` | Verifier decisions. |
-| `artifacts/verify-*-findings.tsv` | Structured verifier findings used as the narrow auto-revision contract. Accepted units may have only the header or launch/sandbox evidence rows. |
+| `artifacts/verify-*-findings.tsv` | Structured verifier findings used as the narrow auto-revision contract. Accepted units may have only the header, launch/sandbox evidence rows, `scope_addition` rows, or advisory P3 rows. |
+| `artifacts/scope-additions-ledger.tsv` | Verifier `scope_addition` findings (required work outside the assigned packet contract) collected in `register ingest` blocker-ledger format for routing into register triage. |
 | `05-verifier-findings.tsv` | Aggregate verifier findings across units. |
 | `06-run-summary.tsv` | Implementation and verifier decision summary by unit. |
 | `07-remediation-queue.tsv` | Triage queue that classifies units as accepted, targeted revision, contract conflict, test harness, split required, blocked, or not verified. |
@@ -549,13 +595,15 @@ Closure is verifier-derived, not packet-state-derived. A split parent is not con
 
 `--rerun-verifiers` is verifier-only when used by itself, but when it is combined with `--execute` it forces verifier reruns after the selected implementation pass. This is especially important with `--revise-existing`: selected units are implemented first, then their verifier artifacts are refreshed from the new active checkout.
 
-Browser evidence wrappers receive `PORTAL_AUDIT_RUN_DIR`, `PORTAL_AUDIT_JOB_ID`, `PORTAL_AUDIT_JOURNEY_SLUG`, `PORTAL_AUDIT_ARTIFACT_DIR`, and `PORTAL_AUDIT_EVIDENCE_MODE` during deterministic evidence collection. A PASS `summary.json` only counts as reusable evidence when every declared `proof_files[]` entry exists on disk; PASS without durable proof is classified as failed evidence. Queue generation also auto-resolves launch-evidence rows that explicitly depend on another `IU-*` once that target unit is accepted with no unresolved findings.
+Browser evidence wrappers receive the run dir, job id, journey slug, artifact dir, and evidence mode (as `*_RUN_DIR`, `*_JOB_ID`, `*_JOURNEY_SLUG`, `*_ARTIFACT_DIR`, `*_EVIDENCE_MODE` environment variables) during deterministic evidence collection. A PASS `summary.json` only counts as reusable evidence when every declared `proof_files[]` entry exists on disk; PASS without durable proof is classified as failed evidence. Queue generation also auto-resolves launch-evidence rows that explicitly depend on another implementation unit once that target unit is accepted with no unresolved findings.
 
-Meridian browser evidence has two extra harness contracts. First, dev VPS browser proof is split-subdomain: `E2E_BASE_URL` is the SPA host and `E2E_API_BASE` is the `api-*` host. The harness derives `E2E_API_BASE=https://api-$host` from a non-local `E2E_BASE_URL` when `api_url` is absent, and refuses same-host API proof for Meridian. Second, VPS Playwright evidence must run against deployed code. Run `scripts/deploy-runtime dev` before collecting Meridian browser proof, set `REMEDIATION_VPS_DEPLOYED=1` if deployment happened outside the harness, or set `REMEDIATION_AUTO_DEPLOY_BROWSER_VPS=1` to let the harness deploy before browser evidence.
+Profiles can declare extra browser-evidence contracts. Two common ones: (1) **split-subdomain proof** — when the SPA and API are on different hosts, set `E2E_BASE_URL` to the SPA host and `E2E_API_BASE` to the API host; the harness can derive `E2E_API_BASE=https://api-$host` from a non-local `E2E_BASE_URL` and refuse same-host API proof. (2) **deploy-before-proof** — remote Playwright evidence must run against deployed code, so run the profile's deploy command before collecting browser proof, set `REMEDIATION_VPS_DEPLOYED=1` if deployment happened outside the harness, or set `REMEDIATION_AUTO_DEPLOY_BROWSER_VPS=1` to let the harness deploy first.
 
 `03-implementation-units.tsv` is normalized before prompts are rebuilt. Each `unit_id` is an artifact identity and must appear once; when a coordinator emits repeated rows for the same unit, the runner merges the packet lists into one row before planning, implementation, and verification so agents do not overwrite the same prompt, log, summary, verifier, and checkpoint files.
 
 Resume safety is strict by design. If an existing remediation directory has packet files or unit packet IDs missing from `00-master-px-list.tsv`, the runner refuses to continue because resuming would skip real packet work. Rebuild the catalog with `REMEDIATION_REWRITE_PACKETS=1 REMEDIATION_REWRITE_WORKSTREAMS=1 REMEDIATION_REWRITE_UNITS=1 --force-catalog`, or restore the matching master inventory.
+
+Verifier severity and scope are calibrated to keep the auto-revise loop converging. Only P0/P1/P2 findings block implementation signoff; P3-only units are accepted with the P3 rows kept as advisory triage notes. Blocking findings must be traceable to the assigned packet contract (or a defect the implementation introduced); genuinely required work beyond that contract is recorded as `scope_addition`, does not block acceptance, and is aggregated into `artifacts/scope-additions-ledger.tsv` for `python3 -m lazy_vibe.register backfill` into register triage. Re-verification after a revision is scoped to the prior findings TSV plus regressions on the revised surfaces, so a fresh verifier sample cannot ratchet a unit with unrelated new findings unless they are P0/P1 or trust-boundary defects. A packet work log needs a truthful machine-readable `- Status:` line, but provenance or remaining-risk entries after it are valid content, not a finding.
 
 Oversized verifier revisions are split deterministically. When a verifier returns more than `REMEDIATION_MAX_AUTO_REVISE_FINDINGS` non-blocking findings for one parent unit, the runner creates bounded `IU-*-SNN` child packets from those verifier rows instead of revising the oversized parent directly or leaving it as manual-only. Blocking categories still stay manual: `contract_conflict`, true `test_harness`, `blocked`, and explicit `split_required` rows require contract/test-harness/split handling before automatic revision. Parent rows do not hide those blockers; unresolved child rows keep the parent open.
 
@@ -748,33 +796,22 @@ These are deliberate control-plane boundaries:
 - `run-audit.sh` owns launch-readiness audit, including UX/browser proof, accessibility, Lighthouse, route/nav/API wiring, dynamic deep-dive queue freshness, and final release decisions.
 - `run-remediation.sh` owns remediation, including scorecard/finding ingestion, verification-before-implementation, root-cause metadata, no-change fast paths, worktree promotion, scorecard rewrites, and final remediation queues.
 - `run-feature-build.sh` owns building from an approved spec, then calls audit/remediation control planes through post-build commands rather than duplicating their state machines.
-- Specialized harnesses are only justified where the domain has hard external rules and fixed evidence contracts. Current examples are Keystone GAAP/IFRS accounting audit and RMM ops automation chain audit.
+- Specialized harnesses are only justified where the domain has hard external rules and fixed evidence contracts (for example a regulated accounting audit with fixed GAAP/IFRS rules, or an automation-chain audit that must trace a fixed event graph).
 
 ## Specialized domain harnesses
 
-These are intentionally narrow wrappers around rich domain skills. They do not replace `run-audit.sh`; they exist where the audit domain has fixed external rules or fixed chain-tracing evidence that should not be diluted into a generic launch audit.
+These are intentionally narrow wrappers around a rich domain skill. They do not replace `run-audit.sh`; they exist where the audit domain has fixed external rules or fixed chain-tracing evidence that should not be diluted into a generic launch audit.
 
-### Keystone accounting audit
-
-```bash
-cd /home/pete/cadres/keystone
-REPO_ROOT=/home/pete/cadres/keystone \
-RUNNER=claude \
-/home/pete/cadres/shared/lazy-vibe/run-keystone-accounting-audit.sh
-```
-
-The wrapper loads `.claude/skills/keystone-accounting-audit/SKILL.md`, writes a fixed audit prompt under `RUN_DIR/prompts/`, and logs the agent run under `RUN_DIR/logs/`.
-
-### RMM ops automation audit
+To add one, create `run-<domain>-audit.sh` as a thin wrapper that:
 
 ```bash
-cd /home/pete/cadres/rmm
-REPO_ROOT=/home/pete/cadres/rmm \
+cd /path/to/repo
+REPO_ROOT=/path/to/repo \
 RUNNER=claude \
-/home/pete/cadres/shared/lazy-vibe/run-rmm-ops-automation-audit.sh
+/path/to/lazy-vibe/run-<domain>-audit.sh
 ```
 
-The wrapper loads `.claude/skills/spog-ops-auditor/SKILL.md`, preserving the automation-chain tracing model, gap taxonomy, and file:line evidence requirement.
+A wrapper loads a domain skill (e.g. `.claude/skills/<domain>-audit/SKILL.md`), writes a fixed audit prompt under `RUN_DIR/prompts/`, and logs the agent run under `RUN_DIR/logs/` — preserving that domain's evidence model, gap taxonomy, and `file:line` evidence requirement.
 
 ---
 
@@ -799,8 +836,8 @@ open`) is the run-over-run convergence metric. Dispositions: new findings are
 adjudicated once (open / false_positive / risk_accepted / parked) and that
 decision persists; `fixed` requires a linked regression test; reappearance of
 a fixed finding is flagged as a regression. `false_positive` and
-`risk_accepted` are protected — only Pete can reopen them, and risk
-acceptances carry a mandatory `review_by` date.
+`risk_accepted` are protected — only the human reviewer can reopen them, and
+risk acceptances carry a mandatory `review_by` date.
 
 Tests: `python3 -m pytest tests/register -v`
 
@@ -813,30 +850,39 @@ lists active risk acceptances and parked counts.
 Plan 2b adds the triage pipeline: `verify-packets` (write per-finding
 verification packets for `new` findings), `verify-consume` (fold
 schema-validated verifier results back — VERIFIED stays `new` for
-policy/Pete, UNSUPPORTED proposes `false_positive`, confirmed duplicates
+policy/human review, UNSUPPORTED proposes `false_positive`, confirmed duplicates
 absorb into the original, `split` queues a manual item), `triage` (apply
-`triage-policy.yaml`, render `triage-queue.md`, and walk it interactively as
-Pete — `--accept-all` for batch, `--render-only` to just regenerate the
-queue), and `close` (harness: `open`/`in_remediation` -> `fixed` with a
-linked regression test). `run-triage.sh` dispatches a verifier agent
-(`TRIAGE_AGENT`, default `claude`; `MAX_PARALLEL`, default 3) over the packets
-and consumes the results. It follows the same product-profile contract as
-audit/remediation: set `PROFILE=meridian` (or `PRODUCT_PROFILE=/path/to/product-profile.md`)
-and it reads the profile's `Repo root`, defaults the register to
+`triage-policy.yaml`, render `triage-queue.md`, and walk it interactively (or
+`--accept-all` for batch / `--render-only` to just regenerate the queue), and
+`close` (harness: `open`/`in_remediation` -> `fixed` with a linked regression
+test). `run-triage.sh` dispatches a verifier agent (`TRIAGE_AGENT`, default
+`claude`; `MAX_PARALLEL`, default 3) over the packets and consumes the results.
+It follows the same product-profile contract as audit/remediation: set
+`PROFILE=<your-product>` (or `PRODUCT_PROFILE=/path/to/product-profile.md`) and
+it reads the profile's `Repo root`, defaults the register to
 `<repo>/docs/audit/register` when `--register-dir` is omitted, and runs verifier
 agents from the product repo so bare evidence refs resolve against the right
-checkout. Policy auto-dispositions are stamped
-`policy:<rule-id>`; every Pete decision is stamped `pete`.
+checkout. Policy auto-dispositions are stamped `policy:<rule-id>`; every human
+decision is stamped as the reviewer.
 
-Plan 3 starts wiring remediation to the register. For register-enabled product
-repos, `run-remediation.sh` resolves the same `PROFILE`/`PRODUCT_PROFILE`
-contract, detects `docs/audit/register/register.jsonl`, and builds its packet
-inventory from `open` and `regressed` register entries instead of scraping
-historical audit prose. It writes `00-register-px-map.tsv` so the legacy
-`PX-*` packet runner remains stable while each packet stays bound to an
-authoritative `R-*` finding. When a verifier accepts a unit, the harness
-requires a `Regression test: path::test_name` line and closes the mapped
-register finding through `python3 -m lazy_vibe.register close`.
+Plan 3 wires remediation to the register end-to-end. For register-enabled
+product repos, `run-remediation.sh` resolves the same `PROFILE`/`PRODUCT_PROFILE`
+contract, detects `docs/audit/register/register.jsonl`, and — by default
+(`--no-triage` to disable) — **first triages the `new` backlog** before
+selecting work: it runs the verify stage (a verifier agent confirms each `new`
+finding is real vs `false_positive`) and then applies policy (`triage
+--accept-all`) to promote confirmed findings to `open`. It then builds its
+packet inventory from `open` and `regressed` register entries instead of
+scraping historical audit prose. This makes a two-step `run-audit ->
+run-remediation` flow hands-off: the audit ingests findings as `new`,
+remediation triages and fixes them in one command. The triage stage is a
+deterministic no-op when there are no `new` findings (no wasted tokens) and is
+best-effort (any failure degrades to the prior `open`/`regressed`-only
+behavior). Remediation writes `00-register-px-map.tsv` so the legacy `PX-*`
+packet runner remains stable while each packet stays bound to an authoritative
+`R-*` finding. When a verifier accepts a unit, the harness requires a
+`Regression test: path::test_name` line and closes the mapped register finding
+through `python3 -m lazy_vibe.register close`.
 
 `run-audit.sh` also has a post-summary register hook. It generates
 `RUN_DIR/00-blocker-ledger.tsv` from non-pass audit summary rows plus job

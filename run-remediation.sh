@@ -613,7 +613,9 @@ verifier_findings_exceed_auto_revise_limit() {
   local findings="$1"
   [[ -s "$findings" ]] || return 1
   awk -F '\t' -v max="$MAX_AUTO_REVISE_FINDINGS" '
-    NR > 1 && $1 != "" {
+    NR > 1 && $1 != "" &&
+    $3 != "launch_evidence" && $3 != "sandbox_blocked" &&
+    $3 != "scope_addition" && $2 != "P3" {
       count += 1
     }
     END { exit count > max ? 0 : 1 }
@@ -643,6 +645,50 @@ aggregate_verifier_findings() {
         tail -n +2 "$file"
       done >> "$tmp"
   mv "$tmp" "$aggregate"
+  aggregate_scope_addition_findings
+}
+
+scope_additions_ledger_file() {
+  printf '%s/artifacts/scope-additions-ledger.tsv\n' "$REMEDIATION_DIR"
+}
+
+# Collect verifier scope_addition rows into a blocker-ledger TSV in the exact
+# header format `python3 -m lazy_vibe.register ingest/backfill` consumes, so
+# work the verifier judged genuinely required but outside the assigned packet
+# contract lands in register triage as new candidate findings instead of
+# blocking or silently vanishing.
+aggregate_scope_addition_findings() {
+  local aggregate ledger
+  aggregate="$(aggregate_verifier_findings_tsv)"
+  ledger="$(scope_additions_ledger_file)"
+  [[ -s "$aggregate" ]] || { rm -f "$ledger"; return 0; }
+  local tmp
+  tmp="$(mktemp)"
+  printf 'blocker_id\tcategory\ttheme\tseverity\tgroup\tmodel_class\tfinding_count\trepresentative_source\trepresentative_line\trepresentative_title\traw_px_ids\treferences\n' > "$tmp"
+  awk -F '\t' -v OFS='\t' -v units="$UNITS_TSV" '
+    BEGIN {
+      while ((getline line < units) > 0) {
+        n = split(line, f, "\t")
+        if (n < 4 || f[1] == "unit_id") continue
+        grp[f[1]] = f[3]; cls[f[1]] = f[4]; pkts[f[1]] = f[2]
+      }
+      close(units)
+    }
+    NR > 1 && $1 != "" && $3 == "scope_addition" {
+      seq[$1] += 1
+      sev = ($2 ~ /^P[0-3]$/) ? $2 : "P2"
+      title = $6; gsub(/\t/, " ", title)
+      refs = $7; gsub(/\t/, " ", refs)
+      print "SCOPE-" $1 "-" seq[$1], "scope_addition", "verifier-scope-addition", sev, \
+        (grp[$1] != "" ? grp[$1] : "unassigned"), (cls[$1] != "" ? cls[$1] : "standard"), 1, \
+        $4, ($5 != "" ? $5 : "-"), title, (pkts[$1] != "" ? pkts[$1] : "-"), refs
+    }
+  ' "$aggregate" >> "$tmp"
+  if [[ "$(wc -l <"$tmp")" -gt 1 ]]; then
+    mv "$tmp" "$ledger"
+  else
+    rm -f "$tmp" "$ledger"
+  fi
 }
 
 
@@ -1082,7 +1128,8 @@ verifier_has_only_launch_evidence_findings() {
   awk -F '\t' '
     NR > 1 && $1 != "" {
       count += 1
-      if ($3 != "launch_evidence" && $3 != "sandbox_blocked") {
+      if ($3 != "launch_evidence" && $3 != "sandbox_blocked" &&
+          $3 != "scope_addition" && $2 != "P3") {
         blocked = 1
       }
     }
@@ -1108,6 +1155,7 @@ verifier_has_only_coordinator_or_evidence_findings() {
       if (!coordinator_blocked &&
           $3 != "launch_evidence" &&
           $3 != "sandbox_blocked" &&
+          $3 != "scope_addition" &&
           $3 != "docs/process" &&
           $3 != "process" &&
           $3 != "packet_status" &&
@@ -1131,7 +1179,8 @@ verifier_has_only_remediation_metadata_findings() {
       type = $3
       file = $4
       details = tolower($4 " " $6 " " $7)
-      if (type == "launch_evidence" || type == "sandbox_blocked") {
+      if (type == "launch_evidence" || type == "sandbox_blocked" ||
+          type == "scope_addition") {
         next
       }
       remediation_file = 0
@@ -2251,12 +2300,12 @@ select_model() {
     return
   fi
   case "$class" in
-    coordinator) printf '%s\n' "${CODEX_MODEL_COORDINATOR:-gpt-5.5}" ;;
-    planner) printf '%s\n' "${CODEX_MODEL_PLANNER:-gpt-5.5}" ;;
-    verifier) printf '%s\n' "${CODEX_MODEL_VERIFIER:-gpt-5.5}" ;;
-    reviewer) printf '%s\n' "${CODEX_MODEL_REVIEWER:-gpt-5.5}" ;;
-    high-risk) printf '%s\n' "${CODEX_MODEL_HIGH_RISK:-gpt-5.5}" ;;
-    *) printf '%s\n' "${CODEX_MODEL_STANDARD:-gpt-5.4}" ;;
+    coordinator) printf '%s\n' "${CODEX_MODEL_COORDINATOR:-gpt-5.6-sol}" ;;
+    planner) printf '%s\n' "${CODEX_MODEL_PLANNER:-gpt-5.6-sol}" ;;
+    verifier) printf '%s\n' "${CODEX_MODEL_VERIFIER:-gpt-5.6-sol}" ;;
+    reviewer) printf '%s\n' "${CODEX_MODEL_REVIEWER:-gpt-5.6-sol}" ;;
+    high-risk) printf '%s\n' "${CODEX_MODEL_HIGH_RISK:-gpt-5.6-sol}" ;;
+    *) printf '%s\n' "${CODEX_MODEL_STANDARD:-gpt-5.6-terra}" ;;
   esac
 }
 
@@ -2963,7 +3012,13 @@ with register_jsonl.open() as fh:
             finding = json.loads(line)
         except json.JSONDecodeError as exc:
             raise SystemExit(f"corrupt register line {lineno}: {exc}") from exc
-        if finding.get("disposition") in {"open", "regressed"}:
+        # in_remediation is included deliberately: cataloging happens before
+        # this run starts any unit, so an in_remediation row at catalog time
+        # is an orphan left behind by a prior aborted/incomplete run. Without
+        # this, such findings become permanently invisible to remediation
+        # (observed: 16 findings stranded by an aborted run were skipped by
+        # every subsequent catalog).
+        if finding.get("disposition") in {"open", "regressed", "in_remediation"}:
             findings.append(finding)
 
 findings.sort(key=lambda f: (
@@ -5000,6 +5055,8 @@ decompose_oversized_verifier_findings() {
       NR > 1 && $1 != "" &&
       $3 != "launch_evidence" &&
       $3 != "sandbox_blocked" &&
+      $3 != "scope_addition" &&
+      $2 != "P3" &&
       $3 != "coordinator_cleanup" &&
       $3 != "packet_metadata" &&
       $3 != "process_metadata" {
@@ -5183,7 +5240,7 @@ For all other packets, still check whether the fix supersedes an older implement
 Own this implementation unit end to end:
 
 1. Implement the remediation for the assigned packets.
-2. Update each packet's \`## Work Log\` with a machine-readable status line as the final entry:
+2. Update each packet's \`## Work Log\` with a machine-readable status line:
    - \`- Status: \`complete\`\` — packet fully implemented, tests pass, docs updated.
    - \`- Status: \`partial\`\` — implementation started but not finished; describe what remains.
    - \`- Status: \`blocked\`\` — cannot proceed; describe the blocker.
@@ -5243,6 +5300,26 @@ Treat the prior \`accept\` / \`fixed\` decision as invalid. On this retry, accep
 EOF
 )"
   fi
+  local reverify_block=""
+  if [[ "$REVISE_EXISTING" == "1" && "$(verifier_findings_count "$findings_tsv")" != "0" ]]; then
+    reverify_block="$(cat <<EOF
+
+### Re-verification Scope
+
+This unit was already verified once and revised against the findings below. This round is a re-verification, not a fresh full audit:
+
+1. Confirm each prior finding is resolved, and truthfully report any that still fail.
+2. Check the surfaces changed by the revision for regressions and new defects.
+3. Do not raise new blocking findings on surfaces the revision did not change and the prior round already inspected, unless the new finding is P0/P1 or a trust-boundary/security defect. Record other newly noticed work as \`scope_addition\` or advisory-P3 rows instead of blocking rows.
+
+Prior verifier findings for this unit:
+
+\`\`\`tsv
+$(cat "$findings_tsv" 2>/dev/null || true)
+\`\`\`
+EOF
+)"
+  fi
 
   cat > "$prompt" <<PROMPT
 # Remediation Verification: $unit_id
@@ -5298,6 +5375,7 @@ All implementation signoff must be verified against the active checkout rooted a
 Before accepting, run or report active-checkout probes for the claimed changed surfaces, for example \`git -C $REPO_ROOT status --short --branch\`, \`git -C $REPO_ROOT/backend status --short --branch\` when backend is involved, and file existence/search commands from the active checkout. For nested git roots, the active branch/HEAD matters; a top-level gitlink or separate remediation worktree branch is not enough.
 
 $postcheck_retry_block
+$reverify_block
 
 When scope is \`implementation\`, answer the question: "Did the implementation fix the code/docs/tests for this packet, and do the implementation owner and verifier agree the packet is code-complete?" Do not run sandbox-sensitive PostgreSQL suites, live VPS checks, browser/E2E launch proof, or external integration proof unless they are explicitly known to be stable in this environment. Missing launch-readiness reruns, live VPS/browser proof, external IdP/relying-party proof, and PostgreSQL checks that cannot run in this sandbox must be recorded as \`launch-evidence-pending\` or \`sandbox-blocked\`, not as implementation failure. Still block implementation signoff for stale active tests, docs contradictions, unrun runnable local tests, failing runnable local tests, incomplete code, unsupported claims, or missing required success/failure test coverage.
 
@@ -5306,7 +5384,7 @@ When scope is \`launch\`, require full launch evidence and block on missing live
 This verifier is intentionally independent from the implementation workstream and may run on a different provider/model through \`VERIFICATION_RUNNER\`. Use strict evidence discipline:
 
 1. Verify every assigned P0/P1 packet, and sample P2 packets when present.
-2. Check that each packet's work log contains a machine-readable \`- Status: \`complete\`\` (or \`partial\`/\`blocked\`) line as its final entry, and that the stated status is truthful. A packet missing this line or still reading \`not-started\` is incomplete regardless of the implementation summary.
+2. Check that each packet's work log contains a machine-readable \`- Status: \`complete\`\` (or \`partial\`/\`blocked\`) line, and that the stated status is truthful. Provenance, verification, assignment, or remaining-risk entries before or after the status line are valid work-log content, not a finding. A packet missing this line or still reading \`not-started\` is incomplete regardless of the implementation summary.
 3. Check that each packet's work log truthfully states files changed, docs updated, verification run, and remaining risk.
 4. Open cited audit sources, changed code, changed tests, and changed docs. Confirm the fix addresses the actual finding, not just the symptom.
 5. Confirm docs were updated in the product-profile documentation locations where behavior, contracts, workflows, controls, or customer guidance changed.
@@ -5326,6 +5404,8 @@ This verifier is intentionally independent from the implementation workstream an
 17. If the blocker is a flaky, timing-sensitive, performance, environment-ordering, or broad harness issue, classify it as \`test_harness\` and specify the exact targeted command or human decision required. Do not demand repeated full-suite execution from the auto-revise loop.
 18. Do not reopen an already closed packet solely because the original audit text still exists or because launch evidence is pending under implementation scope. Reopen it only when current code/docs/tests/work-log evidence contradicts the claimed closure, a focused runnable implementation gate fails, a standards violation exists on the changed surface, or a required implementation artifact is missing.
 19. If the unit requires more than \`$MAX_AUTO_REVISE_FINDINGS\` independent code/docs/test fixes, or the findings span unrelated product areas that should not be revised as one change, classify the excess as \`split_required\` and use \`Decision: stop\` / \`Implementation decision: blocked\`.
+20. Severity calibration: only P0, P1, and P2 findings block implementation signoff. If every unresolved finding is P3 (or \`launch_evidence\` / \`sandbox_blocked\` / \`scope_addition\`), write \`Decision: accept\` and \`Implementation decision: fixed\`, and keep the P3 rows in the findings TSV as advisory rows for register triage. Do not inflate a P3 polish/consistency finding to P2 to force a revision.
+21. Scope discipline: every blocking finding's \`required_fix\` must be traceable to an assigned packet's stated finding/required fix, or to a defect introduced or directly touched by this implementation. If genuinely required product work exceeds that contract — new capabilities, endpoints, protocol features, workflows, or hardening the assigned packets never contracted — record it as \`type=scope_addition\` instead of \`code\`/\`tests\`/\`docs\`, citing the packet gap. \`scope_addition\` rows do not block acceptance; the harness routes them to the register triage queue as new candidate findings.
 
 Write \`$REMEDIATION_DIR/artifacts/verify-$unit_id.md\` with:
 
@@ -5365,9 +5445,10 @@ Use one row per unresolved verifier finding. Valid \`type\` values:
 - \`launch_evidence\` — launch proof pending but implementation is otherwise fixed.
 - \`sandbox_blocked\` — evidence cannot run in this environment.
 - \`split_required\` — too many independent findings or unrelated product areas for safe automatic revision.
+- \`scope_addition\` — genuinely required product work that exceeds the assigned packets' contract (new capability, endpoint, feature, workflow, or hardening the packets did not require). Non-blocking; routed to the register triage queue as a new candidate finding.
 - \`blocked\` — cannot proceed without external dependency, access, or human input.
 
-For \`accept\` / \`fixed\`, write only the header or only \`launch_evidence\` / \`sandbox_blocked\` rows. Do not include \`contract_conflict\`, \`test_harness\`, \`split_required\`, or \`blocked\` rows on an accepted implementation.
+For \`accept\` / \`fixed\`, write only the header or only \`launch_evidence\` / \`sandbox_blocked\` / \`scope_addition\` / advisory-P3 rows. Do not include \`contract_conflict\`, \`test_harness\`, \`split_required\`, or \`blocked\` rows on an accepted implementation.
 
 ## Native Test Results
 The harness executed the selected supported verification commands natively. Do NOT run the same commands again unless the log shows they were missing or could not start. Evaluate this output:
@@ -6339,13 +6420,33 @@ commit_baseline_dir_for_unit() {
   printf '%s/commit-baselines/%s\n' "$REMEDIATION_DIR/artifacts" "$1"
 }
 
-git_root_remediation_pathspec_args() {
-  local root="$1" rel_rdir
+workspace_root_relative_audit_area() {
+  local root="$1" rel_rdir parent
   rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
   [[ -n "$rel_rdir" ]] || return 1
-  printf '%s\n' "$rel_rdir"
-  printf ':(exclude)%s/worktrees\n' "$rel_rdir"
-  printf ':(exclude)%s/worktrees/**\n' "$rel_rdir"
+  parent="$(dirname "$rel_rdir")"
+  [[ -n "$parent" && "$parent" != "." && "$parent" != "/" ]] || return 1
+  printf '%s\n' "$parent"
+}
+
+git_root_remediation_pathspec_args() {
+  local root="$1" rel_rdir area
+  rel_rdir="$(workspace_root_relative_remediation_dir "$root")"
+  [[ -n "$rel_rdir" ]] || return 1
+  # Checkpoint the whole audit-state area (the parent of the active run dir),
+  # not only the active run. Stale sibling run dirs and register mutations are
+  # harness state; leaving them uncommitted trips the product-clean merge
+  # guard and refuses the next implementation wave. Worktrees under any run
+  # dir stay excluded — they are scratch checkouts, never committable.
+  if area="$(workspace_root_relative_audit_area "$root")"; then
+    printf '%s\n' "$area"
+    printf ':(exclude,glob)%s/**/worktrees\n' "$area"
+    printf ':(exclude,glob)%s/**/worktrees/**\n' "$area"
+  else
+    printf '%s\n' "$rel_rdir"
+    printf ':(exclude)%s/worktrees\n' "$rel_rdir"
+    printf ':(exclude)%s/worktrees/**\n' "$rel_rdir"
+  fi
 }
 
 checkpoint_remediation_run_state_for_root() {
@@ -9986,6 +10087,18 @@ write_run_summary() {
       }
     ' "$summary"
   fi
+  local scope_ledger
+  scope_ledger="$(scope_additions_ledger_file)"
+  if [[ -s "$scope_ledger" ]]; then
+    local scope_rows
+    scope_rows="$(($(wc -l <"$scope_ledger") - 1))"
+    printf 'Scope additions: %d verifier-identified out-of-contract findings collected in %s\n' \
+      "$scope_rows" "$scope_ledger"
+    if [[ -n "${REGISTER_DIR:-}" ]]; then
+      printf '  Route to register triage with: python3 -m lazy_vibe.register backfill --register-dir %s --ledger %s --run-id %s\n' \
+        "$REGISTER_DIR" "$scope_ledger" "$(basename "$REMEDIATION_DIR")"
+    fi
+  fi
   printf 'Summary: %s\n' "$summary"
   printf '==========================================\n'
 }
@@ -10005,7 +10118,13 @@ unit_is_plain_accepted() {
   verifier_accepts_unit "$unit_id" || return 1
   unit_evidence_has_failed_status "$unit_id" && return 1
   findings="$(verifier_findings_tsv_for_unit "$unit_id")"
-  [[ "$(verifier_findings_count "$findings")" == "0" ]]
+  [[ -s "$findings" ]] || return 0
+  # Advisory rows (scope_addition, P3) do not disqualify plain acceptance;
+  # any launch-evidence or blocking row does.
+  awk -F '\t' '
+    NR > 1 && $1 != "" && $3 != "scope_addition" && $2 != "P3" { found = 1 }
+    END { exit found ? 1 : 0 }
+  ' "$findings"
 }
 
 finding_resolved_by_accepted_dependency() {
@@ -10062,7 +10181,8 @@ verifier_has_non_evidence_findings() {
   local findings="$1"
   [[ -s "$findings" ]] || return 1
   awk -F '\t' '
-    NR > 1 && $1 != "" && $3 != "launch_evidence" && $3 != "sandbox_blocked" {
+    NR > 1 && $1 != "" && $3 != "launch_evidence" && $3 != "sandbox_blocked" &&
+    $3 != "scope_addition" && $2 != "P3" {
       found = 1
     }
     END { exit found ? 0 : 1 }

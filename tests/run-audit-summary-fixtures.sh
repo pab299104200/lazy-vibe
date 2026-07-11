@@ -46,12 +46,14 @@ group	job_id	kind	title	output	ref
 02	02a-browser	runtime	Browser workflow	02-runtime/02a-browser.md	PHASE 2A
 03	03a-contract	discovery	API contracts	03-contract/03a-contract.md	PHASE 3A
 04	04a-openapi	discovery	OpenAPI contract	04-contract/04a-openapi.md	PHASE 4A
+05	05a-cli-error	simulation	CLI failure	05-runtime/05a-cli-error.md	PHASE 5A
 EOF
 
 cat > "$checkpoint" <<'EOF'
 01a-auth
 02a-browser
 04a-openapi
+05a-cli-error
 EOF
 
 cat > "$run_dir/logs/01a-auth.log" <<'EOF'
@@ -63,8 +65,8 @@ RESULT: INCOMPLETE
 Playwright browser proof failed with 401 from /auth/session.
 EOF
 
-mkdir -p "$run_dir/artifacts/02-runtime"
-cat > "$run_dir/artifacts/02-runtime/02a-browser.md" <<'EOF'
+mkdir -p "$run_dir/02-runtime"
+cat > "$run_dir/02-runtime/02a-browser.md" <<'EOF'
 # Browser workflow
 
 RESULT: INCOMPLETE
@@ -86,8 +88,14 @@ RESULT: INCOMPLETE
 OpenAPI request schema and response schema docs do not match the route contract.
 EOF
 
-mkdir -p "$run_dir/artifacts/04-contract"
-cat > "$run_dir/artifacts/04-contract/04a-openapi.md" <<'EOF'
+cat > "$run_dir/logs/05a-cli-error.log" <<'EOF'
+error: the argument '--full-auto' cannot be used with '--dangerously-bypass-approvals-and-sandbox'
+
+Usage: codex exec [OPTIONS] [PROMPT]
+EOF
+
+mkdir -p "$run_dir/04-contract"
+cat > "$run_dir/04-contract/04a-openapi.md" <<'EOF'
 # OpenAPI contract
 
 RESULT: INCOMPLETE
@@ -112,6 +120,7 @@ header="$(head -1 "$summary")"
 assert_tsv_field "$summary" 01a-auth result PASS
 assert_tsv_field "$summary" 02a-browser result INCOMPLETE
 assert_tsv_field "$summary" 02a-browser group 02
+assert_tsv_field "$summary" 05a-cli-error result FAIL
 grep -q 'class=runtime_or_browser_evidence' "$summary" || fail "browser remediation class missing"
 grep -q 'class=api_contract' "$summary" || fail "OpenAPI/API contract remediation class missing"
 grep -q 'native_artifacts=' "$summary" || fail "native artifact context missing"
@@ -131,11 +140,11 @@ EOF
 cat > "$audit_run/completed-jobs.txt" <<'EOF'
 01a-tenant
 EOF
-mkdir -p "$audit_run/logs" "$audit_run/artifacts/01-domain"
+mkdir -p "$audit_run/logs" "$audit_run/01-domain"
 cat > "$audit_run/logs/01a-tenant.log" <<'EOF'
 RESULT: INCOMPLETE
 EOF
-cat > "$audit_run/artifacts/01-domain/01a-tenant.md" <<'EOF'
+cat > "$audit_run/01-domain/01a-tenant.md" <<'EOF'
 # P1 Tenant data is not scoped
 
 RESULT: INCOMPLETE
