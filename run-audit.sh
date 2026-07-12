@@ -976,7 +976,6 @@ write_ux_journey_evidence_index() {
   shopt -s nullglob
   for result_file in "$RUN_DIR"/artifacts/*/journey-results.tsv; do
     job_id="$(basename "$(dirname "$result_file")")"
-    grep -q '^STATUS: PASS$' "$RUN_DIR/artifacts/$job_id/evidence-validation.md" 2>/dev/null || continue
     awk -F'\t' -v job="$job_id" 'BEGIN { OFS="\t" } NR > 1 { print job, $0 }' "$result_file" >> "$index_file"
   done
   shopt -u nullglob

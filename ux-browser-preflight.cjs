@@ -145,6 +145,16 @@ async function main() {
       throttle.path = new URL(browserResponse.url()).pathname;
       throttle.retryAfter = Number.parseInt(browserResponse.headers()['retry-after'] || '0', 10) || 0;
     });
+    const portalUrl = process.env.UX_AUTH_PORTAL_URL;
+    if (portalUrl && (credentials.email || credentials.username)) {
+      const portalLoginUrl = `${portalUrl.replace(/\/$/, '')}/login`;
+      await page.goto(portalLoginUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      const portalAuthenticated = await authenticate(page, credentials, throttle);
+      if (!portalAuthenticated) {
+        throw new Error(`Configured Portal fixture credentials could not reach a login form at ${portalLoginUrl}.`);
+      }
+      details.push('Portal fixture session was authenticated for disposable tenant and identity provisioning.');
+    }
     const response = await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.screenshot({ path: path.join(outDir, 'entry-page.png'), fullPage: true });
     const status = response ? response.status() : 0;

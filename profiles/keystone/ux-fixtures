@@ -7,12 +7,12 @@ run_dir="${3:?missing run dir}"
 plan_file="${4:-}"
 manifest_file="${5:?missing manifest file}"
 fixture_dir="$run_dir/artifacts/ux-fixtures"
-upload_file="$fixture_dir/keystone-audit-evidence.txt"
+upload_file="$fixture_dir/keystone-audit-evidence.png"
 
 case "$action" in
   describe|prepare)
     mkdir -p "$fixture_dir"
-    printf 'Keystone UX audit evidence fixture\nRun: %s\n' "$(basename "$run_dir")" > "$upload_file"
+    printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$upload_file"
     cat > "$manifest_file" <<MANIFEST
 # UX Fixture Manifest
 

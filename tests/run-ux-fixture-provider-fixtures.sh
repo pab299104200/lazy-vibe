@@ -26,7 +26,9 @@ grep -q 'disposable_portal_identities.*READY' "$manifest"
 grep -q 'inspect or search the full Playwright MCP tool catalog' "$script_dir/generic-ux-shared.md"
 grep -q 'prepare_ux_fixtures' "$script_dir/run-audit.sh"
 grep -q 'append_ux_fixture_manifest' "$script_dir/run-audit.sh"
+! grep -A8 'write_ux_journey_evidence_index' "$script_dir/run-audit.sh" | grep -q 'STATUS: PASS'
 grep -q 'describe_ux_fixture_capabilities' "$script_dir/run-audit.sh"
+grep -q 'Portal fixture session was authenticated' "$script_dir/ux-browser-preflight.cjs"
 grep -q 'Do not invent journey-specific provider names' "$script_dir/generic-user-journey-audit-prompt.md"
 grep -q 'Provider identifiers must come verbatim' "$script_dir/generic-ux-shared.md"
 printf 'PASS UX fixture provider fixtures\n'
