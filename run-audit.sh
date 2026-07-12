@@ -648,7 +648,10 @@ audit_ensure_playwright_chromium() {
 audit_runner_unavailable_log() {
   local log_file="$1"
   [[ -f "$log_file" ]] || return 1
-  grep -qiE 'rate limit|too many requests|temporarily unavailable|service unavailable|overloaded|quota exceeded|authentication failed|invalid api key|api[[:space:]_-]*(error|unavailable)|claude.*(down|unavailable|overloaded)|anthropic.*(down|unavailable|overloaded)|HTTP[[:space:]]*(429|503)|(^|[^0-9])(429|503)([^0-9]|$)' "$log_file"
+  # Runner outages must be attributed to the runner itself. Product responses,
+  # browser console output, and the auditor's narrative routinely contain 429,
+  # 503, and "authentication failed" while documenting valid UX findings.
+  grep -qiE '(codex|claude|anthropic|openai|audit runner|runner api).*(rate limit|too many requests|temporarily unavailable|service unavailable|overloaded|quota exceeded|authentication failed|invalid api key|api[[:space:]_-]*(error|unavailable)|HTTP[[:space:]]*(429|503))|(rate limit|too many requests|quota exceeded|invalid api key).*(codex|claude|anthropic|openai|audit runner|runner api)' "$log_file"
 }
 
 FROM_GROUP=""
@@ -821,9 +824,6 @@ with plan_file.open(newline="", encoding="utf-8") as handle:
     rows = list(reader)
 if not rows:
     raise SystemExit("UX journey plan has no journeys")
-if len(rows) > 12:
-    raise SystemExit(f"UX journey plan exceeds the 12-journey cap: {len(rows)}")
-
 seen = set()
 for row in rows:
     journey_id = row["journey_id"].strip()
@@ -1383,14 +1383,29 @@ args = [
     "1440x1000",
 ]
 credentials = Path(repo_root) / "docs" / "ux" / ".creds"
-if credentials.is_file():
+actor_by_job = {
+    "03-primary-work": "tenant_admin",
+    "03-exceptions": "operator",
+    "03-administration": "reviewer",
+}
+actor = actor_by_job.get(job_id)
+actor_state = Path(run_dir) / "artifacts" / "ux-fixtures" / f"auth-state-{actor}.json" if actor else None
+actor_init = Path(run_dir) / "artifacts" / "ux-fixtures" / f"init-page-{actor}.ts" if actor else None
+storage_state = actor_state if actor_state and actor_state.is_file() else Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
+if storage_state.is_file():
+    # Playwright MCP documents storage state for isolated sessions using the
+    # single --storage-state=<path> form. Keep it one argv item so Codex's
+    # TOML/JSON config transport cannot detach the value from the option.
+    args.append(f"--storage-state={storage_state}")
+if actor_init and actor_init.is_file():
+    # Portal binds sessions to browser/device posture. The actor init page
+    # performs a real Chromium login without exposing credentials to the agent.
+    args.append(f"--init-page={actor_init}")
+if credentials.is_file() and not (actor_state and actor_state.is_file()):
     args.extend(["--secrets", str(credentials)])
     auth_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.ts")
     if auth_initializer.is_file():
         args.extend(["--init-page", str(auth_initializer)])
-    storage_state = Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
-    if storage_state.is_file():
-        args.extend(["--storage-state", str(storage_state)])
 print(json.dumps(args))
 PY
 }

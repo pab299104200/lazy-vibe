@@ -2,60 +2,134 @@
 set -euo pipefail
 
 action="${1:?missing action}"
-repo_root="${2:?missing repo root}"
+_repo_root="${2:?missing repo root}"
 run_dir="${3:?missing run dir}"
-plan_file="${4:-}"
-manifest_file="${5:?missing fixture manifest}"
+_plan_file="${4:-}"
+manifest_file="${5:?missing manifest file}"
+: "$_repo_root" "$_plan_file"
 fixture_dir="$run_dir/artifacts/ux-fixtures"
-upload_file="$fixture_dir/portal-audit-evidence.png"
+migration_csv="$fixture_dir/portal-ux-audit-users.csv"
+prepared_json="$fixture_dir/prepared-fixtures.json"
+prefix="ux-audit-$(basename "$run_dir" | tr -cd '[:alnum:]-')"
 
-if [[ "$repo_root" != "/home/pete/cadres/portal" ]]; then
-  printf 'Portal UX fixture provider received unexpected repo root: %s\n' "$repo_root" >&2
-  exit 2
-fi
-if [[ "$action" == "prepare" && ! -s "$plan_file" ]]; then
-  printf 'Portal UX fixture provider requires a non-empty journey plan: %s\n' "$plan_file" >&2
-  exit 2
-fi
+write_manifest() {
+  mkdir -p "$fixture_dir"
+  cat > "$migration_csv" <<CSV
+email,display_name
+${prefix}-employee@example.test,UX Audit Employee
+${prefix}-reviewer@example.test,UX Audit Reviewer
+CSV
+  cat > "$manifest_file" <<MANIFEST
+# UX Fixture Manifest
 
-case "$action" in
-  describe|prepare)
-    mkdir -p "$fixture_dir"
-    if [[ "$action" == "prepare" ]]; then
-      printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$upload_file"
-    fi
-    cat > "$manifest_file" <<MANIFEST
-# Portal UX Fixture Manifest
+STATUS: PROVISIONABLE
+
+## Ready capabilities
+
+- authenticated_global_identity: READY
+  - Credentials are supplied through docs/ux/.creds and must never be copied into evidence.
+  - This identity remains one global Portal user across every membership or grant-backed context.
+- browser_record_creation: READY
+  - Create only records prefixed ${prefix} through the deployed Portal UI.
+  - The browser journey owns cleanup and must not alter existing tenants, users, groups, roles, applications, grants, or integrations.
+- resettable_customer_tenant: READY_AFTER_PREPARE
+  - The provider creates an isolated customer tenant through the supported operator API as test infrastructure, not as a Portal operator UX journey.
+- role_context_matrix: READY_AFTER_PREPARE
+  - The provider creates distinct global tenant-admin, requester, approver, and reviewer identities plus the existing global operator identity.
+  - Browser lanes receive private real-Chromium initialization; no target-tenant identity clones or plaintext credentials enter prompts.
+- migration_csv: READY
+  - Safe upload artifact: ${migration_csv}.
+  - Contains reserved example.test addresses and no credentials.
+
+## External fixture capabilities
+
+- scim_provider: READY through the deployed Portal SCIM lifecycle fixture lane.
+- federation_provider: READY through the dev/UAT synthetic federation fixture.
+- oidc_relying_party: READY through the repo-supported self-hosted OIDC acceptance fixture.
+- saml_relying_party: READY through the repo-supported self-hosted SAML acceptance fixture.
+- webhook_receiver: READY_AFTER_PREPARE
+  - The provider creates a health-checked one-day receiver with zero request retention.
+- push_delivery: OUT_OF_SCOPE
+  - Push delivery must not block unrelated Portal journeys.
+
+Preparation capability is not journey completion evidence. Browser execution must still prove the visible outcome.
+MANIFEST
+}
+
+write_prepared_manifest() {
+  python3 - "$prepared_json" "$manifest_file" "$migration_csv" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+prepared = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+manifest = Path(sys.argv[2])
+migration_csv = sys.argv[3]
+states = prepared["actor_states"]
+manifest.write_text(f"""# UX Fixture Manifest
 
 STATUS: READY
 
-## Declared Capabilities
+## Verified deployment fixtures
 
-- \`browser_record_creation\`: READY
-  - Create uniquely prefixed disposable tenants, users, groups, access requests, and draft configuration only through supported Portal UI workflows.
-- \`fresh_portal_tenant\`: READY
-  - The configured audit identity was verified as an operator super-user with \`portal.tenant.manage\`.
-- \`disposable_portal_identities\`: READY
-  - The configured audit identity was verified with \`portal.users.manage\` and \`portal.groups.manage\`.
-  - Preserve global-person identity semantics; do not invent cloned tenant-local users.
-- \`published_roles\`: READY
-  - Reuse published roles. \`portal.roles.manage\` is unavailable, so do not create or modify roles.
-- \`file_upload\`: READY after prepare
-  - Disposable file: \`$upload_file\`
-  - Cleanup owner: fixture provider.
+- authenticated_global_identity: READY
+  - The configured identity was authenticated in operator-home context.
+- resettable_customer_tenant: READY
+  - Target tenant id: {prepared['target_tenant_id']}
+  - Target tenant slug: `{prepared['target_tenant_slug']}`
+  - The tenant was created through the supported operator API strictly as isolated audit infrastructure.
+- role_context_matrix: READY
+  - Tenant administrator storage state: `{states['tenant_admin']}`
+  - End-user/requester storage state: `{states['requester']}`
+  - Approver storage state: `{states['approver']}`
+  - Reviewer storage state: `{states['reviewer']}`
+  - Operator-home storage state: `{states['operator']}`
+  - Each actor is one global Portal identity. Cross-tenant work must use memberships or explicit grants; no identity was cloned into the target tenant.
+- browser_record_creation: READY
+  - Create only uniquely prefixed records inside the target audit tenant and clean them up through supported UI or provider contracts.
+- migration_csv: READY
+  - Safe upload artifact: `{migration_csv}`
+
+## Repo-supported external fixture lanes
+
+- scim_provider: READY via the deployed Portal SCIM lifecycle fixture lane.
+- federation_provider: READY via the dev/UAT synthetic upstream federation fixture.
+- oidc_relying_party: READY via the repo-supported self-hosted OIDC acceptance fixture.
+- saml_relying_party: READY via the repo-supported self-hosted SAML acceptance fixture.
+- webhook_receiver: READY
+  - Disposable receiver URL: `{prepared['webhook_url']}`
+  - The receiver returned HTTP 204 during preparation, expires automatically, and stores zero request history.
+- push_delivery: OUT_OF_SCOPE
+  - Push delivery is not required by the corrected Portal journey portfolio and is not a prerequisite for unrelated journeys.
 
 ## Safety
 
-- Never alter existing tenants, identities, memberships, groups, applications, entitlements, or grants.
-- Do not send invitations, webhooks, external provisioning traffic, or notifications.
-- Keep operator-home, tenant-membership, guest, delegated, and support-access authority contexts explicit in every trace.
-MANIFEST
+- Fixture setup is not a Portal operator user journey.
+- Never expose the private fixture file, passwords, cookies, raw tokens, or storage-state contents.
+- Do not assign numerical UX scores to unavailable evidence.
+""", encoding="utf-8")
+PY
+}
+
+case "$action" in
+  describe|prepare)
+    write_manifest
+    if [[ "$action" == "prepare" ]]; then
+      if [[ -s "$fixture_dir/private-fixtures.json" && -s "$prepared_json" ]]; then
+        python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" refresh-init "$_repo_root" "$run_dir" "$prefix"
+      else
+        python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" prepare "$_repo_root" "$run_dir" "$prefix"
+      fi
+      write_prepared_manifest
+    fi
     ;;
   cleanup)
-    rm -f "$upload_file"
+    python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" cleanup "$_repo_root" "$run_dir" "$prefix"
+    rm -f "$migration_csv"
+    rm -f "$fixture_dir"/auth-state-*.json "$fixture_dir"/init-page-*.ts "$fixture_dir/private-fixtures.json" "$prepared_json"
     ;;
   *)
-    printf 'Unknown Portal UX fixture-provider action: %s\n' "$action" >&2
+    printf 'unknown fixture-provider action: %s\n' "$action" >&2
     exit 2
     ;;
 esac
