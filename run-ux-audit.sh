@@ -16,7 +16,11 @@ Environment:
   PROFILE            Profile under profiles/ (required unless PRODUCT_PROFILE is set).
   REPO_ROOT          Product repo. Defaults to the current directory.
   RUN_DIR            Output directory. Defaults to docs/audit/<date>-ux-journey-run.
-UX_PROFILE         Optional UX contract. Defaults to profiles/<profile>/ux-profile.md.
+  UX_PROFILE         Optional UX contract. Defaults to profiles/<profile>/ux-profile.md.
+  UX_FIXTURE_PROVIDER
+                     Optional executable fixture provider. Defaults to
+                     profiles/<profile>/ux-fixtures when present. It runs after
+                     journey planning and before browser execution.
   PRODUCT_PROFILE    Product profile. Defaults to profiles/<profile>/product-profile.md.
   RUNNER             codex, claude, or gemini. Defaults to codex.
   UX_BROWSER_PREFLIGHT
@@ -75,6 +79,10 @@ export MASTER_PROMPT="${MASTER_PROMPT:-$SCRIPT_DIR/generic-user-journey-audit-pr
 export SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/generic-ux-shared.md}"
 export JOBS_FILE="${JOBS_FILE:-$SCRIPT_DIR/generic-ux-jobs.tsv}"
 export PRODUCT_PROFILE="$composed_profile"
+export PROFILE="$PROFILE"
+if [[ -z "${UX_FIXTURE_PROVIDER:-}" && -x "$profile_dir/ux-fixtures" ]]; then
+  export UX_FIXTURE_PROVIDER="$profile_dir/ux-fixtures"
+fi
 
 # Journey agents use the deployed product directly. Launch-readiness native
 # security, dependency, load, and generic browser gates are separate concerns.

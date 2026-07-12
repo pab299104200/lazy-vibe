@@ -136,6 +136,8 @@ Execution evidence is lane-owned under `artifacts/<execution-job>/journeys/<jour
 
 Missing credentials, unavailable browsers, unsafe fixtures, and inaccessible roles are `UNVERIFIED`, never implicit passes. Audit agents may create uniquely prefixed reversible fixtures but cannot modify product code. The harness disables launch-security, dependency, load, Lighthouse, and generic E2E probes by default because those remain owned by `run-audit.sh`.
 
+Profiles may provide an executable `ux-fixtures` provider. After journey planning and before simulation, the harness calls `ux-fixtures prepare REPO_ROOT RUN_DIR PLAN_FILE MANIFEST_FILE`; after the audit it calls the same provider with `cleanup`. The provider must write a sanitized Markdown manifest describing ready and blocked fixture capabilities without credentials. Simulation prompts receive that manifest so agents can use declared disposable files, records, and personas without guessing. Browser lanes must inspect the complete Playwright MCP catalog before declaring typing or file upload unavailable; file inputs use the file-upload tool rather than drag-and-drop.
+
 Create the optional UX overlay only for context the harness cannot safely infer:
 
 ```bash

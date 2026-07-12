@@ -10,6 +10,7 @@ JOBS_FILE="${JOBS_FILE:-}"
 PRODUCT_PROFILE="${PRODUCT_PROFILE:-}"
 PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 PROFILE="${PROFILE:-}"
+UX_FIXTURE_PROVIDER="${UX_FIXTURE_PROVIDER:-}"
 REGISTER_DIR="${REGISTER_DIR:-}"
 AUDIT_REGISTER_RECONCILE="${AUDIT_REGISTER_RECONCILE:-1}"
 AUDIT_REGISTER_CONTEXT="${AUDIT_REGISTER_CONTEXT:-1}"
@@ -62,6 +63,9 @@ Environment:
                        Sets JOBS_FILE, PRODUCT_PROFILE, and SHARED_PROMPT (from shared.md in profile dir) if not already set.
   PROFILES_DIR         Directory containing named profile subdirectories. Defaults to profiles/ alongside the script.
   PRODUCT_PROFILE      Optional product profile markdown. Required for generic prompt usage.
+  UX_FIXTURE_PROVIDER  Optional executable implementing prepare/cleanup actions. Prepare runs
+                       after journey planning and before simulation jobs and must write a
+                       sanitized Markdown fixture manifest without credentials.
   REGISTER_DIR         Optional product register directory. Defaults to <Repo root>/docs/audit/register
                        when register.jsonl exists or a product profile names a Repo root.
   AUDIT_REGISTER_RECONCILE
@@ -708,6 +712,7 @@ if [[ -n "$PROFILE" ]]; then
   [[ -z "$JOBS_FILE" && -f "$_profile_dir/jobs.tsv" ]] && JOBS_FILE="$_profile_dir/jobs.tsv"
   [[ -z "$PRODUCT_PROFILE" && -f "$_profile_dir/product-profile.md" ]] && PRODUCT_PROFILE="$_profile_dir/product-profile.md"
   [[ "$SHARED_PROMPT" == "$SCRIPT_DIR/generic-shared.md" && -f "$_profile_dir/shared.md" ]] && SHARED_PROMPT="$_profile_dir/shared.md"
+  [[ -z "$UX_FIXTURE_PROVIDER" && -x "$_profile_dir/ux-fixtures" ]] && UX_FIXTURE_PROVIDER="$_profile_dir/ux-fixtures"
 fi
 
 repo_root_from_product_profile() {
@@ -887,6 +892,61 @@ The launcher validates this contract before accepting the job.
 ASSIGNMENT
 }
 
+UX_FIXTURES_PREPARED=0
+UX_FIXTURE_MANIFEST="$RUN_DIR/artifacts/ux-fixtures/manifest.md"
+
+prepare_ux_fixtures() {
+  [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
+  ((UX_FIXTURES_PREPARED == 0)) || return 0
+  local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
+  [[ -s "$plan_file" ]] || return 0
+  UX_FIXTURES_PREPARED=1
+  mkdir -p "$(dirname "$UX_FIXTURE_MANIFEST")"
+
+  if [[ -z "$UX_FIXTURE_PROVIDER" ]]; then
+    cat > "$UX_FIXTURE_MANIFEST" <<'MANIFEST'
+# UX Fixture Manifest
+
+STATUS: NOT_CONFIGURED
+
+No profile fixture provider is configured. Browser-created, uniquely prefixed reversible fixtures remain allowed, but journeys requiring launcher-provisioned tenants, personas, external identities, or files must report the exact missing capability as BLOCKED.
+MANIFEST
+    return 0
+  fi
+  if [[ ! -x "$UX_FIXTURE_PROVIDER" ]]; then
+    printf '[ux-fixtures] provider is not executable: %s\n' "$UX_FIXTURE_PROVIDER" >&2
+    return 1
+  fi
+
+  printf '[ux-fixtures] preparing provider=%s\n' "$UX_FIXTURE_PROVIDER"
+  "$UX_FIXTURE_PROVIDER" prepare "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"
+  if [[ ! -s "$UX_FIXTURE_MANIFEST" ]]; then
+    printf '[ux-fixtures] provider did not write manifest: %s\n' "$UX_FIXTURE_MANIFEST" >&2
+    return 1
+  fi
+}
+
+cleanup_ux_fixtures() {
+  [[ "$DRY_RUN" != "1" && "$UX_FIXTURES_PREPARED" == "1" ]] || return 0
+  [[ -n "$UX_FIXTURE_PROVIDER" && -x "$UX_FIXTURE_PROVIDER" ]] || return 0
+  local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
+  printf '[ux-fixtures] cleanup provider=%s\n' "$UX_FIXTURE_PROVIDER"
+  "$UX_FIXTURE_PROVIDER" cleanup "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"
+}
+
+append_ux_fixture_manifest() {
+  local prompt_file="$1"
+  [[ -s "$UX_FIXTURE_MANIFEST" ]] || return 0
+  cat >> "$prompt_file" <<FIXTURES
+## Harness Fixture Manifest
+
+The launcher prepared the sanitized fixture manifest below. Treat it as the authority for disposable starting state and cleanup ownership. It contains no credentials; never read credential files to supplement it.
+
+$(cat "$UX_FIXTURE_MANIFEST")
+
+FIXTURES
+}
+
 write_ux_journey_evidence_index() {
   [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
   local index_file="$RUN_DIR/artifacts/journey-evidence-index.tsv"
@@ -967,6 +1027,7 @@ HEADER
   fi
 
   if [[ "$kind" == "simulation" ]]; then
+    append_ux_fixture_manifest "$prompt_file"
     append_ux_journey_assignment "$prompt_file" "$job_id"
   elif [[ "$kind" =~ ^(adversarial|final)$ ]]; then
     write_ux_journey_evidence_index
@@ -1302,6 +1363,9 @@ args = [
 credentials = Path(repo_root) / "docs" / "ux" / ".creds"
 if credentials.is_file():
     args.extend(["--secrets", str(credentials)])
+    auth_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.ts")
+    if auth_initializer.is_file():
+        args.extend(["--init-page", str(auth_initializer)])
     storage_state = Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
     if storage_state.is_file():
         args.extend(["--storage-state", str(storage_state)])
@@ -3099,6 +3163,7 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       current_group="$group"
     elif [[ "$group" != "$current_group" ]]; then
       flush_group
+      prepare_ux_fixtures
       drain_pending_jobs
       current_group="$group"
     fi
@@ -3123,6 +3188,7 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
 } < "$JOBS_FILE"
 
 flush_group
+prepare_ux_fixtures
 
 # Optional load test — runs after all standard runtime/simulation jobs complete
 # so the agent can ground its scenario selection in prior discovery findings.
@@ -3144,4 +3210,5 @@ write_ux_browser_gate_summary || true
 write_run_summary
 write_audit_blocker_ledger
 reconcile_audit_register
+cleanup_ux_fixtures || printf '[ux-fixtures] cleanup failed; see provider output\n' >&2
 printf 'Audit launcher complete. Run directory: %s\n' "$RUN_DIR"

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:?missing action}"
+repo_root="${2:?missing repo root}"
+run_dir="${3:?missing run dir}"
+plan_file="${4:?missing plan file}"
+manifest_file="${5:?missing manifest file}"
+fixture_dir="$run_dir/artifacts/ux-fixtures"
+upload_file="$fixture_dir/keystone-audit-evidence.txt"
+
+case "$action" in
+  prepare)
+    mkdir -p "$fixture_dir"
+    printf 'Keystone UX audit evidence fixture\nRun: %s\n' "$(basename "$run_dir")" > "$upload_file"
+    cat > "$manifest_file" <<MANIFEST
+# UX Fixture Manifest
+
+STATUS: PARTIAL
+
+## Available Capabilities
+
+- \`file_upload\`: READY
+  - Disposable file: \`$upload_file\`
+  - Cleanup owner: harness provider
+  - Use the Playwright file-upload tool, not drag-and-drop.
+- \`browser_record_creation\`: READY
+  - Create uniquely prefixed reversible Keystone records through the deployed UI using Playwright typing/fill tools.
+
+## Unavailable Launcher Capabilities
+
+- \`fresh_portal_tenant\`: BLOCKED
+  - No operator-scoped Portal fixture credential or supported tenant-fixture API is configured.
+- \`disposable_portal_identities\`: BLOCKED
+  - No supported Portal fixture API is configured for disposable users and groups.
+
+Unavailable launcher capabilities are harness-environment blockers, not evidence that the Keystone UI failed. Do not mutate existing users, groups, tenants, or grants to work around them.
+MANIFEST
+    ;;
+  cleanup)
+    rm -f "$upload_file"
+    ;;
+  *)
+    printf 'unknown fixture-provider action: %s\n' "$action" >&2
+    exit 2
+    ;;
+esac
