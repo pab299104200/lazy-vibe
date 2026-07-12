@@ -134,6 +134,7 @@ module.exports = {
     launch: async () => ({
       newContext: async () => ({
         newPage: async () => ({
+          on: () => {},
           goto: async () => ({ status: () => 200 }),
           screenshot: async ({ path: output }) => fs.writeFileSync(output, 'fixture'),
         }),

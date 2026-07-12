@@ -36,7 +36,7 @@ function readCredentials(repoRoot) {
   return credentials;
 }
 
-async function authenticate(page, credentials) {
+async function authenticate(page, credentials, throttle) {
   const email = credentials.email || credentials.username;
   if (!email || !credentials.password) return false;
   const emailSelector = credentials.email_selector ||
@@ -44,8 +44,29 @@ async function authenticate(page, credentials) {
   const passwordSelector = credentials.password_selector || 'input[type="password"]';
   const emailInput = page.locator(emailSelector).first();
   const passwordInput = page.locator(passwordSelector).first();
-  const hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 10000 })
+  if (throttle.retryAfter > 0) {
+    throw new Error(`Authentication is rate limited at ${throttle.path}; retry after ${throttle.retryAfter} seconds.`);
+  }
+  let hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 30000 })
     .then(() => true, () => false);
+  if (!hasLogin) {
+    const portalSignIn = page.getByRole('button', { name: /sign in with cadres portal/i })
+      .or(page.getByRole('link', { name: /sign in with cadres portal/i })).first();
+    if (await portalSignIn.isVisible().catch(() => false)) {
+      await portalSignIn.click();
+      await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+      hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 30000 })
+        .then(() => true, () => false);
+    }
+  }
+  if (!hasLogin && throttle.retryAfter > 0) {
+    throw new Error(`Authentication is rate limited at ${throttle.path}; retry after ${throttle.retryAfter} seconds.`);
+  }
+  if (!hasLogin) {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 });
+    hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 30000 })
+      .then(() => true, () => false);
+  }
   if (!hasLogin) return false;
   await emailInput.fill(email);
   await passwordInput.fill(credentials.password);
@@ -118,6 +139,12 @@ async function main() {
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     const page = await context.newPage();
+    const throttle = { path: '', retryAfter: 0 };
+    page.on('response', (browserResponse) => {
+      if (browserResponse.status() !== 429) return;
+      throttle.path = new URL(browserResponse.url()).pathname;
+      throttle.retryAfter = Number.parseInt(browserResponse.headers()['retry-after'] || '0', 10) || 0;
+    });
     const response = await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.screenshot({ path: path.join(outDir, 'entry-page.png'), fullPage: true });
     const status = response ? response.status() : 0;
@@ -126,8 +153,10 @@ async function main() {
     details.push(`Browser engine: ${playwright.chromium.name()} at ${executablePath}.`);
     details.push('A first-page screenshot was captured without persisting credentials.');
     if (credentials.email || credentials.username) {
-      const authenticated = await authenticate(page, credentials);
-      if (!authenticated) throw new Error('Configured browser credentials exist but no login form was reached.');
+      const authenticated = await authenticate(page, credentials, throttle);
+      if (!authenticated) {
+        throw new Error(`Configured browser credentials exist but no login form was reached at ${page.url()} (${await page.title() || 'untitled page'}).`);
+      }
       await context.storageState({ path: path.join(outDir, 'auth-state.json') });
       details.push('Authenticated browser state was verified and stored for isolated journey lanes.');
     }
