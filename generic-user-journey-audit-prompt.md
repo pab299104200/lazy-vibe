@@ -27,7 +27,7 @@ Include:
 - exceptions, validation failures, and recovery;
 - administration only where it changes another user's experience.
 
-For each journey state the role, starting condition, user goal, observable completion outcome, likely route sequence, fixture needs, and why it belongs in the portfolio. Cap the executable portfolio at 12 journeys, selecting coverage rather than exhaustiveness.
+For each journey state the role, identity and authority context, starting condition, user goal, observable completion outcome, likely route sequence, fixture needs, and why it belongs in the portfolio. Size the executable portfolio from the product's actual risk and role boundaries. Do not impose an arbitrary journey cap or fold materially different protocols, actors, permission contexts, or recovery paths into one journey merely to reduce the count.
 
 Return PASS when the ranked portfolio is complete and traceable to the contract and discovered interface.
 
@@ -35,7 +35,7 @@ Return PASS when the ranked portfolio is complete and traceable to the contract 
 
 Reconcile the interface inventory and journey portfolio into an executable plan. Allocate journey ids across the three execution jobs using the exact values `03-primary-work`, `03-exceptions`, and `03-administration`. Every journey must be phrased as a user task without UI instructions. Define starting state, fixture strategy, completion oracle, prohibited shortcuts, evidence checkpoints, and cleanup expectations.
 
-Read the harness fixture manifest injected into this prompt before selecting the executable portfolio. Compose prerequisites through declared generic capabilities, including browser record creation, file upload, and disposable identity or tenant provisioning. Do not invent journey-specific provider names. A provider may be required only when that exact identifier appears in the manifest. Prefer journeys whose starting state can be created safely through the deployed UI; use `BLOCKED` only for a concrete external capability the manifest explicitly marks unavailable.
+Read the harness fixture manifest injected into this prompt before selecting the executable portfolio. Compose prerequisites through declared generic capabilities, including deterministic provider setup, browser record creation, file upload, and disposable identity or tenant provisioning. Do not invent journey-specific provider names. A provider may be required only when that exact identifier appears in the manifest. The business action under audit must run through the deployed UI, but deterministic preconditions and cleanup may come from the declared fixture provider. Never make unrelated journeys depend on completing an earlier browser journey when their starting states can be prepared independently. Use `BLOCKED` only for a concrete capability the manifest verifies as unavailable.
 
 Create `$RUN_DIR/artifacts/journey-plan.tsv` with this exact header:
 
@@ -83,11 +83,13 @@ Score each executed journey from 0 to 4 for:
 - outcome confidence: can the user verify the business result;
 - control safety: are consequential actions understandable and appropriately guarded.
 
-`0` means blocked or dangerously misleading, `1` severe assistance required, `2` usable with product-specific knowledge, `3` clear for the target role, and `4` unusually effective and frictionless. Cite evidence for every score below 3. Challenge false PASS results where task completion concealed confusion, unexplained state, or unverifiable outcomes.
+`0` means an observed interface is dangerously misleading or prevents completion, `1` severe assistance required, `2` usable with product-specific knowledge, `3` clear for the target role, and `4` unusually effective and frictionless. `BLOCKED` and `UNVERIFIED` are evidence states, not usability observations: leave every dimension unscored for those rows and report the exact harness, fixture, deployment, or access cause separately. Cite evidence for every observed score below 3. Challenge false PASS results where task completion concealed confusion, unexplained state, or unverifiable outcomes.
+
+Return `RESULT: PASS` when the independent review artifact is complete and evidence-grounded, even when the reviewed product behavior is poor. State the separate `PRODUCT EVIDENCE VERDICT` in the artifact. Return `RESULT: FAIL` only when this review job itself cannot produce a valid artifact because its inputs or evidence contract are broken.
 
 ## UX PHASE 5 — Scorecard and Remediation Register
 
-Synthesize the product contract, journey plan, machine-validated journey evidence index, execution evidence, and independent review. Do not average away a blocked critical journey. Give an overall UX verdict of PASS, CONDITIONAL, FAIL, or UNVERIFIED and explain the gating rule. This is not the product's launch-readiness decision; it is the end-user usability decision consumed by the broader audit.
+Synthesize the product contract, journey plan, machine-validated journey evidence index, execution evidence, and independent review. Report evidence coverage separately from observed usability. Do not average unobserved journeys into the UX score, and do not convert a harness or fixture blocker into a product defect. A critical unverified journey may keep the overall verdict `UNVERIFIED`, but only observed product behavior may produce `FAIL`. Give an overall UX verdict of PASS, CONDITIONAL, FAIL, or UNVERIFIED and explain the gating rule. This is not the product's launch-readiness decision; it is the end-user usability decision consumed by the broader audit.
 
 Write:
 1. an executive summary focused on user outcomes;
@@ -101,3 +103,5 @@ Create `$RUN_DIR/artifacts/ux-remediation-register.tsv` with this exact header:
 `finding_id<TAB>severity<TAB>journeys<TAB>role<TAB>problem<TAB>user_harm<TAB>required_outcome<TAB>evidence<TAB>verification_journey`
 
 Remediation rows must specify the user outcome to achieve, not a guessed component-level patch. Merge duplicate symptoms that share one workflow or information-model cause.
+
+Return `RESULT: PASS` when the scorecard and remediation register are complete and internally consistent. Record the separate `PRODUCT UX VERDICT` as `PASS`, `CONDITIONAL`, `FAIL`, or `UNVERIFIED`. A product verdict of `FAIL` must not make the synthesis job itself appear as a failed harness job.

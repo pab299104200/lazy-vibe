@@ -23,6 +23,17 @@ grep -q 'disposable_portal_identities.*READY' "$manifest"
 "$provider" cleanup "$tmp_root" "$run_dir" "$plan" "$manifest"
 [[ ! -e "$upload_path" ]]
 
+portal_manifest="$run_dir/artifacts/ux-fixtures/portal-manifest.md"
+portal_provider="$script_dir/profiles/portal/ux-fixtures"
+"$portal_provider" describe /home/pete/cadres/portal "$run_dir" "" "$portal_manifest"
+grep -q 'fresh_portal_tenant.*READY' "$portal_manifest"
+grep -q 'disposable_portal_identities.*READY' "$portal_manifest"
+"$portal_provider" prepare /home/pete/cadres/portal "$run_dir" "$plan" "$portal_manifest"
+portal_upload="$(sed -n 's/.*Disposable file: `\([^`]*\)`.*/\1/p' "$portal_manifest")"
+[[ -f "$portal_upload" ]]
+"$portal_provider" cleanup /home/pete/cadres/portal "$run_dir" "$plan" "$portal_manifest"
+[[ ! -e "$portal_upload" ]]
+
 grep -q 'inspect or search the full Playwright MCP tool catalog' "$script_dir/generic-ux-shared.md"
 grep -q 'prepare_ux_fixtures' "$script_dir/run-audit.sh"
 grep -q 'append_ux_fixture_manifest' "$script_dir/run-audit.sh"
@@ -31,4 +42,12 @@ grep -q 'describe_ux_fixture_capabilities' "$script_dir/run-audit.sh"
 grep -q 'Portal fixture session was authenticated' "$script_dir/ux-browser-preflight.cjs"
 grep -q 'Do not invent journey-specific provider names' "$script_dir/generic-user-journey-audit-prompt.md"
 grep -q 'Provider identifiers must come verbatim' "$script_dir/generic-ux-shared.md"
+grep -q 'Do not impose an arbitrary journey cap' "$script_dir/generic-user-journey-audit-prompt.md"
+grep -q 'BLOCKED.*UNVERIFIED.*evidence states' "$script_dir/generic-user-journey-audit-prompt.md"
+grep -q 'Never assign numerical UX dimension scores to BLOCKED or UNVERIFIED' "$script_dir/generic-ux-shared.md"
+grep -q 'Failure of one setup or onboarding journey must not cascade' "$script_dir/generic-ux-shared.md"
+grep -q 'Guest access: grant-backed cross-tenant collaboration for the same global identity' "$script_dir/profiles/portal/ux-profile.md"
+grep -q 'without requiring Portal operator-home customer authority' "$script_dir/profiles/portal/product-profile.md"
+grep -q 'A product verdict of `FAIL` must not make the synthesis job itself appear as a failed harness job' "$script_dir/generic-user-journey-audit-prompt.md"
+grep -q 'a failing product verdict is not a harness execution error' "$script_dir/generic-ux-shared.md"
 printf 'PASS UX fixture provider fixtures\n'

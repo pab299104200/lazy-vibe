@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:?missing action}"
+repo_root="${2:?missing repo root}"
+run_dir="${3:?missing run dir}"
+plan_file="${4:-}"
+manifest_file="${5:?missing fixture manifest}"
+fixture_dir="$run_dir/artifacts/ux-fixtures"
+upload_file="$fixture_dir/portal-audit-evidence.png"
+
+if [[ "$repo_root" != "/home/pete/cadres/portal" ]]; then
+  printf 'Portal UX fixture provider received unexpected repo root: %s\n' "$repo_root" >&2
+  exit 2
+fi
+if [[ "$action" == "prepare" && ! -s "$plan_file" ]]; then
+  printf 'Portal UX fixture provider requires a non-empty journey plan: %s\n' "$plan_file" >&2
+  exit 2
+fi
+
+case "$action" in
+  describe|prepare)
+    mkdir -p "$fixture_dir"
+    if [[ "$action" == "prepare" ]]; then
+      printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$upload_file"
+    fi
+    cat > "$manifest_file" <<MANIFEST
+# Portal UX Fixture Manifest
+
+STATUS: READY
+
+## Declared Capabilities
+
+- \`browser_record_creation\`: READY
+  - Create uniquely prefixed disposable tenants, users, groups, access requests, and draft configuration only through supported Portal UI workflows.
+- \`fresh_portal_tenant\`: READY
+  - The configured audit identity was verified as an operator super-user with \`portal.tenant.manage\`.
+- \`disposable_portal_identities\`: READY
+  - The configured audit identity was verified with \`portal.users.manage\` and \`portal.groups.manage\`.
+  - Preserve global-person identity semantics; do not invent cloned tenant-local users.
+- \`published_roles\`: READY
+  - Reuse published roles. \`portal.roles.manage\` is unavailable, so do not create or modify roles.
+- \`file_upload\`: READY after prepare
+  - Disposable file: \`$upload_file\`
+  - Cleanup owner: fixture provider.
+
+## Safety
+
+- Never alter existing tenants, identities, memberships, groups, applications, entitlements, or grants.
+- Do not send invitations, webhooks, external provisioning traffic, or notifications.
+- Keep operator-home, tenant-membership, guest, delegated, and support-access authority contexts explicit in every trace.
+MANIFEST
+    ;;
+  cleanup)
+    rm -f "$upload_file"
+    ;;
+  *)
+    printf 'Unknown Portal UX fixture-provider action: %s\n' "$action" >&2
+    exit 2
+    ;;
+esac

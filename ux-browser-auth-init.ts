@@ -40,6 +40,12 @@ async function gotoWithRetry(page, url) {
   throw lastError;
 }
 
+function absoluteHttpUrl(value) {
+  const trimmed = value.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
 async function armAuditActivityHeartbeat(page) {
   await page.evaluate(() => {
     const key = '__uxAuditActivityHeartbeat';
@@ -56,12 +62,15 @@ export default async ({ page }) => {
   if (!fs.existsSync(credentialsPath)) return;
 
   const credentials = readCredentials(credentialsPath);
-  const baseUrl = credentials.base_url || credentials.frontend_url || credentials.url;
+  const configuredBaseUrl = credentials.base_url || credentials.frontend_url || credentials.url;
   const email = credentials.email || credentials.username;
   const password = credentials.password;
-  if (!baseUrl || !email || !password) return;
+  if (!configuredBaseUrl || !email || !password) return;
+  const baseUrl = absoluteHttpUrl(configuredBaseUrl);
 
-  const portalUrl = process.env.UX_AUTH_PORTAL_URL;
+  const portalUrl = process.env.UX_AUTH_PORTAL_URL
+    ? absoluteHttpUrl(process.env.UX_AUTH_PORTAL_URL)
+    : undefined;
   if (portalUrl) {
     await gotoWithRetry(page, `${portalUrl.replace(/\/$/, '')}/login`);
     await page.waitForTimeout(1500);
