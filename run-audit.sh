@@ -893,7 +893,28 @@ ASSIGNMENT
 }
 
 UX_FIXTURES_PREPARED=0
+UX_FIXTURES_DESCRIBED=0
 UX_FIXTURE_MANIFEST="$RUN_DIR/artifacts/ux-fixtures/manifest.md"
+
+describe_ux_fixture_capabilities() {
+  [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
+  ((UX_FIXTURES_DESCRIBED == 0)) || return 0
+  UX_FIXTURES_DESCRIBED=1
+  mkdir -p "$(dirname "$UX_FIXTURE_MANIFEST")"
+  if [[ -z "$UX_FIXTURE_PROVIDER" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$UX_FIXTURE_PROVIDER" ]]; then
+    printf '[ux-fixtures] provider is not executable: %s\n' "$UX_FIXTURE_PROVIDER" >&2
+    return 1
+  fi
+  printf '[ux-fixtures] describing provider=%s\n' "$UX_FIXTURE_PROVIDER"
+  "$UX_FIXTURE_PROVIDER" describe "$REPO_ROOT" "$RUN_DIR" "" "$UX_FIXTURE_MANIFEST"
+  [[ -s "$UX_FIXTURE_MANIFEST" ]] || {
+    printf '[ux-fixtures] provider did not write capability manifest: %s\n' "$UX_FIXTURE_MANIFEST" >&2
+    return 1
+  }
+}
 
 prepare_ux_fixtures() {
   [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
@@ -1026,7 +1047,9 @@ HEADER
       "$ref" "$MASTER_PROMPT" >> "$prompt_file"
   fi
 
-  if [[ "$kind" == "simulation" ]]; then
+  if [[ "$kind" == "synthesis" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
+    append_ux_fixture_manifest "$prompt_file"
+  elif [[ "$kind" == "simulation" ]]; then
     append_ux_fixture_manifest "$prompt_file"
     append_ux_journey_assignment "$prompt_file" "$job_id"
   elif [[ "$kind" =~ ^(adversarial|final)$ ]]; then
@@ -3163,6 +3186,9 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       current_group="$group"
     elif [[ "$group" != "$current_group" ]]; then
       flush_group
+      if [[ "$group" == "02" ]]; then
+        describe_ux_fixture_capabilities
+      fi
       prepare_ux_fixtures
       drain_pending_jobs
       current_group="$group"
@@ -3172,6 +3198,9 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       continue
     fi
 
+    if [[ "$kind" == "synthesis" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
+      describe_ux_fixture_capabilities
+    fi
     prompt_file="$(build_prompt "$group" "$job_id" "$kind" "$title" "$output" "$ref")"
     printf '[start] group=%s job=%s kind=%s title=%s\n' "$group" "$job_id" "$kind" "$title"
 

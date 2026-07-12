@@ -4,13 +4,13 @@ set -euo pipefail
 action="${1:?missing action}"
 repo_root="${2:?missing repo root}"
 run_dir="${3:?missing run dir}"
-plan_file="${4:?missing plan file}"
+plan_file="${4:-}"
 manifest_file="${5:?missing manifest file}"
 fixture_dir="$run_dir/artifacts/ux-fixtures"
 upload_file="$fixture_dir/keystone-audit-evidence.txt"
 
 case "$action" in
-  prepare)
+  describe|prepare)
     mkdir -p "$fixture_dir"
     printf 'Keystone UX audit evidence fixture\nRun: %s\n' "$(basename "$run_dir")" > "$upload_file"
     cat > "$manifest_file" <<MANIFEST

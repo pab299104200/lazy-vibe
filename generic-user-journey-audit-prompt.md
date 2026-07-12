@@ -35,6 +35,8 @@ Return PASS when the ranked portfolio is complete and traceable to the contract 
 
 Reconcile the interface inventory and journey portfolio into an executable plan. Allocate journey ids across the three execution jobs using the exact values `03-primary-work`, `03-exceptions`, and `03-administration`. Every journey must be phrased as a user task without UI instructions. Define starting state, fixture strategy, completion oracle, prohibited shortcuts, evidence checkpoints, and cleanup expectations.
 
+Read the harness fixture manifest injected into this prompt before selecting the executable portfolio. Compose prerequisites through declared generic capabilities, including browser record creation, file upload, and disposable identity or tenant provisioning. Do not invent journey-specific provider names. A provider may be required only when that exact identifier appears in the manifest. Prefer journeys whose starting state can be created safely through the deployed UI; use `BLOCKED` only for a concrete external capability the manifest explicitly marks unavailable.
+
 Create `$RUN_DIR/artifacts/journey-plan.tsv` with this exact header:
 
 `journey_id<TAB>execution_job<TAB>role<TAB>priority<TAB>starting_state<TAB>task<TAB>completion_oracle<TAB>fixture_strategy`
