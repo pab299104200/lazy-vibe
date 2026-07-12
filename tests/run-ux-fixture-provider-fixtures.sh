@@ -16,7 +16,8 @@ provider="$script_dir/profiles/keystone/ux-fixtures"
 grep -q 'file_upload.*READY' "$manifest"
 upload_path="$(sed -n 's/.*Disposable file: `\([^`]*\)`.*/\1/p' "$manifest")"
 [[ -f "$upload_path" ]]
-grep -q 'fresh_portal_tenant.*BLOCKED' "$manifest"
+grep -q 'fresh_portal_tenant.*READY' "$manifest"
+grep -q 'disposable_portal_identities.*READY' "$manifest"
 "$provider" cleanup "$tmp_root" "$run_dir" "$plan" "$manifest"
 [[ ! -e "$upload_path" ]]
 

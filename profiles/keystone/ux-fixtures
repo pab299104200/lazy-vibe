@@ -27,14 +27,19 @@ STATUS: PARTIAL
 - \`browser_record_creation\`: READY
   - Create uniquely prefixed reversible Keystone records through the deployed UI using Playwright typing/fill tools.
 
-## Unavailable Launcher Capabilities
+## Portal Provisioning Capabilities
 
-- \`fresh_portal_tenant\`: BLOCKED
-  - No operator-scoped Portal fixture credential or supported tenant-fixture API is configured.
-- \`disposable_portal_identities\`: BLOCKED
-  - No supported Portal fixture API is configured for disposable users and groups.
+- \`fresh_portal_tenant\`: READY
+  - Portal URL: \`https://portal-dev.cadres.io\`
+  - The audit identity is an operator super-user with \`portal.tenant.manage\`.
+  - Create only uniquely prefixed disposable tenants through the Portal UI and record cleanup ownership.
+- \`disposable_portal_identities\`: READY
+  - The audit identity has \`portal.users.manage\` and \`portal.groups.manage\`.
+  - Create only uniquely prefixed users and groups inside the disposable audit tenant.
+- \`portal_roles_manage\`: UNAVAILABLE
+  - Reuse published roles rather than creating or changing Portal roles.
 
-Unavailable launcher capabilities are harness-environment blockers, not evidence that the Keystone UI failed. Do not mutate existing users, groups, tenants, or grants to work around them.
+Never alter existing tenants, identities, groups, memberships, or grants. Portal provisioning prepares starting state; the Keystone browser journey must still prove bootstrap and scoped-access outcomes.
 MANIFEST
     ;;
   cleanup)

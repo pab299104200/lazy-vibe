@@ -83,6 +83,9 @@ export PROFILE="$PROFILE"
 if [[ -z "${UX_FIXTURE_PROVIDER:-}" && -x "$profile_dir/ux-fixtures" ]]; then
   export UX_FIXTURE_PROVIDER="$profile_dir/ux-fixtures"
 fi
+if [[ -z "${UX_AUTH_PORTAL_URL:-}" && -s "$profile_dir/ux-portal-url" ]]; then
+  export UX_AUTH_PORTAL_URL="$(head -n 1 "$profile_dir/ux-portal-url" | tr -d '\r\n')"
+fi
 
 # Journey agents use the deployed product directly. Launch-readiness native
 # security, dependency, load, and generic browser gates are separate concerns.

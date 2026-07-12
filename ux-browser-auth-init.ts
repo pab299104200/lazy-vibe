@@ -61,6 +61,39 @@ export default async ({ page }) => {
   const password = credentials.password;
   if (!baseUrl || !email || !password) return;
 
+  const portalUrl = process.env.UX_AUTH_PORTAL_URL;
+  if (portalUrl) {
+    await gotoWithRetry(page, `${portalUrl.replace(/\/$/, '')}/login`);
+    await page.waitForTimeout(1500);
+    const portalEmail = await firstVisible([
+      credentials.email_selector ? page.locator(credentials.email_selector) : null,
+      page.getByLabel(/email|username/i),
+      page.locator('input[type="email"]'),
+      page.locator('input[name="email"], input[name="username"]'),
+    ].filter(Boolean));
+    const portalPassword = await firstVisible([
+      credentials.password_selector ? page.locator(credentials.password_selector) : null,
+      page.getByLabel(/password/i),
+      page.locator('input[type="password"]'),
+    ].filter(Boolean));
+    if (!portalEmail || !portalPassword) {
+      throw new Error('UX Portal authentication fields were not found.');
+    }
+    await portalEmail.fill(email);
+    await portalPassword.fill(password);
+    const portalSubmit = await firstVisible([
+      page.getByRole('button', { name: /^sign in with password$/i }),
+      page.locator('form button[type="submit"], form input[type="submit"]'),
+    ]);
+    if (!portalSubmit) throw new Error('UX Portal password submit control was not found.');
+    await portalSubmit.click();
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+    await page.waitForTimeout(2000);
+    if (new URL(page.url()).pathname.startsWith('/login')) {
+      throw new Error('UX Portal authentication did not leave the login page.');
+    }
+  }
+
   await gotoWithRetry(page, baseUrl);
   await page.waitForTimeout(2000);
   let emailInput = await firstVisible([
