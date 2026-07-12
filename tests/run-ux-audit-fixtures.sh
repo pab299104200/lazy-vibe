@@ -42,8 +42,8 @@ fi
 
 cat > "$run_dir/artifacts/journey-plan.tsv" <<'PLAN'
 journey_id	execution_job	role	priority	starting_state	task	completion_oracle	fixture_strategy
-J01-primary	03-primary-work	Operator	P0	Signed out	Complete primary work	Outcome is visible	Create a prefixed fixture
-J02-admin	03-administration	Administrator	P1	Signed in	Configure access	Access is visible	Create a prefixed fixture
+J01-primary	primary-work	Operator	P0	Signed out	Complete primary work	Outcome is visible	Create a prefixed fixture
+J02-admin	administration	Administrator	P1	Signed in	Configure access	Access is visible	Create a prefixed fixture
 PLAN
 
 PROFILES_DIR="$fixture_root/profiles" \
@@ -52,6 +52,7 @@ RUN_DIR="$run_dir" \
 "$SCRIPT_DIR/run-ux-audit.sh" --profile example --dry-run --only 03-primary-work >/dev/null
 
 grep -q 'J01-primary.*03-primary-work' "$run_dir/prompts/03-primary-work.md"
+grep -q $'J01-primary\t03-primary-work\t' "$run_dir/artifacts/journey-plan.tsv"
 if grep -q 'J02-admin' "$run_dir/prompts/03-primary-work.md"; then
   printf 'cross-lane journey leaked into primary-work prompt\n' >&2
   exit 1
@@ -131,9 +132,12 @@ module.exports = {
     name: () => 'chromium',
     executablePath: () => executable,
     launch: async () => ({
-      newPage: async () => ({
-        goto: async () => ({ status: () => 200 }),
-        screenshot: async ({ path: output }) => fs.writeFileSync(output, 'fixture'),
+      newContext: async () => ({
+        newPage: async () => ({
+          goto: async () => ({ status: () => 200 }),
+          screenshot: async ({ path: output }) => fs.writeFileSync(output, 'fixture'),
+        }),
+        storageState: async () => {},
       }),
       close: async () => {},
     }),

@@ -19,14 +19,46 @@ function parseArgs(argv) {
 }
 
 function readCredentialUrl(repoRoot) {
+  const credentials = readCredentials(repoRoot);
+  return credentials.base_url || credentials.frontend_url || credentials.url || '';
+}
+
+function readCredentials(repoRoot) {
   const credentialsPath = path.join(repoRoot, 'docs', 'ux', '.creds');
-  if (!fs.existsSync(credentialsPath)) return '';
+  if (!fs.existsSync(credentialsPath)) return {};
+  const credentials = {};
   const lines = fs.readFileSync(credentialsPath, 'utf8').split(/\r?\n/);
   for (const line of lines) {
-    const match = line.match(/^\s*(?:url|base_url|frontend_url)\s*[=:]\s*(.+?)\s*$/i);
-    if (match) return match[1].replace(/^['"]|['"]$/g, '');
+    const match = line.match(/^\s*([^#=]+?)\s*=\s*(.*?)\s*$/);
+    if (!match) continue;
+    credentials[match[1].trim().toLowerCase()] = match[2].replace(/^['"]|['"]$/g, '');
   }
-  return '';
+  return credentials;
+}
+
+async function authenticate(page, credentials) {
+  const email = credentials.email || credentials.username;
+  if (!email || !credentials.password) return false;
+  const emailSelector = credentials.email_selector ||
+    'input[type="email"], input[name="email"], input[name="username"]';
+  const passwordSelector = credentials.password_selector || 'input[type="password"]';
+  const emailInput = page.locator(emailSelector).first();
+  const passwordInput = page.locator(passwordSelector).first();
+  const hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 10000 })
+    .then(() => true, () => false);
+  if (!hasLogin) return false;
+  await emailInput.fill(email);
+  await passwordInput.fill(credentials.password);
+  const submit = credentials.submit_selector
+    ? page.locator(credentials.submit_selector).first()
+    : page.getByRole('button', { name: /^(sign in with password|sign in|log in|continue)$/i }).first();
+  await submit.click();
+  await passwordInput.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined);
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
+  if (await passwordInput.isVisible().catch(() => false)) {
+    throw new Error('Configured browser credentials were rejected or login did not advance.');
+  }
+  return true;
 }
 
 function resolvePlaywright(repoRoot) {
@@ -66,6 +98,7 @@ async function main() {
   const outDir = path.join(path.resolve(args['run-dir']), 'artifacts', 'browser-preflight');
   fs.mkdirSync(outDir, { recursive: true });
   const details = [];
+  const credentials = readCredentials(repoRoot);
   const baseUrl = process.env.UX_BROWSER_BASE_URL || process.env.AUDIT_BROWSER_BASE_URL ||
     process.env.E2E_BASE_URL || readCredentialUrl(repoRoot);
   if (!baseUrl) throw new Error('No deployed browser URL found in environment or docs/ux/.creds.');
@@ -83,7 +116,8 @@ async function main() {
 
   const browser = await playwright.chromium.launch({ headless: true });
   try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const page = await context.newPage();
     const response = await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.screenshot({ path: path.join(outDir, 'entry-page.png'), fullPage: true });
     const status = response ? response.status() : 0;
@@ -91,6 +125,12 @@ async function main() {
     details.push(`Deployed entry point reached successfully with HTTP ${status}.`);
     details.push(`Browser engine: ${playwright.chromium.name()} at ${executablePath}.`);
     details.push('A first-page screenshot was captured without persisting credentials.');
+    if (credentials.email || credentials.username) {
+      const authenticated = await authenticate(page, credentials);
+      if (!authenticated) throw new Error('Configured browser credentials exist but no login form was reached.');
+      await context.storageState({ path: path.join(outDir, 'auth-state.json') });
+      details.push('Authenticated browser state was verified and stored for isolated journey lanes.');
+    }
     writeSummary(outDir, 'PASS', details);
   } finally {
     await browser.close();

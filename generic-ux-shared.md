@@ -3,7 +3,7 @@
 This is an end-user usability audit, not a code review and not a feature-presence checklist.
 
 - Audit the deployed product named by the profile. Local code and documentation are discovery aids, never substitutes for browser evidence.
-- Read credentials from the profile-designated credential file only when needed. Never print, copy, or persist secrets in reports, prompts, traces, screenshots, or logs.
+- Deterministic browser preflight authenticates using the profile-designated credential file and supplies verified storage state to Playwright MCP. Never read, print, copy, or persist credential values in reports, prompts, traces, screenshots, tool arguments, or logs. A credential failure is a harness preflight failure and must stop execution jobs.
 - Infer journeys from product claims, navigation, routes, domain objects, permissions, documentation, and visible actions. Do not require a founder-authored script for each task.
 - Judge whether a competent target user can understand and complete the work without product-specific coaching. Existing implementation choices are not proof that the workflow is acceptable.
 - Use the supplied `playwright` MCP tools for every execution job. Never launch a browser from the agent shell. Capture a screenshot before the first action, at every material decision point, on errors, and at completion. Record visible labels and user actions, not DOM implementation details.

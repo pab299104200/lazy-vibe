@@ -787,10 +787,64 @@ group_selected() {
   return 0
 }
 
+prepare_ux_journey_plan() {
+  local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
+  [[ "${UX_PLAYWRIGHT_MCP:-0}" == "1" && -s "$plan_file" ]] || return 0
+  python3 - "$plan_file" <<'PY'
+import csv
+import os
+import sys
+from pathlib import Path
+
+plan_file = Path(sys.argv[1])
+required = [
+    "journey_id", "execution_job", "role", "priority", "starting_state",
+    "task", "completion_oracle", "fixture_strategy",
+]
+aliases = {
+    "primary-work": "03-primary-work",
+    "exceptions": "03-exceptions",
+    "administration": "03-administration",
+    "03-primary-work": "03-primary-work",
+    "03-exceptions": "03-exceptions",
+    "03-administration": "03-administration",
+}
+with plan_file.open(newline="", encoding="utf-8") as handle:
+    reader = csv.DictReader(handle, delimiter="\t")
+    if reader.fieldnames != required:
+        raise SystemExit(f"invalid UX journey plan header: {reader.fieldnames}")
+    rows = list(reader)
+if not rows:
+    raise SystemExit("UX journey plan has no journeys")
+if len(rows) > 12:
+    raise SystemExit(f"UX journey plan exceeds the 12-journey cap: {len(rows)}")
+
+seen = set()
+for row in rows:
+    journey_id = row["journey_id"].strip()
+    if not journey_id or journey_id in seen:
+        raise SystemExit(f"missing or duplicate UX journey id: {journey_id!r}")
+    seen.add(journey_id)
+    allocation = row["execution_job"].strip()
+    if allocation not in aliases:
+        raise SystemExit(f"unknown UX execution job for {journey_id}: {allocation!r}")
+    row["journey_id"] = journey_id
+    row["execution_job"] = aliases[allocation]
+
+temporary = plan_file.with_suffix(".tsv.tmp")
+with temporary.open("w", newline="", encoding="utf-8") as handle:
+    writer = csv.DictWriter(handle, fieldnames=required, delimiter="\t", lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+os.replace(temporary, plan_file)
+PY
+}
+
 append_ux_journey_assignment() {
   local prompt_file="$1" job_id="$2"
   local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
   [[ "${UX_PLAYWRIGHT_MCP:-0}" == "1" && -s "$plan_file" ]] || return 0
+  prepare_ux_journey_plan
 
   local assigned_rows
   assigned_rows="$(awk -F'\t' -v job="$job_id" 'NR > 1 && $2 == job { print }' "$plan_file")"
@@ -841,6 +895,7 @@ write_ux_journey_evidence_index() {
   shopt -s nullglob
   for result_file in "$RUN_DIR"/artifacts/*/journey-results.tsv; do
     job_id="$(basename "$(dirname "$result_file")")"
+    grep -q '^STATUS: PASS$' "$RUN_DIR/artifacts/$job_id/evidence-validation.md" 2>/dev/null || continue
     awk -F'\t' -v job="$job_id" 'BEGIN { OFS="\t" } NR > 1 { print job, $0 }' "$result_file" >> "$index_file"
   done
   shopt -u nullglob
@@ -1000,7 +1055,7 @@ For discovery and synthesis jobs, do not run tests or start servers. For runtime
 
 \`$RUN_DIR/artifacts/$job_id/\`
 
-For deployed browser or customer-path work, the Playwright MCP server receives the profile-designated secrets file through its native \`--secrets\` option. Use MCP secret references without printing secret values. Do not claim authentication is impossible merely because secrets must remain redacted; report a credential blocker only when the configured secret reference is absent or rejected.
+For deployed browser or customer-path work, deterministic preflight authenticates with the profile-designated dotenv file and supplies a verified storage state to Playwright MCP. Start from that authenticated state. Never type placeholder secret references or copy credential values into tool arguments. If authentication fails, preflight must stop the run before this job is scheduled.
 INSTRUCTIONS
 
   # ── Accessibility scanning (runtime and simulation jobs) ─────────────────
@@ -1247,6 +1302,9 @@ args = [
 credentials = Path(repo_root) / "docs" / "ux" / ".creds"
 if credentials.is_file():
     args.extend(["--secrets", str(credentials)])
+    storage_state = Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
+    if storage_state.is_file():
+        args.extend(["--storage-state", str(storage_state)])
 print(json.dumps(args))
 PY
 }
@@ -2508,6 +2566,11 @@ wait_for_group() {
         local job_name="${names_ref[$idx]}"
         local job_log_file="${job_log[$idx]}"
         local job_passed=0
+        local evidence_valid=1
+        if ! validate_ux_execution_evidence "$job_name"; then
+          evidence_valid=0
+          failed=1
+        fi
         if [[ "$status" == "0" ]]; then
           job_passed=1
           if [[ "$DRY_RUN" != "1" && -n "${outputs_ref[$idx]}" ]]; then
@@ -2518,10 +2581,7 @@ wait_for_group() {
               job_passed=0
             fi
           fi
-          if ((job_passed)) && ! validate_ux_execution_evidence "$job_name"; then
-            failed=1
-            job_passed=0
-          fi
+          ((evidence_valid)) || job_passed=0
           if ((job_passed)); then
             local audit_result
             audit_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$job_log_file" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"

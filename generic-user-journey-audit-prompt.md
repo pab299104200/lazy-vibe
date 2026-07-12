@@ -33,7 +33,7 @@ Return PASS when the ranked portfolio is complete and traceable to the contract 
 
 ## UX PHASE 2 — Executable Journey Plan
 
-Reconcile the interface inventory and journey portfolio into an executable plan. Allocate journey ids across the three execution jobs: primary work, exceptions, and administration. Every journey must be phrased as a user task without UI instructions. Define starting state, fixture strategy, completion oracle, prohibited shortcuts, evidence checkpoints, and cleanup expectations.
+Reconcile the interface inventory and journey portfolio into an executable plan. Allocate journey ids across the three execution jobs using the exact values `03-primary-work`, `03-exceptions`, and `03-administration`. Every journey must be phrased as a user task without UI instructions. Define starting state, fixture strategy, completion oracle, prohibited shortcuts, evidence checkpoints, and cleanup expectations.
 
 Create `$RUN_DIR/artifacts/journey-plan.tsv` with this exact header:
 
