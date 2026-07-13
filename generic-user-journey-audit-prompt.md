@@ -14,6 +14,12 @@ Inventory the actual operator-facing application using route definitions, naviga
 
 Produce a concise route-and-capability map suitable for planning browser journeys. Do not score visual taste.
 
+Create `$RUN_DIR/artifacts/surface-ownership-matrix.tsv` with this exact header:
+
+`surface_id<TAB>route<TAB>visible_label<TAB>primary_object<TAB>lifecycle_authority<TAB>roles<TAB>jobs_and_actions<TAB>entry_points<TAB>overlaps_with<TAB>overlap_type<TAB>canonical_surface<TAB>disposition<TAB>evidence`
+
+Inventory navigable and hidden routes. Compare surfaces by user job, governed object, state transitions, and completion outcome rather than label alone. Use `duplicate` when two surfaces perform substantially the same job on the same object, `fragmented` when one lifecycle is split without a clear handoff or authority, `adjacent` when related objects have distinct ownership, `legacy` when a superseded route remains reachable, and `none` when ownership is clear. For every non-`none` row identify the canonical destination and a disposition of `retain`, `merge`, `redirect`, `rename`, or `remove`. Treat a workflow that requires users to alternate between overlapping surfaces to complete one ordinary lifecycle as information-architecture friction even when every individual action works.
+
 Return PASS when the inventory is complete enough to plan journeys. Findings about the product belong in the report but do not make the discovery job itself fail.
 
 ## UX PHASE 1B — Journey Portfolio
