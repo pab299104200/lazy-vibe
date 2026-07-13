@@ -6799,6 +6799,20 @@ git_root_git_merge_pathspec_args() {
 }
 
 git_root_non_product_pathspec_excludes() {
+  printf ':(exclude,glob).lattice\n'
+  printf ':(exclude,glob).lattice/**\n'
+  printf ':(exclude,glob)**/.lattice\n'
+  printf ':(exclude,glob)**/.lattice/**\n'
+  printf ':(exclude,glob).playwright-mcp\n'
+  printf ':(exclude,glob).playwright-mcp/**\n'
+  printf ':(exclude,glob)**/.playwright-mcp\n'
+  printf ':(exclude,glob)**/.playwright-mcp/**\n'
+  printf ':(exclude,glob)test-results\n'
+  printf ':(exclude,glob)test-results/**\n'
+  printf ':(exclude,glob)**/test-results\n'
+  printf ':(exclude,glob)**/test-results/**\n'
+  printf ':(exclude,glob)entry-before-action-*.md\n'
+  printf ':(exclude,glob)entry-before-action-*.png\n'
   printf ':(exclude,glob)node_modules\n'
   printf ':(exclude,glob)node_modules/**\n'
   printf ':(exclude,glob)**/node_modules\n'
