@@ -554,9 +554,13 @@ audit_ensure_node_project() {
   command_exists node || return 1
   command_exists npm || return 1
   mkdir -p "$AUDIT_NODE_TOOLING_DIR"
-  if [[ ! -f "$AUDIT_NODE_TOOLING_DIR/package.json" ]]; then
-    (cd "$AUDIT_NODE_TOOLING_DIR" && npm init -y >/dev/null 2>&1) || return 1
-  fi
+  (
+    flock 9
+    if [[ ! -f "$AUDIT_NODE_TOOLING_DIR/package.json" ]]; then
+      cd "$AUDIT_NODE_TOOLING_DIR"
+      npm init -y >/dev/null 2>&1
+    fi
+  ) 9>"$AUDIT_NODE_TOOLING_DIR/.node-project.lock" || return 1
 }
 
 audit_node_package_dir() {
@@ -580,7 +584,11 @@ audit_install_node_packages() {
     return 1
   }
   printf '[native-tooling] installing node packages into %s: %s\n' "$AUDIT_NODE_TOOLING_DIR" "$*" >> "$log_file"
-  (cd "$AUDIT_NODE_TOOLING_DIR" && npm install --save-dev "$@") >> "$log_file" 2>&1 || {
+  (
+    flock 9
+    cd "$AUDIT_NODE_TOOLING_DIR"
+    npm install --save-dev "$@"
+  ) 9>"$AUDIT_NODE_TOOLING_DIR/.npm-install.lock" >> "$log_file" 2>&1 || {
     printf '[native-tooling] node install failed for packages=%s\n' "$*" >> "$log_file"
     return 1
   }
@@ -638,8 +646,14 @@ audit_ensure_playwright_chromium() {
     printf '[native-tooling] browser auto-install disabled; chromium not present\n' >> "$log_file"
     return 1
   }
-  printf '[native-tooling] installing playwright chromium into %s\n' "$browser_dir" >> "$log_file"
-  PLAYWRIGHT_BROWSERS_PATH="$browser_dir" "$(audit_resolve_node_bin "playwright")" install chromium >> "$log_file" 2>&1 || {
+  printf '[native-tooling] ensuring playwright chromium exists in %s\n' "$browser_dir" >> "$log_file"
+  (
+    flock 9
+    if [[ -d "$browser_dir" ]] && find "$browser_dir" -mindepth 1 -maxdepth 1 -type d | read -r; then
+      exit 0
+    fi
+    PLAYWRIGHT_BROWSERS_PATH="$browser_dir" "$(audit_resolve_node_bin "playwright")" install chromium
+  ) 9>"$AUDIT_NODE_TOOLING_DIR/.playwright-install.lock" >> "$log_file" 2>&1 || {
     printf '[native-tooling] playwright chromium install failed\n' >> "$log_file"
     return 1
   }
@@ -1388,6 +1402,7 @@ actor_by_job = {
     "03-exceptions": "operator",
     "03-administration": "reviewer",
 }
+
 actor = actor_by_job.get(job_id)
 actor_state = Path(run_dir) / "artifacts" / "ux-fixtures" / f"auth-state-{actor}.json" if actor else None
 actor_init = Path(run_dir) / "artifacts" / "ux-fixtures" / f"init-page-{actor}.ts" if actor else None
@@ -1406,6 +1421,27 @@ if credentials.is_file() and not (actor_state and actor_state.is_file()):
     auth_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.ts")
     if auth_initializer.is_file():
         args.extend(["--init-page", str(auth_initializer)])
+print(json.dumps(args))
+PY
+}
+
+playwright_secondary_mcp_codex_args_json() {
+  local job_id="$1" executable_path="$2"
+  python3 - "$RUN_DIR" "$job_id" "$executable_path" "$REPO_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+run_dir, job_id, executable_path, repo_root = sys.argv[1:]
+credentials = Path(repo_root) / "docs" / "ux" / ".creds.secondary"
+initializer = Path(repo_root) / "scripts" / "ux-browser-auth-secondary-init.ts"
+args = [
+    "--yes", "@playwright/mcp@latest", "--headless", "--isolated", "--no-sandbox",
+    "--executable-path", executable_path,
+    "--output-dir", str(Path(run_dir) / "artifacts" / job_id / "playwright-mcp-secondary"),
+    "--output-mode", "file", "--save-session", "--viewport-size", "1440x1000",
+    "--secrets", str(credentials), "--init-page", str(initializer),
+]
 print(json.dumps(args))
 PY
 }
@@ -1451,6 +1487,12 @@ _run_codex() {
     cmd+=(-c 'mcp_servers.playwright.command="npx"')
     cmd+=(-c "mcp_servers.playwright.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path")")
     cmd+=(-c "mcp_servers.playwright.cwd=\"$REPO_ROOT\"")
+    if [[ -f "$REPO_ROOT/docs/ux/.creds.secondary" && -f "$REPO_ROOT/scripts/ux-browser-auth-secondary-init.ts" ]]; then
+      mkdir -p "$RUN_DIR/artifacts/$job_id/playwright-mcp-secondary"
+      cmd+=(-c 'mcp_servers.playwright_secondary.command="npx"')
+      cmd+=(-c "mcp_servers.playwright_secondary.args=$(playwright_secondary_mcp_codex_args_json "$job_id" "$chromium_path")")
+      cmd+=(-c "mcp_servers.playwright_secondary.cwd=\"$REPO_ROOT\"")
+    fi
   fi
   if [[ "${LATTICE_MCP_AUTO:-1}" == "1" ]]; then
     local lattice_cmd="${LATTICE_MCP_COMMAND:-/home/pete/cadres/lattice/daemon/target/release/lattice}"
