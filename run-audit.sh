@@ -569,7 +569,8 @@ audit_node_package_dir() {
 }
 
 audit_node_package_present() {
-  [[ -d "$(audit_node_package_dir "$1")" ]]
+  [[ -d "$(audit_node_package_dir "$1")" ]] &&
+    [[ -f "$AUDIT_NODE_TOOLING_DIR/.package-ready-$1" ]]
 }
 
 audit_install_node_packages() {
@@ -587,7 +588,11 @@ audit_install_node_packages() {
   (
     flock 9
     cd "$AUDIT_NODE_TOOLING_DIR"
-    npm install --save-dev "$@"
+    npm install --save-dev "$@" || exit 1
+    local package
+    for package in "$@"; do
+      touch "$AUDIT_NODE_TOOLING_DIR/.package-ready-$package"
+    done
   ) 9>"$AUDIT_NODE_TOOLING_DIR/.npm-install.lock" >> "$log_file" 2>&1 || {
     printf '[native-tooling] node install failed for packages=%s\n' "$*" >> "$log_file"
     return 1
@@ -639,7 +644,8 @@ audit_ensure_playwright_chromium() {
   local log_file="$1"
   audit_ensure_node_bin "playwright" "$log_file" "playwright" || return 1
   local browser_dir="$AUDIT_NODE_TOOLING_DIR/playwright-browsers"
-  if [[ -d "$browser_dir" ]] && find "$browser_dir" -mindepth 1 -maxdepth 1 -type d | read -r; then
+  local ready_marker="$browser_dir/.chromium-install-complete"
+  if [[ -f "$ready_marker" ]]; then
     return 0
   fi
   [[ "${AUDIT_NODE_TOOLING_AUTO_INSTALL:-1}" == "1" ]] || {
@@ -649,10 +655,11 @@ audit_ensure_playwright_chromium() {
   printf '[native-tooling] ensuring playwright chromium exists in %s\n' "$browser_dir" >> "$log_file"
   (
     flock 9
-    if [[ -d "$browser_dir" ]] && find "$browser_dir" -mindepth 1 -maxdepth 1 -type d | read -r; then
+    if [[ -f "$ready_marker" ]]; then
       exit 0
     fi
-    PLAYWRIGHT_BROWSERS_PATH="$browser_dir" "$(audit_resolve_node_bin "playwright")" install chromium
+    PLAYWRIGHT_BROWSERS_PATH="$browser_dir" "$(audit_resolve_node_bin "playwright")" install chromium || exit 1
+    touch "$ready_marker"
   ) 9>"$AUDIT_NODE_TOOLING_DIR/.playwright-install.lock" >> "$log_file" 2>&1 || {
     printf '[native-tooling] playwright chromium install failed\n' >> "$log_file"
     return 1
