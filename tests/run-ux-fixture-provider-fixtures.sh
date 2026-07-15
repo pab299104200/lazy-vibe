@@ -20,6 +20,7 @@ upload_path="$(sed -n 's/.*Disposable file: `\([^`]*\)`.*/\1/p' "$manifest")"
 [[ -f "$upload_path" ]]
 grep -q 'fresh_portal_tenant.*READY' "$manifest"
 grep -q 'disposable_portal_identities.*READY' "$manifest"
+grep -q 'secondary_keystone_approver.*UNAVAILABLE' "$manifest"
 "$provider" cleanup "$tmp_root" "$run_dir" "$plan" "$manifest"
 [[ ! -e "$upload_path" ]]
 
@@ -48,6 +49,8 @@ grep -q 'Failure of one setup or onboarding journey must not cascade' "$script_d
 grep -q 'actor_by_job' "$script_dir/run-audit.sh"
 grep -q 'auth-state-{actor}.json' "$script_dir/run-audit.sh"
 grep -q 'mcp_servers.playwright_secondary.command' "$script_dir/run-audit.sh"
+grep -q 'completeOAuthConsent' "$script_dir/ux-browser-auth-init.ts"
+grep -q 'requires tenant_id when more than one organization is available' "$script_dir/ux-browser-auth-init.ts"
 grep -q '.npm-install.lock' "$script_dir/run-audit.sh"
 grep -q '.playwright-install.lock' "$script_dir/run-audit.sh"
 grep -q '.chromium-install-complete' "$script_dir/run-audit.sh"

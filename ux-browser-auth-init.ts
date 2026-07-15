@@ -56,6 +56,31 @@ async function armAuditActivityHeartbeat(page) {
   });
 }
 
+async function completeOAuthConsent(page, credentials, expectedOrigin) {
+  if (new URL(page.url()).pathname !== '/auth/authorize') return;
+
+  const tenantSelector = page.locator('[data-testid="o-auth-authorize-select"]');
+  if (await tenantSelector.isVisible().catch(() => false)) {
+    const configuredTenantId = credentials.tenant_id || credentials.portal_tenant_id;
+    if (configuredTenantId) {
+      await tenantSelector.selectOption(String(configuredTenantId));
+    } else {
+      const availableOptions = await tenantSelector.locator('option:not([disabled])').all();
+      if (availableOptions.length !== 1) {
+        throw new Error('UX OAuth consent requires tenant_id when more than one organization is available.');
+      }
+      await tenantSelector.selectOption(await availableOptions[0].getAttribute('value') || '');
+    }
+  }
+
+  const allowButton = page.locator('[data-testid="o-auth-authorize-button"]');
+  if (!await allowButton.isVisible().catch(() => false)) return;
+  await allowButton.click();
+  await page.waitForURL((url) => url.origin === expectedOrigin, { timeout: 30000 });
+  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+  await page.waitForTimeout(1500);
+}
+
 export default async ({ page }) => {
   const credentialsPath = process.env.UX_AUTH_CREDENTIALS ||
     path.join(process.cwd(), 'docs', 'ux', '.creds');
@@ -158,5 +183,6 @@ export default async ({ page }) => {
   await submit.click();
   await page.waitForLoadState('domcontentloaded').catch(() => undefined);
   await page.waitForTimeout(2500);
+  await completeOAuthConsent(page, credentials, new URL(baseUrl).origin);
   await armAuditActivityHeartbeat(page);
 };

@@ -10,6 +10,8 @@ fixture_dir="$run_dir/artifacts/ux-fixtures"
 upload_file="$fixture_dir/keystone-audit-evidence.png"
 bank_csv_file="$fixture_dir/keystone-audit-bank-statement.csv"
 bank_ofx_file="$fixture_dir/keystone-audit-bank-statement.ofx"
+secondary_credentials="$repo_root/docs/ux/.creds.secondary"
+secondary_initializer="$repo_root/scripts/ux-browser-auth-secondary-init.ts"
 
 case "$action" in
   describe|prepare)
@@ -65,6 +67,10 @@ STATUS: PARTIAL
 - \`disposable_portal_identities\`: READY
   - The audit identity has \`portal.users.manage\` and \`portal.groups.manage\`.
   - Create only uniquely prefixed users and groups inside the disposable audit tenant.
+- \`secondary_keystone_approver\`: $([[ -s "$secondary_credentials" && -f "$secondary_initializer" ]] && printf READY || printf UNAVAILABLE)
+  - When ready, the harness exposes a separately authenticated \`playwright_secondary\` browser for maker-checker and handoff journeys.
+  - The identity has an explicit Keystone application assignment and Keystone administrator app role in the disposable dev tenant.
+  - Do not use two sessions for the primary identity as approval evidence; actor IDs must differ.
 - \`portal_roles_manage\`: UNAVAILABLE
   - Reuse published roles rather than creating or changing Portal roles.
 
