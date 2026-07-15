@@ -14,6 +14,7 @@ printf 'UX-J12\t03-administration\tAuditor\tP1\tEmpty\tUpload\tRestored\tHarness
 provider="$script_dir/profiles/keystone/ux-fixtures"
 "$provider" describe "$tmp_root" "$run_dir" "" "$manifest"
 grep -q 'browser_record_creation.*READY' "$manifest"
+grep -q 'purchase_to_pay_browser_setup.*READY' "$manifest"
 "$provider" prepare "$tmp_root" "$run_dir" "$plan" "$manifest"
 grep -q 'file_upload.*READY' "$manifest"
 upload_path="$(sed -n 's/.*Disposable file: `\([^`]*\)`.*/\1/p' "$manifest")"
@@ -21,6 +22,8 @@ upload_path="$(sed -n 's/.*Disposable file: `\([^`]*\)`.*/\1/p' "$manifest")"
 grep -q 'fresh_portal_tenant.*READY' "$manifest"
 grep -q 'disposable_portal_identities.*READY' "$manifest"
 grep -q 'secondary_keystone_approver.*UNAVAILABLE' "$manifest"
+grep -q "UXAUDIT run opening deposit" "$run_dir/artifacts/ux-fixtures/keystone-audit-bank-statement.csv"
+grep -q "FITID>UXAUDIT-DEP-run" "$run_dir/artifacts/ux-fixtures/keystone-audit-bank-statement.ofx"
 "$provider" cleanup "$tmp_root" "$run_dir" "$plan" "$manifest"
 [[ ! -e "$upload_path" ]]
 
