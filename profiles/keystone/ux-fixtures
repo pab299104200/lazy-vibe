@@ -8,11 +8,31 @@ plan_file="${4:-}"
 manifest_file="${5:?missing manifest file}"
 fixture_dir="$run_dir/artifacts/ux-fixtures"
 upload_file="$fixture_dir/keystone-audit-evidence.png"
+bank_csv_file="$fixture_dir/keystone-audit-bank-statement.csv"
+bank_ofx_file="$fixture_dir/keystone-audit-bank-statement.ofx"
 
 case "$action" in
   describe|prepare)
     mkdir -p "$fixture_dir"
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$upload_file"
+    cat > "$bank_csv_file" <<'CSV'
+date,description,amount
+2026-07-01,UXAUDIT opening deposit,125.00
+2026-07-02,UXAUDIT bank fee,-5.00
+CSV
+    cat > "$bank_ofx_file" <<'OFX'
+OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX><BANKMSGSRSV1><STMTTRNRS><TRNUID>UXAUDIT-202607</TRNUID><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS><STMTRS><CURDEF>USD</CURDEF><BANKACCTFROM><BANKID>000000001</BANKID><ACCTID>UXAUDIT-DISPOSABLE</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM><BANKTRANLIST><DTSTART>20260701000000</DTSTART><DTEND>20260731235959</DTEND><STMTTRN><TRNTYPE>CREDIT</TRNTYPE><DTPOSTED>20260701120000</DTPOSTED><TRNAMT>125.00</TRNAMT><FITID>UXAUDIT-DEP-20260701</FITID><NAME>UXAUDIT opening deposit</NAME></STMTTRN><STMTTRN><TRNTYPE>FEE</TRNTYPE><DTPOSTED>20260702120000</DTPOSTED><TRNAMT>-5.00</TRNAMT><FITID>UXAUDIT-FEE-20260702</FITID><NAME>UXAUDIT bank fee</NAME></STMTTRN></BANKTRANLIST><LEDGERBAL><BALAMT>120.00</BALAMT><DTASOF>20260731235959</DTASOF></LEDGERBAL></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>
+OFX
     cat > "$manifest_file" <<MANIFEST
 # UX Fixture Manifest
 
@@ -26,6 +46,15 @@ STATUS: PARTIAL
   - Use the Playwright file-upload tool, not drag-and-drop.
 - \`browser_record_creation\`: READY
   - Create uniquely prefixed reversible Keystone records through the deployed UI using Playwright typing/fill tools.
+
+- bank_statement_csv: READY
+  - Disposable file: $bank_csv_file
+  - Contains two uniquely named UXAUDIT transactions totaling USD 120.00.
+  - Cleanup owner: harness provider and disposable tenant teardown.
+- bank_statement_ofx: READY
+  - Disposable file: $bank_ofx_file
+  - Contains the same two deterministic UXAUDIT transactions with stable FITIDs.
+  - Cleanup owner: harness provider and disposable tenant teardown.
 
 ## Portal Provisioning Capabilities
 
@@ -43,7 +72,7 @@ Never alter existing tenants, identities, groups, memberships, or grants. Portal
 MANIFEST
     ;;
   cleanup)
-    rm -f "$upload_file"
+    rm -f "$upload_file" "$bank_csv_file" "$bank_ofx_file"
     ;;
   *)
     printf 'unknown fixture-provider action: %s\n' "$action" >&2
