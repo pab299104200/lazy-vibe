@@ -13,6 +13,7 @@ bank_ofx_file="$fixture_dir/keystone-audit-bank-statement.ofx"
 secondary_credentials="$repo_root/docs/ux/.creds.secondary"
 secondary_initializer="$repo_root/scripts/ux-browser-auth-secondary-init.ts"
 fixture_key="$(basename "$run_dir" | tr -cd '[:alnum:]_-')"
+secondary_email="$(awk -F= '$1 == "email" { print substr($0, index($0, "=") + 1); exit }' "$secondary_credentials" 2>/dev/null || true)"
 
 case "$action" in
   describe|prepare)
@@ -46,7 +47,8 @@ STATUS: PARTIAL
 - \`file_upload\`: READY
   - Disposable file: \`$upload_file\`
   - Cleanup owner: harness provider
-  - Use the Playwright file-upload tool, not drag-and-drop.
+  - Use the Playwright file-upload tool, not drag-and-drop. If the file-chooser tool times out, use Playwright run-code to call \`setInputFiles\` on the visible \`input[type=file]\`, then verify the selected filename before submitting.
+  - Choose the recipient class that matches the required attachment: customer-facing for customer/invoice, vendor-facing for vendor/bill/purchase order, and internal evidence for expense/journal entry. Do not use an existing document with a different recipient class as a substitute.
 - \`browser_record_creation\`: READY
   - Create uniquely prefixed reversible Keystone records through the deployed UI using Playwright typing/fill tools.
 - \`purchase_to_pay_browser_setup\`: READY
@@ -73,7 +75,10 @@ STATUS: PARTIAL
   - Create only uniquely prefixed users and groups inside the disposable audit tenant.
 - \`secondary_keystone_approver\`: $([[ -s "$secondary_credentials" && -f "$secondary_initializer" ]] && printf READY || printf UNAVAILABLE)
   - When ready, the harness exposes a separately authenticated \`playwright_secondary\` browser for maker-checker and handoff journeys.
+  - Authenticated directory identity: \`${secondary_email:-UNAVAILABLE}\`. Access setup must select this exact email; a similarly named user is not the secondary browser actor.
   - The identity has an explicit Keystone application assignment and Keystone administrator app role in the disposable dev tenant.
+  - Before maker-checker execution, grant this exact identity a published Keystone role containing the workflow's required approval permission (for purchase-to-pay, \`keystone.purchase_orders.approve\`) and verify that permission in effective access preview.
+  - Preserve the required grant until every dependent secondary-browser journey has completed. Revoke it only during final run cleanup, never at the end of an earlier setup journey.
   - Do not use two sessions for the primary identity as approval evidence; actor IDs must differ.
 - \`portal_roles_manage\`: UNAVAILABLE
   - Reuse published roles rather than creating or changing Portal roles.
