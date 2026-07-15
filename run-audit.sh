@@ -11,6 +11,7 @@ PRODUCT_PROFILE="${PRODUCT_PROFILE:-}"
 PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 PROFILE="${PROFILE:-}"
 UX_FIXTURE_PROVIDER="${UX_FIXTURE_PROVIDER:-}"
+UX_MAX_JOURNEYS="${UX_MAX_JOURNEYS:-12}"
 REGISTER_DIR="${REGISTER_DIR:-}"
 AUDIT_REGISTER_RECONCILE="${AUDIT_REGISTER_RECONCILE:-1}"
 AUDIT_REGISTER_CONTEXT="${AUDIT_REGISTER_CONTEXT:-1}"
@@ -66,6 +67,7 @@ Environment:
   UX_FIXTURE_PROVIDER  Optional executable implementing prepare/cleanup actions. Prepare runs
                        after journey planning and before simulation jobs and must write a
                        sanitized Markdown fixture manifest without credentials.
+  UX_MAX_JOURNEYS      Maximum journeys accepted from the UX planner. Defaults to 12.
   REGISTER_DIR         Optional product register directory. Defaults to <Repo root>/docs/audit/register
                        when register.jsonl exists or a product profile names a Repo root.
   AUDIT_REGISTER_RECONCILE
@@ -248,6 +250,7 @@ audit_readonly_diff_snapshot() {
   if [[ -n "$rel_run_dir" ]]; then
     pathspec+=(":(exclude)$rel_run_dir")
   fi
+  pathspec+=(":(exclude).lattice")
   git -C "$REPO_ROOT" status --porcelain=v1 -uall -- "${pathspec[@]}"
 }
 
@@ -258,6 +261,7 @@ audit_restore_readonly_changes() {
   if [[ -n "$rel_run_dir" ]]; then
     pathspec+=(":(exclude)$rel_run_dir")
   fi
+  pathspec+=(":(exclude).lattice")
 
   local restore_list
   restore_list="$(mktemp)"
@@ -819,13 +823,19 @@ group_selected() {
 prepare_ux_journey_plan() {
   local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
   [[ "${UX_PLAYWRIGHT_MCP:-0}" == "1" && -s "$plan_file" ]] || return 0
-  python3 - "$plan_file" <<'PY'
+  python3 - "$plan_file" "$UX_MAX_JOURNEYS" <<'PY'
 import csv
 import os
 import sys
 from pathlib import Path
 
 plan_file = Path(sys.argv[1])
+try:
+    maximum_journeys = int(sys.argv[2])
+except ValueError as error:
+    raise SystemExit("UX_MAX_JOURNEYS must be a positive integer") from error
+if maximum_journeys < 1:
+    raise SystemExit("UX_MAX_JOURNEYS must be a positive integer")
 required = [
     "journey_id", "execution_job", "role", "priority", "starting_state",
     "task", "completion_oracle", "fixture_strategy",
@@ -845,6 +855,10 @@ with plan_file.open(newline="", encoding="utf-8") as handle:
     rows = list(reader)
 if not rows:
     raise SystemExit("UX journey plan has no journeys")
+if len(rows) > maximum_journeys:
+    raise SystemExit(
+        f"UX journey plan has {len(rows)} journeys; maximum is {maximum_journeys}"
+    )
 seen = set()
 for row in rows:
     journey_id = row["journey_id"].strip()
@@ -870,7 +884,7 @@ append_ux_journey_assignment() {
   local prompt_file="$1" job_id="$2"
   local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
   [[ "${UX_PLAYWRIGHT_MCP:-0}" == "1" && -s "$plan_file" ]] || return 0
-  prepare_ux_journey_plan
+  prepare_ux_journey_plan || return
 
   local assigned_rows
   assigned_rows="$(awk -F'\t' -v job="$job_id" 'NR > 1 && $2 == job { print }' "$plan_file")"
@@ -1071,7 +1085,7 @@ HEADER
     append_ux_fixture_manifest "$prompt_file"
   elif [[ "$kind" == "simulation" ]]; then
     append_ux_fixture_manifest "$prompt_file"
-    append_ux_journey_assignment "$prompt_file" "$job_id"
+    append_ux_journey_assignment "$prompt_file" "$job_id" || return
   elif [[ "$kind" =~ ^(adversarial|final)$ ]]; then
     write_ux_journey_evidence_index
     if [[ -s "$RUN_DIR/artifacts/journey-evidence-index.tsv" ]]; then

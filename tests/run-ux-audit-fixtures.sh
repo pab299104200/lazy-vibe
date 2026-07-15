@@ -9,6 +9,13 @@ profile_dir="$fixture_root/profiles/example"
 repo_root="$fixture_root/product"
 run_dir="$fixture_root/run"
 mkdir -p "$profile_dir" "$repo_root"
+mkdir -p "$repo_root/.lattice"
+printf '{"calls": 0}\n' > "$repo_root/.lattice/adoption_metrics.json"
+printf 'product source\n' > "$repo_root/product.txt"
+git -C "$repo_root" init -q
+git -C "$repo_root" add .lattice/adoption_metrics.json product.txt
+git -C "$repo_root" -c user.name='UX Fixture' -c user.email='ux-fixture@example.invalid' \
+  commit -qm 'fixture baseline'
 
 cat > "$profile_dir/product-profile.md" <<'PROFILE'
 # Product Profile
@@ -60,6 +67,20 @@ fi
 grep -q 'artifacts/03-primary-work/journeys/<journey_id>/trace.md' "$run_dir/prompts/03-primary-work.md"
 grep -q 'journey-results.tsv' "$run_dir/prompts/03-primary-work.md"
 
+for journey_number in $(seq 3 13); do
+  printf 'J%02d-extra\tprimary-work\tOperator\tP2\tSigned in\tExtra journey %d\tOutcome is visible\tCreate a prefixed fixture\n' \
+    "$journey_number" "$journey_number" >> "$run_dir/artifacts/journey-plan.tsv"
+done
+rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+if PROFILES_DIR="$fixture_root/profiles" REPO_ROOT="$repo_root" RUN_DIR="$run_dir" \
+  "$SCRIPT_DIR/run-ux-audit.sh" --profile example --dry-run --only 03-primary-work \
+  >"$fixture_root/journey-limit.log" 2>&1; then
+  printf 'oversized UX journey plan unexpectedly passed validation\n' >&2
+  exit 1
+fi
+grep -q 'UX journey plan has 13 journeys; maximum is 12' "$fixture_root/journey-limit.log"
+sed -i '/^J0[3-9]-extra\|^J1[0-3]-extra/d' "$run_dir/artifacts/journey-plan.tsv"
+
 fake_runner="$fixture_root/fake-audit-runner.sh"
 cat > "$fake_runner" <<'RUNNER'
 #!/usr/bin/env bash
@@ -80,11 +101,18 @@ if [[ "${INJECT_FOREIGN_JOURNEY:-0}" == "1" ]]; then
   printf '# Journey Trace\n\nRESULT: PASS\n' > "$run_dir/artifacts/$job_id/journeys/J02-admin/trace.md"
   printf 'J02-admin\tPASS\tCREATED\tPROVEN\tartifacts/%s/journeys/J02-admin/trace.md\tCLEANED\t\n' "$job_id" >> "$run_dir/artifacts/$job_id/journey-results.tsv"
 fi
+if [[ "${MUTATE_LATTICE_RUNTIME:-0}" == "1" ]]; then
+  printf '{"calls": 1}\n' > "$REPO_ROOT/.lattice/adoption_metrics.json"
+fi
+if [[ "${MUTATE_PRODUCT_SOURCE:-0}" == "1" ]]; then
+  printf 'unexpected product mutation\n' > "$REPO_ROOT/product.txt"
+fi
 printf 'JOB: %s\nRESULT: PASS\n' "$job_id"
 RUNNER
 chmod +x "$fake_runner"
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+MUTATE_LATTICE_RUNTIME=1 \
 AUDIT_RUNNER="$fake_runner" \
 PROFILES_DIR="$fixture_root/profiles" \
 REPO_ROOT="$repo_root" \
@@ -101,6 +129,21 @@ grep -q 'STATUS: PASS' "$run_dir/artifacts/03-primary-work/evidence-validation.m
   exit 1
 }
 grep -q $'03-primary-work\tJ01-primary\tPASS' "$run_dir/artifacts/journey-evidence-index.tsv"
+
+rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+if MUTATE_PRODUCT_SOURCE=1 \
+  CONTINUE_ON_FAIL=0 \
+  AUDIT_MAX_RETRIES=0 \
+  AUDIT_RUNNER="$fake_runner" \
+  PROFILES_DIR="$fixture_root/profiles" \
+  REPO_ROOT="$repo_root" \
+  RUN_DIR="$run_dir" \
+  UX_BROWSER_PREFLIGHT=0 \
+  "$SCRIPT_DIR/run-ux-audit.sh" --profile example --only 03-primary-work >/dev/null 2>&1; then
+  printf 'product source mutation unexpectedly passed integrity validation\n' >&2
+  exit 1
+fi
+grep -q 'product source' "$repo_root/product.txt"
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 if INJECT_FOREIGN_JOURNEY=1 \
@@ -161,6 +204,46 @@ if rg -n 'must-not-appear' "$preflight_run" >/dev/null; then
   printf 'browser preflight leaked a credential\n' >&2
   exit 1
 fi
+
+node - "$SCRIPT_DIR/ux-browser-preflight.cjs" <<'JS'
+const assert = require('assert');
+const { hasAuthenticatedSurface } = require(process.argv[2]);
+
+function pageFixture({ url, surfaceVisible, passwordVisible }) {
+  return {
+    url: () => url,
+    locator: (selector) => ({
+      first: () => ({
+        waitFor: async () => {
+          if (!surfaceVisible || selector === 'input[type="password"]') throw new Error('not visible');
+        },
+        isVisible: async () => selector === 'input[type="password"]' && passwordVisible,
+      }),
+    }),
+  };
+}
+
+(async () => {
+  assert.equal(await hasAuthenticatedSurface(pageFixture({
+    url: 'https://product.example.test/',
+    surfaceVisible: true,
+    passwordVisible: false,
+  }), {}, 'https://product.example.test'), true);
+  assert.equal(await hasAuthenticatedSurface(pageFixture({
+    url: 'https://login.example.test/',
+    surfaceVisible: true,
+    passwordVisible: false,
+  }), {}, 'https://product.example.test'), false);
+  assert.equal(await hasAuthenticatedSurface(pageFixture({
+    url: 'https://product.example.test/login',
+    surfaceVisible: true,
+    passwordVisible: true,
+  }), {}, 'https://product.example.test'), false);
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+JS
 
 if PROFILES_DIR="$fixture_root/profiles" REPO_ROOT="$repo_root" \
   "$SCRIPT_DIR/run-ux-audit.sh" --profile missing --dry-run >/dev/null 2>&1; then

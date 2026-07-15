@@ -36,7 +36,29 @@ function readCredentials(repoRoot) {
   return credentials;
 }
 
-async function authenticate(page, credentials, throttle) {
+async function hasAuthenticatedSurface(page, credentials, expectedUrl, timeout = 15000) {
+  const authenticatedSelector = credentials.authenticated_selector ||
+    'nav, [role="navigation"], [data-app-shell]';
+  const surface = page.locator(authenticatedSelector).first();
+  const hasSurface = await surface.waitFor({ state: 'visible', timeout })
+    .then(() => true, () => false);
+  if (!hasSurface) return false;
+
+  let currentOrigin;
+  let expectedOrigin;
+  try {
+    currentOrigin = new URL(page.url()).origin;
+    expectedOrigin = new URL(expectedUrl).origin;
+  } catch {
+    return false;
+  }
+  if (currentOrigin !== expectedOrigin) return false;
+
+  const passwordInput = page.locator('input[type="password"]').first();
+  return !(await passwordInput.isVisible().catch(() => false));
+}
+
+async function authenticate(page, credentials, throttle, expectedUrl) {
   const email = credentials.email || credentials.username;
   if (!email || !credentials.password) return false;
   const emailSelector = credentials.email_selector ||
@@ -47,6 +69,7 @@ async function authenticate(page, credentials, throttle) {
   if (throttle.retryAfter > 0) {
     throw new Error(`Authentication is rate limited at ${throttle.path}; retry after ${throttle.retryAfter} seconds.`);
   }
+  if (await hasAuthenticatedSurface(page, credentials, expectedUrl)) return true;
   let hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 30000 })
     .then(() => true, () => false);
   if (!hasLogin) {
@@ -149,7 +172,7 @@ async function main() {
     if (portalUrl && (credentials.email || credentials.username)) {
       const portalLoginUrl = `${portalUrl.replace(/\/$/, '')}/login`;
       await page.goto(portalLoginUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      const portalAuthenticated = await authenticate(page, credentials, throttle);
+      const portalAuthenticated = await authenticate(page, credentials, throttle, portalLoginUrl);
       if (!portalAuthenticated) {
         throw new Error(`Configured Portal fixture credentials could not reach a login form at ${portalLoginUrl}.`);
       }
@@ -163,7 +186,7 @@ async function main() {
     details.push(`Browser engine: ${playwright.chromium.name()} at ${executablePath}.`);
     details.push('A first-page screenshot was captured without persisting credentials.');
     if (credentials.email || credentials.username) {
-      const authenticated = await authenticate(page, credentials, throttle);
+      const authenticated = await authenticate(page, credentials, throttle, baseUrl);
       if (!authenticated) {
         throw new Error(`Configured browser credentials exist but no login form was reached at ${page.url()} (${await page.title() || 'untitled page'}).`);
       }
@@ -176,10 +199,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   const args = (() => { try { return parseArgs(process.argv); } catch { return {}; } })();
   const runDir = args['run-dir'] ? path.resolve(args['run-dir']) : process.cwd();
   const outDir = path.join(runDir, 'artifacts', 'browser-preflight');
   writeSummary(outDir, 'FAIL', [String(error && error.message ? error.message : error)]);
   process.exitCode = 1;
 });
+
+module.exports = { hasAuthenticatedSurface };
