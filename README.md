@@ -419,7 +419,7 @@ Native accessibility and Lighthouse outputs are aggregated into:
 - `artifacts/ux-browser-gate-summary.md`
 - `artifacts/ux-browser-gate-summary.tsv`
 
-Node package and Playwright browser installation is lock-serialized inside the tooling directory. Readiness markers are written only after each installation succeeds, so parallel journey jobs cannot consume a partially populated package or browser directory. When a product supplies both `docs/ux/.creds.secondary` and `scripts/ux-browser-auth-secondary-init.ts`, simulation jobs also receive an isolated `playwright_secondary` MCP browser for workflows that require a genuinely separate signed-in identity.
+Node package and Playwright browser installation is lock-serialized inside the tooling directory. Readiness markers are written only after each installation succeeds, so parallel journey jobs cannot consume a partially populated package or browser directory. When a product supplies `docs/ux/.creds.secondary`, the harness generates a Node-compatible `.mjs` initializer from the shared authentication contract and simulation jobs receive an isolated `playwright_secondary` MCP browser for workflows that require a genuinely separate signed-in identity. Products do not need to maintain an auth initializer wrapper.
 
 Adversarial and final-decision jobs are instructed to read those files before issuing launch posture. Unverified or failing browser/accessibility/performance evidence is a release input, not optional polish.
 

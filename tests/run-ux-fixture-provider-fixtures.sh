@@ -52,6 +52,8 @@ grep -q 'Failure of one setup or onboarding journey must not cascade' "$script_d
 grep -q 'actor_by_job' "$script_dir/run-audit.sh"
 grep -q 'auth-state-{actor}.json' "$script_dir/run-audit.sh"
 grep -q 'mcp_servers.playwright_secondary.command' "$script_dir/run-audit.sh"
+grep -q 'playwright-secondary-init.mjs' "$script_dir/run-audit.sh"
+grep -q 'docs/ux/.creds.secondary' "$script_dir/run-audit.sh"
 grep -q 'completeOAuthConsent' "$script_dir/ux-browser-auth-init.ts"
 grep -q 'requires tenant_id when more than one organization is available' "$script_dir/ux-browser-auth-init.ts"
 grep -q '.npm-install.lock' "$script_dir/run-audit.sh"

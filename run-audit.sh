@@ -1407,13 +1407,14 @@ PY
 }
 
 playwright_mcp_codex_args_json() {
-  local job_id="$1" executable_path="$2"
-  python3 - "$RUN_DIR" "$job_id" "$executable_path" "$REPO_ROOT" <<'PY'
+  local job_id="$1" executable_path="$2" requested_actor="${3:-}"
+  python3 - "$RUN_DIR" "$job_id" "$executable_path" "$REPO_ROOT" "$requested_actor" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-run_dir, job_id, executable_path, repo_root = sys.argv[1:]
+run_dir, job_id, executable_path, repo_root, requested_actor = sys.argv[1:]
+output_name = f"playwright-mcp-{requested_actor}" if requested_actor else "playwright-mcp"
 args = [
     "--yes",
     "@playwright/mcp@latest",
@@ -1423,7 +1424,7 @@ args = [
     "--executable-path",
     executable_path,
     "--output-dir",
-    str(Path(run_dir) / "artifacts" / job_id / "playwright-mcp"),
+    str(Path(run_dir) / "artifacts" / job_id / output_name),
     "--output-mode",
     "file",
     "--save-session",
@@ -1437,7 +1438,7 @@ actor_by_job = {
     "03-administration": "reviewer",
 }
 
-actor = actor_by_job.get(job_id)
+actor = requested_actor or actor_by_job.get(job_id)
 actor_state = Path(run_dir) / "artifacts" / "ux-fixtures" / f"auth-state-{actor}.json" if actor else None
 actor_init = Path(run_dir) / "artifacts" / "ux-fixtures" / f"init-page-{actor}.ts" if actor else None
 storage_state = actor_state if actor_state and actor_state.is_file() else Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
@@ -1452,7 +1453,7 @@ if actor_init and actor_init.is_file():
     args.append(f"--init-page={actor_init}")
 if credentials.is_file() and not (actor_state and actor_state.is_file()):
     args.extend(["--secrets", str(credentials)])
-    auth_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.ts")
+    auth_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.mjs")
     if auth_initializer.is_file():
         args.extend(["--init-page", str(auth_initializer)])
 print(json.dumps(args))
@@ -1468,7 +1469,22 @@ from pathlib import Path
 
 run_dir, job_id, executable_path, repo_root = sys.argv[1:]
 credentials = Path(repo_root) / "docs" / "ux" / ".creds.secondary"
-initializer = Path(repo_root) / "scripts" / "ux-browser-auth-secondary-init.ts"
+initializer = Path(run_dir) / "artifacts" / job_id / "playwright-secondary-init.mjs"
+initializer.parent.mkdir(parents=True, exist_ok=True)
+shared_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.mjs")
+initializer.write_text(
+    "import initializeBrowserAuth from " + json.dumps(shared_initializer.as_uri()) + ";\n"
+    "export default async function initializeSecondaryBrowserAuth({ page }) {\n"
+    "  const previous = process.env.UX_AUTH_CREDENTIALS;\n"
+    "  process.env.UX_AUTH_CREDENTIALS = " + json.dumps(str(credentials)) + ";\n"
+    "  try { await initializeBrowserAuth({ page }); }\n"
+    "  finally {\n"
+    "    if (previous === undefined) delete process.env.UX_AUTH_CREDENTIALS;\n"
+    "    else process.env.UX_AUTH_CREDENTIALS = previous;\n"
+    "  }\n"
+    "}\n",
+    encoding="utf-8",
+)
 args = [
     "--yes", "@playwright/mcp@latest", "--headless", "--isolated", "--no-sandbox",
     "--executable-path", executable_path,
@@ -1514,14 +1530,24 @@ _run_codex() {
     "${CODEX_REASONING_ADVERSARIAL:-high}" "${CODEX_REASONING_FINAL:-high}")"
   [[ -n "$selected_reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$selected_reasoning\"")
   if [[ "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
-    local chromium_path playwright_output_dir
+    local chromium_path playwright_output_dir actor actor_server actor_output_dir
     chromium_path="$(repo_playwright_chromium_path)"
     playwright_output_dir="$RUN_DIR/artifacts/$job_id/playwright-mcp"
     mkdir -p "$playwright_output_dir"
     cmd+=(-c 'mcp_servers.playwright.command="npx"')
     cmd+=(-c "mcp_servers.playwright.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path")")
     cmd+=(-c "mcp_servers.playwright.cwd=\"$REPO_ROOT\"")
-    if [[ -f "$REPO_ROOT/docs/ux/.creds.secondary" && -f "$REPO_ROOT/scripts/ux-browser-auth-secondary-init.ts" ]]; then
+    for actor in tenant_admin requester approver reviewer observer operator; do
+      if [[ -f "$RUN_DIR/artifacts/ux-fixtures/auth-state-$actor.json" && -f "$RUN_DIR/artifacts/ux-fixtures/init-page-$actor.ts" ]]; then
+        actor_server="playwright_$actor"
+        actor_output_dir="$RUN_DIR/artifacts/$job_id/playwright-mcp-$actor"
+        mkdir -p "$actor_output_dir"
+        cmd+=(-c "mcp_servers.$actor_server.command=\"npx\"")
+        cmd+=(-c "mcp_servers.$actor_server.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path" "$actor")")
+        cmd+=(-c "mcp_servers.$actor_server.cwd=\"$REPO_ROOT\"")
+      fi
+    done
+    if [[ -f "$REPO_ROOT/docs/ux/.creds.secondary" && -f "$SCRIPT_DIR/ux-browser-auth-init.mjs" ]]; then
       mkdir -p "$RUN_DIR/artifacts/$job_id/playwright-mcp-secondary"
       cmd+=(-c 'mcp_servers.playwright_secondary.command="npx"')
       cmd+=(-c "mcp_servers.playwright_secondary.args=$(playwright_secondary_mcp_codex_args_json "$job_id" "$chromium_path")")
