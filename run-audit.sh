@@ -1081,6 +1081,19 @@ HEADER
       "$ref" "$MASTER_PROMPT" >> "$prompt_file"
   fi
 
+  if [[ "$job_id" == "02-journey-plan" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
+    cat >> "$prompt_file" <<JOURNEYLIMIT
+## Journey Portfolio Limit
+
+Return no more than $UX_MAX_JOURNEYS executable journeys in the canonical journey plan.
+When the inferred portfolio is larger, retain the highest-risk and highest-frequency
+end-to-end outcomes while preserving coverage across primary work, recovery, and
+administration. Record lower-priority omitted journeys as future coverage gaps instead
+of adding them to the executable plan.
+
+JOURNEYLIMIT
+  fi
+
   if [[ "$kind" == "synthesis" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
     append_ux_fixture_manifest "$prompt_file"
   elif [[ "$kind" == "simulation" ]]; then

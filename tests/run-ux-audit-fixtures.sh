@@ -39,6 +39,7 @@ RUN_DIR="$run_dir" \
 test -f "$run_dir/artifacts/ux-product-context.md"
 test -f "$run_dir/prompts/03-primary-work.md"
 grep -q 'Operator: completes' "$run_dir/artifacts/ux-product-context.md"
+grep -q 'Return no more than 12 executable journeys' "$run_dir/prompts/02-journey-plan.md"
 grep -q 'Use the supplied `playwright` MCP tools for every execution job' "$run_dir/prompts/03-primary-work.md"
 grep -q 'UX PHASE 3A' "$run_dir/prompts/03-primary-work.md"
 grep -q 'browser-preflight/summary.md' "$run_dir/prompts/03-primary-work.md"
