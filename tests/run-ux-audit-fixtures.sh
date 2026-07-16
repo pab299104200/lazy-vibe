@@ -122,7 +122,26 @@ fs.writeFileSync(path.join(preflightDir, 'fixture-refresh-sentinel'), 'refreshed
 PREFLIGHT
 mkdir -p "$run_dir/artifacts/browser-preflight"
 printf '{"cookies": []}\n' > "$run_dir/artifacts/browser-preflight/auth-state.json"
+printf '{"status": "PASS"}\n' > "$run_dir/artifacts/browser-preflight/summary.json"
+
+source "$SCRIPT_DIR/ux-preflight-state.sh"
+ux_preflight_is_fresh_pass "$run_dir" 600
+printf '{"status": "FAIL"}\n' > "$run_dir/artifacts/browser-preflight/summary.json"
+if ux_preflight_is_fresh_pass "$run_dir" 600; then
+  printf 'failed browser preflight was treated as reusable\n' >&2
+  exit 1
+fi
+printf 'not-json\n' > "$run_dir/artifacts/browser-preflight/summary.json"
+if ux_preflight_is_fresh_pass "$run_dir" 600; then
+  printf 'malformed browser preflight was treated as reusable\n' >&2
+  exit 1
+fi
+printf '{"status": "PASS"}\n' > "$run_dir/artifacts/browser-preflight/summary.json"
 touch -d '20 minutes ago' "$run_dir/artifacts/browser-preflight/auth-state.json"
+if ux_preflight_is_fresh_pass "$run_dir" 600; then
+  printf 'stale browser preflight was treated as reusable\n' >&2
+  exit 1
+fi
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 MUTATE_LATTICE_RUNTIME=1 \

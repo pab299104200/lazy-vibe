@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/ux-preflight-state.sh"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 MASTER_PROMPT="${MASTER_PROMPT:-$SCRIPT_DIR/generic-launch-readiness-audit-prompt.md}"
 SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/generic-shared.md}"
@@ -937,10 +938,7 @@ refresh_ux_browser_preflight() {
   local preflight_state="$RUN_DIR/artifacts/browser-preflight/auth-state.json"
   [[ -s "$preflight_state" ]] || return 0
   local max_age_seconds="${UX_FIXTURE_AUTH_MAX_AGE_SECONDS:-600}"
-  local state_modified_at
-  state_modified_at="$(stat -c %Y "$preflight_state" 2>/dev/null || printf '0')"
-  if [[ "$max_age_seconds" =~ ^[0-9]+$ ]] \
-    && (( $(date +%s) - state_modified_at <= max_age_seconds )); then
+  if ux_preflight_is_fresh_pass "$RUN_DIR" "$max_age_seconds"; then
     printf '[ux-fixtures] reusing fresh browser authentication for fixture preparation\n'
     return 0
   fi

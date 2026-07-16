@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/ux-preflight-state.sh"
 PROFILE="${PROFILE:-}"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 
@@ -107,12 +108,16 @@ export CODEX_BYPASS_SIMULATION="${CODEX_BYPASS_SIMULATION:-1}"
 if [[ "$is_dry_run" != "1" && "${UX_BROWSER_PREFLIGHT:-1}" == "1" ]]; then
   preflight_dir="$run_dir/artifacts/browser-preflight"
   mkdir -p "$preflight_dir"
-  if ! node "$SCRIPT_DIR/ux-browser-preflight.cjs" \
-    --repo-root "$REPO_ROOT" \
-    --run-dir "$run_dir" \
-    --auto-install "${UX_BROWSER_AUTO_INSTALL:-1}"; then
-    printf 'UX browser preflight failed. See %s/summary.md\n' "$preflight_dir" >&2
-    exit 3
+  if ux_preflight_is_fresh_pass "$run_dir" "${UX_FIXTURE_AUTH_MAX_AGE_SECONDS:-600}"; then
+    printf '[ux-preflight] reusing fresh successful browser authentication\n'
+  else
+    if ! node "$SCRIPT_DIR/ux-browser-preflight.cjs" \
+      --repo-root "$REPO_ROOT" \
+      --run-dir "$run_dir" \
+      --auto-install "${UX_BROWSER_AUTO_INSTALL:-1}"; then
+      printf 'UX browser preflight failed. See %s/summary.md\n' "$preflight_dir" >&2
+      exit 3
+    fi
   fi
 fi
 
