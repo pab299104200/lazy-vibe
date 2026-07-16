@@ -51,6 +51,7 @@ STATUS: PARTIAL
   - Choose the recipient class that matches the required attachment: customer-facing for customer/invoice, vendor-facing for vendor/bill/purchase order, and internal evidence for expense/journal entry. Do not use an existing document with a different recipient class as a substitute.
 - \`browser_record_creation\`: READY
   - Create uniquely prefixed reversible Keystone records through the deployed UI using Playwright typing/fill tools.
+  - Use syntactically and semantically valid non-live fixture values. For email fields use a unique address at \`example.com\`; do not use reserved TLDs such as \`.test\` because application email validators may correctly reject them.
 - \`purchase_to_pay_browser_setup\`: READY
   - Compose \`browser_record_creation\` with \`playwright_secondary\`: the primary actor creates and submits a uniquely prefixed purchase order, the secondary actor approves it, then the primary actor records the goods receipt and creates the PO-linked bill.
   - Complete the prerequisite workflow through the deployed UI; do not inject database records or treat setup actions as journey evidence.
@@ -64,26 +65,26 @@ STATUS: PARTIAL
   - Contains the same two deterministic UXAUDIT transactions with FITIDs stable within this run and unique across audit runs.
   - Cleanup owner: harness provider and disposable tenant teardown.
 
-## Portal Provisioning Capabilities
+## Workspace Provisioning Capabilities
 
-- \`fresh_portal_tenant\`: READY
-  - Portal URL: \`https://portal-dev.cadres.io\`
-  - The audit identity is an operator super-user with \`portal.tenant.manage\`.
-  - Create only uniquely prefixed disposable tenants through the Portal UI and record cleanup ownership.
-- \`disposable_portal_identities\`: READY
-  - The audit identity has \`portal.users.manage\` and \`portal.groups.manage\`.
-  - Create only uniquely prefixed users and groups inside the disposable audit tenant.
+- \`fresh_keystone_customer_workspace\`: UNAVAILABLE
+  - A Portal-only customer tenant is not a Keystone workspace and must not be used as a substitute.
+  - Readiness requires a Cadres commercial-control customer, a sold contract for \`product_key=keystone\`, a \`portal-tenant:{id}\` customer binding, and an isolated customer-owned Keystone tenant whose users cannot access the Cadres commercial-control tenant.
+  - Until a provider can prepare that complete state through supported product contracts, first-workspace journeys must report this exact capability as BLOCKED.
+- \`disposable_portal_identities\`: UNAVAILABLE
+  - Disposable identities are useful only after \`fresh_keystone_customer_workspace\` is ready and bound to the same isolated tenant.
 - \`secondary_keystone_approver\`: $([[ -s "$secondary_credentials" && -f "$secondary_initializer" ]] && printf READY || printf UNAVAILABLE)
   - When ready, the harness exposes a separately authenticated \`playwright_secondary\` browser for maker-checker and handoff journeys.
   - Authenticated directory identity: \`${secondary_email:-UNAVAILABLE}\`. Access setup must select this exact email; a similarly named user is not the secondary browser actor.
   - The identity has an explicit Keystone application assignment and Keystone administrator app role in the disposable dev tenant.
-  - Before maker-checker execution, grant this exact identity a published Keystone role containing the workflow's required approval permission (for purchase-to-pay, \`keystone.purchase_orders.approve\`) and verify that permission in effective access preview.
+  - Before maker-checker execution, grant this exact identity the published Keystone role containing the workflow's actual route permission and verify that permission in effective access preview. Read the product permission catalog and route contract; do not invent permission keys. Purchase-order approval currently requires \`keystone.accounting.manage\`, which is included in \`keystone_accountant\`.
+  - Match grant scope to the resource authority implemented by the product. Use a tenant-wide grant for tenant-owned resources such as purchase orders, refunds, and current close operations when their records and routes do not carry a company-entity scope. Use an entity grant only when the target record and route enforce that same entity. Never treat an entity-scoped grant as proof of access to a tenant-owned route.
   - Preserve the required grant until every dependent secondary-browser journey has completed. Revoke it only during final run cleanup, never at the end of an earlier setup journey.
   - Do not use two sessions for the primary identity as approval evidence; actor IDs must differ.
 - \`portal_roles_manage\`: UNAVAILABLE
   - Reuse published roles rather than creating or changing Portal roles.
 
-Never alter existing tenants, identities, groups, memberships, or grants. Portal provisioning prepares starting state; the Keystone browser journey must still prove bootstrap and scoped-access outcomes.
+Never alter existing tenants, identities, groups, memberships, or grants. Fixture setup must preserve the separation between Cadres commercial authority and the customer-owned Keystone data plane; the browser journey must still prove bootstrap and scoped-access outcomes.
 MANIFEST
     ;;
   cleanup)
