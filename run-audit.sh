@@ -930,6 +930,21 @@ ASSIGNMENT
 UX_FIXTURES_PREPARED=0
 UX_FIXTURES_DESCRIBED=0
 UX_FIXTURE_MANIFEST="$RUN_DIR/artifacts/ux-fixtures/manifest.md"
+UX_BROWSER_PREFLIGHT_SCRIPT="${UX_BROWSER_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/ux-browser-preflight.cjs}"
+
+refresh_ux_browser_preflight() {
+  [[ "${UX_FIXTURE_AUTH_REFRESH:-${UX_BROWSER_PREFLIGHT:-1}}" == "1" ]] || return 0
+  local preflight_state="$RUN_DIR/artifacts/browser-preflight/auth-state.json"
+  [[ -s "$preflight_state" ]] || return 0
+  printf '[ux-fixtures] refreshing browser authentication before fixture preparation\n'
+  node "$UX_BROWSER_PREFLIGHT_SCRIPT" \
+    --repo-root "$REPO_ROOT" \
+    --run-dir "$RUN_DIR" \
+    --auto-install "${UX_BROWSER_AUTO_INSTALL:-1}" || {
+      printf '[ux-fixtures] browser authentication refresh failed\n' >&2
+      return 1
+    }
+}
 
 describe_ux_fixture_capabilities() {
   [[ "$DRY_RUN" != "1" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
@@ -974,6 +989,7 @@ MANIFEST
     return 1
   fi
 
+  refresh_ux_browser_preflight
   printf '[ux-fixtures] preparing provider=%s\n' "$UX_FIXTURE_PROVIDER"
   "$UX_FIXTURE_PROVIDER" prepare "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"
   if [[ ! -s "$UX_FIXTURE_MANIFEST" ]]; then

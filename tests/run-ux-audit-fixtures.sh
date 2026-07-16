@@ -111,6 +111,17 @@ fi
 printf 'JOB: %s\nRESULT: PASS\n' "$job_id"
 RUNNER
 chmod +x "$fake_runner"
+fake_preflight="$fixture_root/fake-browser-preflight.cjs"
+cat > "$fake_preflight" <<'PREFLIGHT'
+const fs = require('fs');
+const path = require('path');
+const runDir = process.argv[process.argv.indexOf('--run-dir') + 1];
+const preflightDir = path.join(runDir, 'artifacts', 'browser-preflight');
+fs.mkdirSync(preflightDir, { recursive: true });
+fs.writeFileSync(path.join(preflightDir, 'fixture-refresh-sentinel'), 'refreshed\n');
+PREFLIGHT
+mkdir -p "$run_dir/artifacts/browser-preflight"
+printf '{"cookies": []}\n' > "$run_dir/artifacts/browser-preflight/auth-state.json"
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 MUTATE_LATTICE_RUNTIME=1 \
@@ -119,10 +130,13 @@ PROFILES_DIR="$fixture_root/profiles" \
 REPO_ROOT="$repo_root" \
 RUN_DIR="$run_dir" \
 UX_BROWSER_PREFLIGHT=0 \
+UX_FIXTURE_AUTH_REFRESH=1 \
+UX_BROWSER_PREFLIGHT_SCRIPT="$fake_preflight" \
 "$SCRIPT_DIR/run-ux-audit.sh" --profile example --only 03-primary-work >/dev/null || {
   cat "$run_dir/artifacts/03-primary-work/evidence-validation.md" >&2
   exit 1
 }
+test -f "$run_dir/artifacts/browser-preflight/fixture-refresh-sentinel"
 
 grep -q 'STATUS: PASS' "$run_dir/artifacts/03-primary-work/evidence-validation.md" || {
   cat "$run_dir/logs/03-primary-work.log" >&2
