@@ -122,6 +122,7 @@ fs.writeFileSync(path.join(preflightDir, 'fixture-refresh-sentinel'), 'refreshed
 PREFLIGHT
 mkdir -p "$run_dir/artifacts/browser-preflight"
 printf '{"cookies": []}\n' > "$run_dir/artifacts/browser-preflight/auth-state.json"
+touch -d '20 minutes ago' "$run_dir/artifacts/browser-preflight/auth-state.json"
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 MUTATE_LATTICE_RUNTIME=1 \

@@ -150,6 +150,8 @@ Keep it to durable roles, non-negotiable outcomes, mutation safety boundaries, c
 
 Set `UX_BROWSER_PREFLIGHT=0` only for prompt-only diagnostics; a real audit without preflight is invalid. Set `UX_BROWSER_AUTO_INSTALL=0` in a network-isolated environment only after provisioning the exact Chromium revision expected by the product's Playwright package. `UX_BROWSER_BASE_URL` overrides URL discovery from `AUDIT_BROWSER_BASE_URL`, `E2E_BASE_URL`, or `docs/ux/.creds`.
 
+Fixture preparation reuses a successful browser preflight state for 10 minutes by default, avoiding an immediate duplicate login against rate-limited identity providers. Set `UX_FIXTURE_AUTH_MAX_AGE_SECONDS` to a different non-negative freshness window; older states are re-authenticated before fixtures are prepared. `UX_FIXTURE_AUTH_REFRESH=0` disables that stale-state refresh only for controlled diagnostics.
+
 Read-only audit jobs (`discovery`, `synthesis`, `web`, simulation, and dynamic `deep-*` jobs) diff against a pre-run repository snapshot. If one of those jobs edits product files, the launcher fails the job. On a clean repo it restores only the unexpected product-file changes; on a dirty repo it preserves the existing user diff and reports the integrity violation without reverting unrelated work. Repository-local `.lattice` files are excluded because they are context-engine runtime state that can change merely by invoking an agent; product source remains protected and is covered by a regression fixture.
 
 Runtime, simulation, and load-test jobs now follow the same split everywhere possible:

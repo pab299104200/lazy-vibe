@@ -936,6 +936,14 @@ refresh_ux_browser_preflight() {
   [[ "${UX_FIXTURE_AUTH_REFRESH:-${UX_BROWSER_PREFLIGHT:-1}}" == "1" ]] || return 0
   local preflight_state="$RUN_DIR/artifacts/browser-preflight/auth-state.json"
   [[ -s "$preflight_state" ]] || return 0
+  local max_age_seconds="${UX_FIXTURE_AUTH_MAX_AGE_SECONDS:-600}"
+  local state_modified_at
+  state_modified_at="$(stat -c %Y "$preflight_state" 2>/dev/null || printf '0')"
+  if [[ "$max_age_seconds" =~ ^[0-9]+$ ]] \
+    && (( $(date +%s) - state_modified_at <= max_age_seconds )); then
+    printf '[ux-fixtures] reusing fresh browser authentication for fixture preparation\n'
+    return 0
+  fi
   printf '[ux-fixtures] refreshing browser authentication before fixture preparation\n'
   node "$UX_BROWSER_PREFLIGHT_SCRIPT" \
     --repo-root "$REPO_ROOT" \
