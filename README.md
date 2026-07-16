@@ -154,6 +154,8 @@ The wrapper and fixture preparation reuse a successful browser preflight state f
 
 Multi-actor fixture providers may write `artifacts/ux-fixtures/actor-lanes.tsv` with columns `execution_job`, `default_actor`, and `additional_actors` (comma-separated). The harness launches only the declared default and alternates for each simulation lane, preventing parallel audits from starting every prepared browser identity. Without a lane map, the default browser uses the verified preflight state and no discovered actor states are launched implicitly.
 
+UX audits run one lane at a time by default because each lane may own several isolated browser actors. Set `MAX_PARALLEL` explicitly only when the runner has enough memory for every lane's declared actors; other audit harnesses retain their own concurrency defaults.
+
 Read-only audit jobs (`discovery`, `synthesis`, `web`, simulation, and dynamic `deep-*` jobs) diff against a pre-run repository snapshot. If one of those jobs edits product files, the launcher fails the job. On a clean repo it restores only the unexpected product-file changes; on a dirty repo it preserves the existing user diff and reports the integrity violation without reverting unrelated work. Repository-local `.lattice` files are excluded because they are context-engine runtime state that can change merely by invoking an agent; product source remains protected and is covered by a regression fixture.
 
 Runtime, simulation, and load-test jobs now follow the same split everywhere possible:

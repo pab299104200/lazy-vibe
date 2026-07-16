@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+grep -q 'MAX_PARALLEL="${MAX_PARALLEL:-1}"' "$SCRIPT_DIR/run-ux-audit.sh"
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$fixture_root"' EXIT
 

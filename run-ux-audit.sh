@@ -98,7 +98,7 @@ export LOAD_TEST_ENABLED="${LOAD_TEST_ENABLED:-0}"
 export SAST_ENABLED="${SAST_ENABLED:-0}"
 export AUDIT_REGISTER_RECONCILE="${AUDIT_REGISTER_RECONCILE:-0}"
 export DYNAMIC_DEPTH_CAP="${DYNAMIC_DEPTH_CAP:-0}"
-export MAX_PARALLEL="${MAX_PARALLEL:-3}"
+export MAX_PARALLEL="${MAX_PARALLEL:-1}"
 
 # Simulation agents use an out-of-sandbox Playwright MCP server. Their shell
 # remains sandboxed; browser actions and screenshots cross only the MCP boundary.
