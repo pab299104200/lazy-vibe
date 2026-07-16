@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/ux-preflight-state.sh"
+source "$SCRIPT_DIR/ux-actor-lanes.sh"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 MASTER_PROMPT="${MASTER_PROMPT:-$SCRIPT_DIR/generic-launch-readiness-audit-prompt.md}"
 SHARED_PROMPT="${SHARED_PROMPT:-$SCRIPT_DIR/generic-shared.md}"
@@ -1430,12 +1431,14 @@ PY
 
 playwright_mcp_codex_args_json() {
   local job_id="$1" executable_path="$2" requested_actor="${3:-}"
-  python3 - "$RUN_DIR" "$job_id" "$executable_path" "$REPO_ROOT" "$requested_actor" <<'PY'
+  local configured_actor="$requested_actor"
+  [[ -n "$configured_actor" ]] || configured_actor="$(ux_job_default_actor "$RUN_DIR" "$job_id")"
+  python3 - "$RUN_DIR" "$job_id" "$executable_path" "$REPO_ROOT" "$requested_actor" "$configured_actor" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-run_dir, job_id, executable_path, repo_root, requested_actor = sys.argv[1:]
+run_dir, job_id, executable_path, repo_root, requested_actor, configured_actor = sys.argv[1:]
 output_name = f"playwright-mcp-{requested_actor}" if requested_actor else "playwright-mcp"
 args = [
     "--yes",
@@ -1454,13 +1457,7 @@ args = [
     "1440x1000",
 ]
 credentials = Path(repo_root) / "docs" / "ux" / ".creds"
-actor_by_job = {
-    "03-primary-work": "tenant_admin",
-    "03-exceptions": "operator",
-    "03-administration": "reviewer",
-}
-
-actor = requested_actor or actor_by_job.get(job_id)
+actor = configured_actor or None
 actor_state = Path(run_dir) / "artifacts" / "ux-fixtures" / f"auth-state-{actor}.json" if actor else None
 actor_init = Path(run_dir) / "artifacts" / "ux-fixtures" / f"init-page-{actor}.ts" if actor else None
 storage_state = actor_state if actor_state and actor_state.is_file() else Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
@@ -1559,7 +1556,8 @@ _run_codex() {
     cmd+=(-c 'mcp_servers.playwright.command="npx"')
     cmd+=(-c "mcp_servers.playwright.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path")")
     cmd+=(-c "mcp_servers.playwright.cwd=\"$REPO_ROOT\"")
-    for actor in tenant_admin requester approver reviewer observer operator; do
+    while IFS= read -r actor; do
+      [[ -n "$actor" && "$actor" != "secondary" ]] || continue
       if [[ -f "$RUN_DIR/artifacts/ux-fixtures/auth-state-$actor.json" && -f "$RUN_DIR/artifacts/ux-fixtures/init-page-$actor.ts" ]]; then
         actor_server="playwright_$actor"
         actor_output_dir="$RUN_DIR/artifacts/$job_id/playwright-mcp-$actor"
@@ -1568,8 +1566,9 @@ _run_codex() {
         cmd+=(-c "mcp_servers.$actor_server.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path" "$actor")")
         cmd+=(-c "mcp_servers.$actor_server.cwd=\"$REPO_ROOT\"")
       fi
-    done
-    if [[ -f "$REPO_ROOT/docs/ux/.creds.secondary" && -f "$SCRIPT_DIR/ux-browser-auth-init.mjs" ]]; then
+    done < <(ux_job_additional_actors "$RUN_DIR" "$job_id")
+    if ux_job_additional_actors "$RUN_DIR" "$job_id" | grep -qx secondary \
+      && [[ -f "$REPO_ROOT/docs/ux/.creds.secondary" && -f "$SCRIPT_DIR/ux-browser-auth-init.mjs" ]]; then
       mkdir -p "$RUN_DIR/artifacts/$job_id/playwright-mcp-secondary"
       cmd+=(-c 'mcp_servers.playwright_secondary.command="npx"')
       cmd+=(-c "mcp_servers.playwright_secondary.args=$(playwright_secondary_mcp_codex_args_json "$job_id" "$chromium_path")")

@@ -13,10 +13,17 @@ bank_ofx_file="$fixture_dir/keystone-audit-bank-statement.ofx"
 workspace_provider="$repo_root/scripts/ux_audit_fixture_provider.py"
 workspace_prepared="$fixture_dir/keystone-prepared-fixtures.json"
 fixture_key="$(basename "$run_dir" | tr -cd '[:alnum:]_-')"
+actor_lanes_file="$fixture_dir/actor-lanes.tsv"
 
 case "$action" in
   describe|prepare)
     mkdir -p "$fixture_dir"
+    cat > "$actor_lanes_file" <<'ACTORS'
+execution_job	default_actor	additional_actors
+03-primary-work	tenant_admin	approver
+03-exceptions	tenant_admin	approver
+03-administration	tenant_admin	requester,observer
+ACTORS
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$upload_file"
     cat > "$bank_csv_file" <<CSV
 date,description,amount
@@ -184,6 +191,7 @@ PY
     fi
     rm -f "$upload_file" "$bank_csv_file" "$bank_ofx_file"
     rm -f "$fixture_dir"/auth-state-*.json "$fixture_dir"/init-page-*.ts
+    rm -f "$actor_lanes_file"
     rm -f "$fixture_dir/private-fixtures.json" "$workspace_prepared" "$fixture_dir/prepared-fixtures.json"
     ;;
   *)

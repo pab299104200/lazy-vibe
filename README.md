@@ -152,6 +152,8 @@ Set `UX_BROWSER_PREFLIGHT=0` only for prompt-only diagnostics; a real audit with
 
 The wrapper and fixture preparation reuse a successful browser preflight state for 10 minutes by default, avoiding duplicate logins against rate-limited identity providers when a run resumes. Reuse requires both a nonempty authentication state and a `PASS` preflight summary; stale or failed states are re-authenticated. Set `UX_FIXTURE_AUTH_MAX_AGE_SECONDS` to a different non-negative freshness window. `UX_FIXTURE_AUTH_REFRESH=0` disables only the fixture-stage stale-state refresh for controlled diagnostics.
 
+Multi-actor fixture providers may write `artifacts/ux-fixtures/actor-lanes.tsv` with columns `execution_job`, `default_actor`, and `additional_actors` (comma-separated). The harness launches only the declared default and alternates for each simulation lane, preventing parallel audits from starting every prepared browser identity. Without a lane map, the default browser uses the verified preflight state and no discovered actor states are launched implicitly.
+
 Read-only audit jobs (`discovery`, `synthesis`, `web`, simulation, and dynamic `deep-*` jobs) diff against a pre-run repository snapshot. If one of those jobs edits product files, the launcher fails the job. On a clean repo it restores only the unexpected product-file changes; on a dirty repo it preserves the existing user diff and reports the integrity violation without reverting unrelated work. Repository-local `.lattice` files are excluded because they are context-engine runtime state that can change merely by invoking an agent; product source remains protected and is covered by a regression fixture.
 
 Runtime, simulation, and load-test jobs now follow the same split everywhere possible:

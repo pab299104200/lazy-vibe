@@ -131,6 +131,21 @@ if ux_preflight_is_fresh_pass "$run_dir" 600; then
   printf 'failed browser preflight was treated as reusable\n' >&2
   exit 1
 fi
+
+mkdir -p "$run_dir/artifacts/ux-fixtures"
+cat > "$run_dir/artifacts/ux-fixtures/actor-lanes.tsv" <<'ACTORS'
+execution_job	default_actor	additional_actors
+03-primary-work	tenant_admin	approver,observer
+ACTORS
+source "$SCRIPT_DIR/ux-actor-lanes.sh"
+test "$(ux_job_default_actor "$run_dir" 03-primary-work)" = "tenant_admin"
+test "$(ux_job_additional_actors "$run_dir" 03-primary-work | paste -sd, -)" = "approver,observer"
+test -z "$(ux_job_default_actor "$run_dir" 03-exceptions)"
+printf '03-exceptions\t../invalid\t\n' >> "$run_dir/artifacts/ux-fixtures/actor-lanes.tsv"
+if ux_job_default_actor "$run_dir" 03-exceptions >/dev/null; then
+  printf 'unsafe UX actor name was accepted\n' >&2
+  exit 1
+fi
 printf 'not-json\n' > "$run_dir/artifacts/browser-preflight/summary.json"
 if ux_preflight_is_fresh_pass "$run_dir" 600; then
   printf 'malformed browser preflight was treated as reusable\n' >&2
