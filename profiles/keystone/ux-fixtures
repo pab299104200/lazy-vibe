@@ -97,6 +97,12 @@ prepared = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = Path(sys.argv[2])
 upload_file, bank_csv_file, bank_ofx_file = sys.argv[3:]
 if prepared.get("status") == "blocked":
+    cleanup_complete = prepared.get("cleanup_complete") is True
+    if cleanup_complete:
+        cleanup_detail = "The provider retired any attempted Keystone contract and binding and archived the disposable Portal tenant."
+    else:
+        errors = "; ".join(prepared.get("cleanup_errors", [])) or "unspecified cleanup failure"
+        cleanup_detail = f"Automatic cleanup did not complete ({errors}); private recovery state was retained and the cleanup action must be rerun."
     manifest.write_text(f"""# UX Fixture Manifest
 
 STATUS: PARTIAL
@@ -105,9 +111,10 @@ STATUS: PARTIAL
 
 - `fresh_keystone_customer_workspace`: BLOCKED
   - {prepared['reason']}
-  - The provider retired the attempted Keystone contract and binding and archived the disposable Portal tenant; no unsupported application instance or customer workspace was fabricated.
+  - {cleanup_detail}
+  - No unsupported application instance or customer workspace was fabricated.
 - `disposable_portal_identities`: BLOCKED
-  - Customer-workspace browser states cannot be issued until Portal enables its published Keystone first-party application request contract.
+  - Customer-workspace browser states cannot be issued until the reported fixture capability is restored.
 - `authenticated_commercial_control_operator`: READY
   - The browser preflight state remains the Cadres commercial-control operator authority.
 
