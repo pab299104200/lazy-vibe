@@ -10,10 +10,9 @@ fixture_dir="$run_dir/artifacts/ux-fixtures"
 upload_file="$fixture_dir/keystone-audit-evidence.png"
 bank_csv_file="$fixture_dir/keystone-audit-bank-statement.csv"
 bank_ofx_file="$fixture_dir/keystone-audit-bank-statement.ofx"
-secondary_credentials="$repo_root/docs/ux/.creds.secondary"
-secondary_initializer="$repo_root/scripts/ux-browser-auth-secondary-init.ts"
+workspace_provider="$repo_root/scripts/ux_audit_fixture_provider.py"
+workspace_prepared="$fixture_dir/keystone-prepared-fixtures.json"
 fixture_key="$(basename "$run_dir" | tr -cd '[:alnum:]_-')"
-secondary_email="$(awk -F= '$1 == "email" { print substr($0, index($0, "=") + 1); exit }' "$secondary_credentials" 2>/dev/null || true)"
 
 case "$action" in
   describe|prepare)
@@ -67,28 +66,118 @@ STATUS: PARTIAL
 
 ## Workspace Provisioning Capabilities
 
-- \`fresh_keystone_customer_workspace\`: UNAVAILABLE
-  - A Portal-only customer tenant is not a Keystone workspace and must not be used as a substitute.
-  - Readiness requires a Cadres commercial-control customer, a sold contract for \`product_key=keystone\`, a \`portal-tenant:{id}\` customer binding, and an isolated customer-owned Keystone tenant whose users cannot access the Cadres commercial-control tenant.
-  - Until a provider can prepare that complete state through supported product contracts, first-workspace journeys must report this exact capability as BLOCKED.
-- \`disposable_portal_identities\`: UNAVAILABLE
-  - Disposable identities are useful only after \`fresh_keystone_customer_workspace\` is ready and bound to the same isolated tenant.
-- \`secondary_keystone_approver\`: $([[ -s "$secondary_credentials" && -f "$secondary_initializer" ]] && printf READY || printf UNAVAILABLE)
-  - When ready, the harness exposes a separately authenticated \`playwright_secondary\` browser for maker-checker and handoff journeys.
-  - Authenticated directory identity: \`${secondary_email:-UNAVAILABLE}\`. Access setup must select this exact email; a similarly named user is not the secondary browser actor.
-  - The identity has an explicit Keystone application assignment and Keystone administrator app role in the disposable dev tenant.
-  - Before maker-checker execution, grant this exact identity the published Keystone role containing the workflow's actual route permission and verify that permission in effective access preview. Read the product permission catalog and route contract; do not invent permission keys. Purchase-order approval currently requires \`keystone.accounting.manage\`, which is included in \`keystone_accountant\`.
+- \`fresh_keystone_customer_workspace\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
+  - The provider composes Portal's disposable customer-tenant fixture with a Cadres commercial-control customer, current sold contract for \`product_key=keystone\`, and active \`portal-tenant:{id}\` binding.
+  - Customer actors authenticate into the isolated customer-owned Keystone workspace. The Cadres operator remains in the separate commercial-control workspace.
+- \`disposable_portal_identities\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
+  - Prepared tenant-admin, requester, approver, reviewer, and observer browser states are scoped to the isolated Keystone customer workspace.
+- \`secondary_keystone_approver\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
+  - The provider creates a distinct approver in the disposable Portal tenant, assigns the Keystone application, and emits a customer-workspace browser state only after the sold contract and binding resolve.
+  - Before maker-checker execution, grant that prepared identity the published Keystone role containing the workflow's actual route permission and verify the permission in effective access preview. Purchase-order approval currently requires \`keystone.accounting.manage\`, which is included in \`keystone_accountant\`.
   - Match grant scope to the resource authority implemented by the product. Use a tenant-wide grant for tenant-owned resources such as purchase orders, refunds, and current close operations when their records and routes do not carry a company-entity scope. Use an entity grant only when the target record and route enforce that same entity. Never treat an entity-scoped grant as proof of access to a tenant-owned route.
-  - Preserve the required grant until every dependent secondary-browser journey has completed. Revoke it only during final run cleanup, never at the end of an earlier setup journey.
+  - Preserve the required grant until every dependent approver journey has completed. Revoke it only during final run cleanup, never at the end of an earlier setup journey.
   - Do not use two sessions for the primary identity as approval evidence; actor IDs must differ.
 - \`portal_roles_manage\`: UNAVAILABLE
   - Reuse published roles rather than creating or changing Portal roles.
 
 Never alter existing tenants, identities, groups, memberships, or grants. Fixture setup must preserve the separation between Cadres commercial authority and the customer-owned Keystone data plane; the browser journey must still prove bootstrap and scoped-access outcomes.
 MANIFEST
+    if [[ "$action" == "prepare" && -x "$workspace_provider" ]]; then
+      provider_action=prepare
+      if [[ -s "$fixture_dir/private-fixtures.json" ]]; then
+        provider_action=resume
+      fi
+      python3 "$workspace_provider" "$provider_action" "$repo_root" "$run_dir" "$fixture_key"
+      python3 - "$workspace_prepared" "$manifest_file" "$upload_file" "$bank_csv_file" "$bank_ofx_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+prepared = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+manifest = Path(sys.argv[2])
+upload_file, bank_csv_file, bank_ofx_file = sys.argv[3:]
+if prepared.get("status") == "blocked":
+    manifest.write_text(f"""# UX Fixture Manifest
+
+STATUS: PARTIAL
+
+## Workspace provisioning
+
+- `fresh_keystone_customer_workspace`: BLOCKED
+  - {prepared['reason']}
+  - The provider retired the attempted Keystone contract and binding and archived the disposable Portal tenant; no unsupported application instance or customer workspace was fabricated.
+- `disposable_portal_identities`: BLOCKED
+  - Customer-workspace browser states cannot be issued until Portal enables its published Keystone first-party application request contract.
+- `authenticated_commercial_control_operator`: READY
+  - The browser preflight state remains the Cadres commercial-control operator authority.
+
+## Workflow artifacts
+
+- `file_upload`: READY
+  - Disposable file: `{upload_file}`
+- `bank_statement_csv`: READY
+  - Disposable file: `{bank_csv_file}`
+- `bank_statement_ofx`: READY
+  - Disposable file: `{bank_ofx_file}`
+- `browser_record_creation`: READY_IN_COMMERCIAL_CONTROL_ONLY
+  - Do not claim customer-workspace or first-login evidence from the control tenant.
+
+Journey planning must mark first-workspace and customer-tenant journeys BLOCKED without failing unrelated commercial-control journeys. Never substitute a Portal-only tenant or a tenant-local Keystone subscription.
+""", encoding="utf-8")
+    raise SystemExit(0)
+states = prepared["actor_states"]
+keystone = prepared["keystone"]
+manifest.write_text(f"""# UX Fixture Manifest
+
+STATUS: READY
+
+## Isolated Keystone customer workspace
+
+- `fresh_keystone_customer_workspace`: READY
+  - Portal tenant id: {prepared['target_tenant_id']}
+  - Portal tenant slug: `{prepared['target_tenant_slug']}`
+  - Cadres commercial customer id: {keystone['customer_id']}
+  - Keystone sold contract id: {keystone['sold_contract_id']}
+  - Keystone customer binding id: {keystone['binding_id']}
+  - Authority remains the Cadres commercial-control tenant; the customer workspace contains no Cadres catalogue, customer, subscription, contract, or integration credential rows.
+- `disposable_portal_identities`: READY
+  - Tenant administrator state: `{states['tenant_admin']}`
+  - Requester state: `{states['requester']}`
+  - Approver state: `{states['approver']}`
+  - Reviewer state: `{states['reviewer']}`
+  - Observer state: `{states['observer']}`
+  - Cadres operator state: `{states['operator']}`
+  - Customer actors enter the isolated Keystone workspace; the operator state remains in the separate Cadres control workspace.
+
+## Workflow artifacts
+
+- `file_upload`: READY
+  - Disposable file: `{upload_file}`
+- `bank_statement_csv`: READY
+  - Disposable file: `{bank_csv_file}`
+- `bank_statement_ofx`: READY
+  - Disposable file: `{bank_ofx_file}`
+- `browser_record_creation`: READY
+  - Create only uniquely prefixed reversible records in the disposable customer workspace.
+- `secondary_keystone_approver`: READY
+  - Use the distinct prepared approver state; never reuse the primary actor as approval evidence.
+
+## Safety and cleanup
+
+- Fixture preparation is infrastructure, not browser-journey evidence.
+- Cleanup immediately cancels the disposable Keystone contract, archives its customer binding, and archives the Portal tenant through supported APIs. Historical sold-contract truth remains retained for financial auditability.
+- Never expose private fixture files, cookies, credentials, or tokens in prompts or evidence.
+""", encoding="utf-8")
+PY
+    fi
     ;;
   cleanup)
+    if [[ -x "$workspace_provider" ]]; then
+      python3 "$workspace_provider" cleanup "$repo_root" "$run_dir" "$fixture_key"
+    fi
     rm -f "$upload_file" "$bank_csv_file" "$bank_ofx_file"
+    rm -f "$fixture_dir"/auth-state-*.json "$fixture_dir"/init-page-*.ts
+    rm -f "$fixture_dir/private-fixtures.json" "$workspace_prepared" "$fixture_dir/prepared-fixtures.json"
     ;;
   *)
     printf 'unknown fixture-provider action: %s\n' "$action" >&2
