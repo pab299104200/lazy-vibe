@@ -40,6 +40,24 @@ async function gotoWithRetry(page, url) {
   throw lastError;
 }
 
+async function waitForAuthSurface(page, expectedOrigin) {
+  const controls = page.locator([
+    'input[type="email"]',
+    'input[name="email"]',
+    'input[name="username"]',
+    'input[type="password"]',
+    '[data-testid="o-auth-authorize-select"]',
+    '[data-testid="o-auth-authorize-button"]',
+    'button[type="submit"]',
+  ].join(', ')).first();
+  await Promise.race([
+    controls.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => undefined),
+    page
+      .waitForURL((url) => url.origin === expectedOrigin, { timeout: 30_000 })
+      .catch(() => undefined),
+  ]);
+}
+
 function absoluteHttpUrl(value) {
   const trimmed = value.trim();
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
@@ -58,6 +76,18 @@ async function armAuditActivityHeartbeat(page) {
 
 async function completeOAuthConsent(page, credentials, expectedOrigin) {
   if (new URL(page.url()).pathname !== '/auth/authorize') return;
+
+  const controls = page.locator([
+    '[data-testid="o-auth-authorize-select"]',
+    '[data-testid="o-auth-authorize-button"]',
+  ].join(', ')).first();
+  await Promise.race([
+    controls.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => undefined),
+    page
+      .waitForURL((url) => url.origin === expectedOrigin, { timeout: 30_000 })
+      .catch(() => undefined),
+  ]);
+  if (new URL(page.url()).origin === expectedOrigin) return;
 
   const tenantSelector = page.locator('[data-testid="o-auth-authorize-select"]');
   if (await tenantSelector.isVisible().catch(() => false)) {
@@ -129,7 +159,7 @@ export default async ({ page }) => {
   }
 
   await gotoWithRetry(page, baseUrl);
-  await page.waitForTimeout(2000);
+  await waitForAuthSurface(page, new URL(baseUrl).origin);
   let emailInput = await firstVisible([
     credentials.email_selector ? page.locator(credentials.email_selector) : null,
     page.getByLabel(/email|username/i),
@@ -167,6 +197,7 @@ export default async ({ page }) => {
     }
   }
   if (!emailInput || !passwordInput) {
+    await completeOAuthConsent(page, credentials, new URL(baseUrl).origin);
     await armAuditActivityHeartbeat(page);
     return;
   }
