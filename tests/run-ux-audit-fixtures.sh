@@ -3,7 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 grep -q 'MAX_PARALLEL="${MAX_PARALLEL:-1}"' "$SCRIPT_DIR/run-ux-audit.sh"
-grep -q '\`purchase_to_pay_browser_setup\`: READY' "$SCRIPT_DIR/profiles/keystone/ux-fixtures"
+grep -q 'retaining fixtures for checkpoint resume after non-pass simulation' "$SCRIPT_DIR/run-audit.sh"
+grep -q 'is_preserved_pass = (' "$SCRIPT_DIR/run-audit.sh"
+if grep -q 'args.append(f"--init-page={actor_init}")' "$SCRIPT_DIR/run-audit.sh"; then
+  printf 'prepared actor init page can still overwrite popup navigation\n' >&2
+  exit 1
+fi
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$fixture_root"' EXIT
 
@@ -43,6 +48,7 @@ test -f "$run_dir/prompts/03-primary-work.md"
 grep -q 'Operator: completes' "$run_dir/artifacts/ux-product-context.md"
 grep -q 'Return no more than 12 executable journeys' "$run_dir/prompts/02-journey-plan.md"
 grep -q 'Use the supplied `playwright` MCP tools for every execution job' "$run_dir/prompts/03-primary-work.md"
+grep -q 'Re-executing, recreating, or re-cleaning that journey is prohibited' "$run_dir/prompts/03-primary-work.md"
 grep -q 'UX PHASE 3A' "$run_dir/prompts/03-primary-work.md"
 grep -q 'browser-preflight/summary.md' "$run_dir/prompts/03-primary-work.md"
 if grep -q 'Static Analysis and Dependency CVE Scanning' "$run_dir/prompts/03-primary-work.md"; then
@@ -190,6 +196,7 @@ printf '# Stale execution report\n' > "$run_dir/01-domain/03-primary-work.md"
 FAIL_IF_STALE_EVIDENCE=1 \
 FAIL_IF_FIXTURES_UNPREPARED=1 \
 MUTATE_LATTICE_RUNTIME=1 \
+UX_EXECUTION_FRESH=1 \
 AUDIT_RUNNER="$fake_runner" \
 UX_BROWSER_PREFLIGHT=0 \
 UX_FIXTURE_AUTH_REFRESH=1 \
@@ -201,7 +208,6 @@ RUN_DIR="$run_dir" \
   cat "$run_dir/artifacts/03-primary-work/evidence-validation.md" >&2
   exit 1
 }
-test -f "$run_dir/artifacts/browser-preflight/fixture-refresh-sentinel"
 
 grep -q 'STATUS: PASS' "$run_dir/artifacts/03-primary-work/evidence-validation.md" || {
   cat "$run_dir/logs/03-primary-work.log" >&2
@@ -214,6 +220,7 @@ rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 if NONPASS_ASSIGNED_JOURNEY=1 \
   CONTINUE_ON_FAIL=0 \
   AUDIT_MAX_RETRIES=0 \
+  UX_EXECUTION_FRESH=1 \
   AUDIT_RUNNER="$fake_runner" \
   PROFILES_DIR="$fixture_root/profiles" \
   REPO_ROOT="$repo_root" \
@@ -231,6 +238,7 @@ rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 if MUTATE_PRODUCT_SOURCE=1 \
   CONTINUE_ON_FAIL=0 \
   AUDIT_MAX_RETRIES=0 \
+  UX_EXECUTION_FRESH=1 \
   AUDIT_RUNNER="$fake_runner" \
   PROFILES_DIR="$fixture_root/profiles" \
   REPO_ROOT="$repo_root" \
@@ -246,6 +254,7 @@ rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 if INJECT_FOREIGN_JOURNEY=1 \
   CONTINUE_ON_FAIL=0 \
   AUDIT_MAX_RETRIES=0 \
+  UX_EXECUTION_FRESH=1 \
   AUDIT_RUNNER="$fake_runner" \
   PROFILES_DIR="$fixture_root/profiles" \
   REPO_ROOT="$repo_root" \
@@ -261,6 +270,7 @@ rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 INJECT_FOREIGN_JOURNEY=1 \
 CONTINUE_ON_FAIL=1 \
 AUDIT_MAX_RETRIES=0 \
+UX_EXECUTION_FRESH=1 \
 AUDIT_RUNNER="$fake_runner" \
 PROFILES_DIR="$fixture_root/profiles" \
 REPO_ROOT="$repo_root" \

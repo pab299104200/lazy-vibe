@@ -1019,6 +1019,16 @@ cleanup_ux_fixtures() {
   [[ "$DRY_RUN" != "1" && "$UX_FIXTURES_PREPARED" == "1" ]] || return 0
   [[ -n "$UX_FIXTURE_PROVIDER" && -x "$UX_FIXTURE_PROVIDER" ]] || return 0
   local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
+  local cleanup_policy="${UX_FIXTURE_CLEANUP:-on-success}"
+  if [[ "$cleanup_policy" == "never" ]]; then
+    printf '[ux-fixtures] retaining fixtures because UX_FIXTURE_CLEANUP=never\n'
+    return 0
+  fi
+  if [[ "$cleanup_policy" == "on-success" && -s "$RUN_DIR/00-run-summary.tsv" ]] &&
+    awk -F'\t' 'NR > 1 && $2 == "simulation" && $3 != "PASS" && $3 != "completed" { failed = 1 } END { exit failed ? 0 : 1 }' "$RUN_DIR/00-run-summary.tsv"; then
+    printf '[ux-fixtures] retaining fixtures for checkpoint resume after non-pass simulation\n'
+    return 0
+  fi
   printf '[ux-fixtures] cleanup provider=%s\n' "$UX_FIXTURE_PROVIDER"
   "$UX_FIXTURE_PROVIDER" cleanup "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"
 }
@@ -1523,17 +1533,16 @@ args = [
 credentials = Path(repo_root) / "docs" / "ux" / ".creds"
 actor = configured_actor or None
 actor_state = Path(run_dir) / "artifacts" / "ux-fixtures" / f"auth-state-{actor}.json" if actor else None
-actor_init = Path(run_dir) / "artifacts" / "ux-fixtures" / f"init-page-{actor}.ts" if actor else None
 storage_state = actor_state if actor_state and actor_state.is_file() else Path(run_dir) / "artifacts" / "browser-preflight" / "auth-state.json"
 if storage_state.is_file():
     # Playwright MCP documents storage state for isolated sessions using the
     # single --storage-state=<path> form. Keep it one argv item so Codex's
     # TOML/JSON config transport cannot detach the value from the option.
     args.append(f"--storage-state={storage_state}")
-if actor_init and actor_init.is_file():
-    # Portal binds sessions to browser/device posture. The actor init page
-    # performs a real Chromium login without exposing credentials to the agent.
-    args.append(f"--init-page={actor_init}")
+# Prepared actor storage state was validated in the same Chromium runtime by
+# the fixture provider. Do not also attach its navigation-oriented init page:
+# Playwright MCP evaluates --init-page on popups, which would overwrite a
+# legitimate external application launch with the initializer destination.
 if credentials.is_file() and not (actor_state and actor_state.is_file()):
     args.extend(["--secrets", str(credentials)])
     auth_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.mjs")
@@ -2803,7 +2812,16 @@ for row in rows:
     if not trace_file.is_file():
         errors.append(f"{journey_id}: missing trace {expected_trace}")
     else:
-        if start_ns is not None and trace_file.stat().st_mtime_ns < start_ns:
+        is_preserved_pass = (
+            row["result"] == "PASS"
+            and row["oracle_status"] == "PROVEN"
+            and row["cleanup_status"] in {"CLEANED", "NOT_NEEDED"}
+        )
+        if (
+            start_ns is not None
+            and trace_file.stat().st_mtime_ns < start_ns
+            and not is_preserved_pass
+        ):
             errors.append(f"{journey_id}: stale trace predates lane execution: {expected_trace}")
         trace = trace_file.read_text(encoding="utf-8", errors="replace")
         if not re.search(rf"(?im)^\s*RESULT:\s*{re.escape(row['result'])}\s*$", trace):

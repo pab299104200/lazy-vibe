@@ -15,6 +15,7 @@ provider="$script_dir/profiles/keystone/ux-fixtures"
 "$provider" describe "$tmp_root" "$run_dir" "" "$manifest"
 grep -q 'browser_record_creation.*READY' "$manifest"
 grep -q 'purchase_to_pay_browser_setup.*READY' "$manifest"
+grep -q 'No purchase order, receipt, bill, or match record is pre-created' "$manifest"
 "$provider" prepare "$tmp_root" "$run_dir" "$plan" "$manifest"
 grep -q 'file_upload.*READY' "$manifest"
 upload_path="$(sed -n 's/.*Disposable file: `\([^`]*\)`.*/\1/p' "$manifest")"
@@ -51,7 +52,9 @@ grep -q 'Never assign numerical UX dimension scores to BLOCKED or UNVERIFIED' "$
 grep -q 'Failure of one setup or onboarding journey must not cascade' "$script_dir/generic-ux-shared.md"
 grep -q 'source "$SCRIPT_DIR/ux-actor-lanes.sh"' "$script_dir/run-audit.sh"
 grep -q 'ux_job_actors' "$script_dir/ux-actor-lanes.sh"
-grep -Fq $'03-administration\ttenant_admin\trequester,observer,operator,guest' \
+grep -Fq $'03-exceptions\ttenant_admin\trequester,approver' \
+  "$script_dir/profiles/keystone/ux-fixtures"
+grep -Fq $'03-administration\ttenant_admin\trequester,approver,reviewer,observer,operator,guest' \
   "$script_dir/profiles/keystone/ux-fixtures"
 grep -q 'auth-state-{actor}.json' "$script_dir/run-audit.sh"
 grep -q 'mcp_servers.playwright_secondary.command' "$script_dir/run-audit.sh"
