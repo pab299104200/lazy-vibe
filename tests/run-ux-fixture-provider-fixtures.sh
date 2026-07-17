@@ -49,7 +49,10 @@ grep -q 'Do not impose an arbitrary journey cap' "$script_dir/generic-user-journ
 grep -q 'BLOCKED.*UNVERIFIED.*evidence states' "$script_dir/generic-user-journey-audit-prompt.md"
 grep -q 'Never assign numerical UX dimension scores to BLOCKED or UNVERIFIED' "$script_dir/generic-ux-shared.md"
 grep -q 'Failure of one setup or onboarding journey must not cascade' "$script_dir/generic-ux-shared.md"
-grep -q 'actor_by_job' "$script_dir/run-audit.sh"
+grep -q 'source "$SCRIPT_DIR/ux-actor-lanes.sh"' "$script_dir/run-audit.sh"
+grep -q 'ux_job_actors' "$script_dir/ux-actor-lanes.sh"
+grep -Fq $'03-administration\ttenant_admin\trequester,observer,operator,guest' \
+  "$script_dir/profiles/keystone/ux-fixtures"
 grep -q 'auth-state-{actor}.json' "$script_dir/run-audit.sh"
 grep -q 'mcp_servers.playwright_secondary.command' "$script_dir/run-audit.sh"
 grep -q 'playwright-secondary-init.mjs' "$script_dir/run-audit.sh"
