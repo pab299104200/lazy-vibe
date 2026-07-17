@@ -58,6 +58,14 @@ async function hasAuthenticatedSurface(page, credentials, expectedUrl, timeout =
   return !(await passwordInput.isVisible().catch(() => false));
 }
 
+async function waitForAuthenticationThrottle(throttle) {
+  if (throttle.retryAfter <= 0) return;
+  const delaySeconds = Math.min(throttle.retryAfter, 30);
+  throttle.retryAfter = 0;
+  throttle.path = '';
+  await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+}
+
 async function authenticate(page, credentials, throttle, expectedUrl) {
   const email = credentials.email || credentials.username;
   if (!email || !credentials.password) return false;
@@ -66,9 +74,7 @@ async function authenticate(page, credentials, throttle, expectedUrl) {
   const passwordSelector = credentials.password_selector || 'input[type="password"]';
   const emailInput = page.locator(emailSelector).first();
   const passwordInput = page.locator(passwordSelector).first();
-  if (throttle.retryAfter > 0) {
-    throw new Error(`Authentication is rate limited at ${throttle.path}; retry after ${throttle.retryAfter} seconds.`);
-  }
+  await waitForAuthenticationThrottle(throttle);
   if (await hasAuthenticatedSurface(page, credentials, expectedUrl)) return true;
   let hasLogin = await passwordInput.waitFor({ state: 'visible', timeout: 30000 })
     .then(() => true, () => false);
@@ -91,18 +97,23 @@ async function authenticate(page, credentials, throttle, expectedUrl) {
       .then(() => true, () => false);
   }
   if (!hasLogin) return false;
-  await emailInput.fill(email);
-  await passwordInput.fill(credentials.password);
-  const submit = credentials.submit_selector
-    ? page.locator(credentials.submit_selector).first()
-    : page.getByRole('button', { name: /^(sign in with password|sign in|log in|continue)$/i }).first();
-  await submit.click();
-  await passwordInput.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined);
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
-  if (await passwordInput.isVisible().catch(() => false)) {
-    throw new Error('Configured browser credentials were rejected or login did not advance.');
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await emailInput.fill(email);
+    await passwordInput.fill(credentials.password);
+    const submit = credentials.submit_selector
+      ? page.locator(credentials.submit_selector).first()
+      : page.getByRole('button', { name: /^(sign in with password|sign in|log in|continue)$/i }).first();
+    await submit.click();
+    await passwordInput.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
+    if (!(await passwordInput.isVisible().catch(() => false))) return true;
+    if (throttle.retryAfter <= 0 || attempt === 3) break;
+    await waitForAuthenticationThrottle(throttle);
   }
-  return true;
+  if (throttle.retryAfter > 0) {
+    throw new Error(`Authentication remained rate limited after bounded retries at ${throttle.path}.`);
+  }
+  throw new Error('Configured browser credentials were rejected or login did not advance.');
 }
 
 function resolvePlaywright(repoRoot) {
@@ -207,4 +218,4 @@ if (require.main === module) main().catch((error) => {
   process.exitCode = 1;
 });
 
-module.exports = { hasAuthenticatedSurface };
+module.exports = { authenticate, hasAuthenticatedSurface, waitForAuthenticationThrottle };

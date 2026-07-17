@@ -597,7 +597,9 @@ audit_install_node_packages() {
     npm install --save-dev "$@" || exit 1
     local package
     for package in "$@"; do
-      touch "$AUDIT_NODE_TOOLING_DIR/.package-ready-$package"
+      local marker
+      marker="$(printf '%s' "$package" | sed 's/[^A-Za-z0-9._-]/_/g')"
+      touch "$AUDIT_NODE_TOOLING_DIR/.package-ready-$marker"
     done
   ) 9>"$AUDIT_NODE_TOOLING_DIR/.npm-install.lock" >> "$log_file" 2>&1 || {
     printf '[native-tooling] node install failed for packages=%s\n' "$*" >> "$log_file"
@@ -925,6 +927,14 @@ The trace path must be relative to \`$RUN_DIR\` and must equal
 \`artifacts/$job_id/journeys/<journey_id>/trace.md\`. Include \`RESULT: <result>\`
 in every trace. A PASS requires \`oracle_status=PROVEN\` and a usable fixture state.
 The launcher validates this contract before accepting the job.
+
+This is an execution lane, not an evidence-review lane. Findings-register rows,
+prior reports, Lattice memory, and artifacts from earlier runs are context only and
+cannot satisfy an assigned journey. Use the named Playwright MCP actor for every row,
+execute the current deployed workflow, and write a new trace and manifest during this
+job. The launcher rejects traces or manifests older than the lane start marker.
+The job's final \`RESULT\` may be \`PASS\` only when every assigned journey row is
+\`PASS\`; any \`FAIL\`, \`BLOCKED\`, or \`UNVERIFIED\` row requires a non-PASS job result.
 
 ASSIGNMENT
 }
@@ -1324,6 +1334,56 @@ CLOSING
   printf '%s\n' "$prompt_file"
 }
 
+reset_ux_execution_lane() {
+  local job_id="$1" kind="$2" output="$3"
+  [[ "$DRY_RUN" != "1" && "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 0
+
+  # Preserve lane checkpoints by default so a rerun can resume at its first
+  # non-pass journey. The execution prompt requires current browser proof for
+  # non-pass rows and forbids reusing them as successful evidence. Callers that
+  # explicitly need a fresh clean-run can opt out of checkpoint preservation.
+  if [[ "${UX_EXECUTION_FRESH:-0}" == "1" ]]; then
+    rm -rf -- "$RUN_DIR/artifacts/$job_id"
+    local output_path="$RUN_DIR/${output%%#*}"
+    case "$output_path" in
+      "$RUN_DIR"/*) rm -f -- "$output_path" ;;
+      *)
+        printf 'Refusing to reset UX output outside RUN_DIR: %s\n' "$output_path" >&2
+        return 1
+        ;;
+    esac
+  fi
+  mkdir -p "$RUN_DIR/artifacts"
+  : > "$RUN_DIR/artifacts/.execution-start-$job_id"
+}
+
+recover_ux_pass_checkpoint() {
+  local job_id="$1" kind="$2" output="$3"
+  [[ "$DRY_RUN" != "1" && "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]] || return 1
+  [[ "${UX_EXECUTION_FRESH:-0}" != "1" ]] || return 1
+
+  local result_file="$RUN_DIR/artifacts/$job_id/journey-results.tsv"
+  local output_path="$RUN_DIR/${output%%#*}"
+  [[ -s "$result_file" && -s "$output_path" ]] || return 1
+  grep -q '^RESULT:[[:space:]]*PASS[[:space:]]*$' "$output_path" || return 1
+  awk -F'\t' '
+    NR == 1 { next }
+    NF == 0 { next }
+    {
+      rows += 1
+      if ($2 != "PASS" || $4 != "PROVEN" || ($6 != "CLEANED" && $6 != "NOT_NEEDED")) {
+        invalid = 1
+      }
+    }
+    END { exit rows > 0 && !invalid ? 0 : 1 }
+  ' "$result_file" || return 1
+  validate_ux_execution_evidence "$job_id" checkpoint >/dev/null || return 1
+
+  printf '%s\n' "$job_id" >> "$CHECKPOINT_FILE"
+  printf '[checkpoint-pass] %s preserved proven, cleaned PASS evidence\n' "$job_id"
+  return 0
+}
+
 _model_for_kind() {
   local kind="$1" override="$2"
   local disc="$3" synth="$4" runtime="$5" sim="$6" adv="$7" final="$8"
@@ -1453,6 +1513,10 @@ args = [
     "--output-mode",
     "file",
     "--save-session",
+    "--timeout-action",
+    "15000",
+    "--timeout-navigation",
+    "45000",
     "--viewport-size",
     "1440x1000",
 ]
@@ -1488,6 +1552,7 @@ from pathlib import Path
 
 run_dir, job_id, executable_path, repo_root = sys.argv[1:]
 credentials = Path(repo_root) / "docs" / "ux" / ".creds.secondary"
+storage_state = Path(run_dir) / "artifacts" / "ux-fixtures" / "auth-state-secondary.json"
 initializer = Path(run_dir) / "artifacts" / job_id / "playwright-secondary-init.mjs"
 initializer.parent.mkdir(parents=True, exist_ok=True)
 shared_initializer = Path("/home/pete/cadres/shared/lazy-vibe/ux-browser-auth-init.mjs")
@@ -1508,9 +1573,14 @@ args = [
     "--yes", "@playwright/mcp@latest", "--headless", "--isolated", "--no-sandbox",
     "--executable-path", executable_path,
     "--output-dir", str(Path(run_dir) / "artifacts" / job_id / "playwright-mcp-secondary"),
-    "--output-mode", "file", "--save-session", "--viewport-size", "1440x1000",
-    "--secrets", str(credentials), "--init-page", str(initializer),
+    "--output-mode", "file", "--save-session",
+    "--timeout-action", "15000", "--timeout-navigation", "45000",
+    "--viewport-size", "1440x1000",
 ]
+if storage_state.is_file():
+    args.append(f"--storage-state={storage_state}")
+else:
+    args.extend(["--secrets", str(credentials), "--init-page", str(initializer)])
 print(json.dumps(args))
 PY
 }
@@ -1549,13 +1619,13 @@ _run_codex() {
     "${CODEX_REASONING_ADVERSARIAL:-high}" "${CODEX_REASONING_FINAL:-high}")"
   [[ -n "$selected_reasoning" ]] && cmd+=(-c "model_reasoning_effort=\"$selected_reasoning\"")
   if [[ "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
-    local chromium_path playwright_output_dir actor actor_server actor_output_dir
+    local chromium_path actor default_actor actor_server actor_output_dir
     chromium_path="$(repo_playwright_chromium_path)"
-    playwright_output_dir="$RUN_DIR/artifacts/$job_id/playwright-mcp"
-    mkdir -p "$playwright_output_dir"
-    cmd+=(-c 'mcp_servers.playwright.command="npx"')
-    cmd+=(-c "mcp_servers.playwright.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path")")
-    cmd+=(-c "mcp_servers.playwright.cwd=\"$REPO_ROOT\"")
+    default_actor="$(ux_job_default_actor "$RUN_DIR" "$job_id")"
+    if [[ -z "$default_actor" ]]; then
+      printf '[ux-actors] no default actor is configured for simulation job %s\n' "$job_id" >&2
+      return 1
+    fi
     while IFS= read -r actor; do
       [[ -n "$actor" && "$actor" != "secondary" ]] || continue
       if [[ -f "$RUN_DIR/artifacts/ux-fixtures/auth-state-$actor.json" && -f "$RUN_DIR/artifacts/ux-fixtures/init-page-$actor.ts" ]]; then
@@ -1565,8 +1635,11 @@ _run_codex() {
         cmd+=(-c "mcp_servers.$actor_server.command=\"npx\"")
         cmd+=(-c "mcp_servers.$actor_server.args=$(playwright_mcp_codex_args_json "$job_id" "$chromium_path" "$actor")")
         cmd+=(-c "mcp_servers.$actor_server.cwd=\"$REPO_ROOT\"")
+      else
+        printf '[ux-actors] required actor fixture is incomplete for %s: %s\n' "$job_id" "$actor" >&2
+        return 1
       fi
-    done < <(ux_job_additional_actors "$RUN_DIR" "$job_id")
+    done < <(ux_job_actors "$RUN_DIR" "$job_id")
     if ux_job_additional_actors "$RUN_DIR" "$job_id" | grep -qx secondary \
       && [[ -f "$REPO_ROOT/docs/ux/.creds.secondary" && -f "$SCRIPT_DIR/ux-browser-auth-init.mjs" ]]; then
       mkdir -p "$RUN_DIR/artifacts/$job_id/playwright-mcp-secondary"
@@ -1587,7 +1660,7 @@ _run_codex() {
     local extra_args=($CODEX_EXTRA_ARGS)
     cmd+=("${extra_args[@]}")
   fi
-  "${cmd[@]}" - <"$prompt_file" >"$log_file" 2>&1
+  "${cmd[@]}" - <"$prompt_file" >>"$log_file" 2>&1
 }
 
 _run_claude() {
@@ -1621,14 +1694,14 @@ _run_claude() {
   cmd+=(--strict-mcp-config --mcp-config "$mcp_cfg")
 
   if [[ "$transport" == "pty" ]]; then
-    (cd "$REPO_ROOT" && python3 "$SCRIPT_DIR/claude_pty_runner.py" "$prompt_file" "${cmd[@]}") >"$log_file" 2>&1
+    (cd "$REPO_ROOT" && python3 "$SCRIPT_DIR/claude_pty_runner.py" "$prompt_file" "${cmd[@]}") >>"$log_file" 2>&1
     local s="$?"
     rm -f "$mcp_cfg"
     return "$s"
   fi
 
   if [[ "$transport" != "prompt" ]]; then
-    printf 'Unknown CLAUDE_TRANSPORT=%s; expected prompt or pty\n' "$transport" >"$log_file"
+    printf 'Unknown CLAUDE_TRANSPORT=%s; expected prompt or pty\n' "$transport" >>"$log_file"
     rm -f "$mcp_cfg"
     return 2
   fi
@@ -1661,7 +1734,7 @@ for line in sys.stdin:
     local s="${PIPESTATUS[0]}"
     rm -f "$mcp_cfg"
     return "$s"
-  ) >"$log_file" 2>&1
+  ) >>"$log_file" 2>&1
 }
 
 _run_gemini() {
@@ -1681,7 +1754,7 @@ _run_gemini() {
     cmd+=("${extra_args[@]}")
   fi
   # gemini has no -C flag; same subshell workaround as the claude runner.
-  (cd "$REPO_ROOT" && "${cmd[@]}" -p "$(cat "$prompt_file")") >"$log_file" 2>&1
+  (cd "$REPO_ROOT" && "${cmd[@]}" -p "$(cat "$prompt_file")") >>"$log_file" 2>&1
 }
 
 audit_progress_enabled() {
@@ -2587,7 +2660,7 @@ run_prompt() {
     cmd_exit=0
     if [[ -n "${AUDIT_RUNNER:-}" ]]; then
       run_with_spinner "$job_id" "$log_file" \
-        bash -c '"$1" "$2" "$3" "$4" >"$5" 2>&1' _ \
+        bash -c '"$1" "$2" "$3" "$4" >>"$5" 2>&1' _ \
           "$AUDIT_RUNNER" "$prompt_file" "$RUN_DIR" "$job_id" "$log_file"
       cmd_exit=$?
     else
@@ -2645,6 +2718,7 @@ active_count=0
 
 validate_ux_execution_evidence() {
   local job_id="$1"
+  local validation_mode="${2:-current}"
   local plan_file="$RUN_DIR/artifacts/journey-plan.tsv"
   local result_file="$RUN_DIR/artifacts/$job_id/journey-results.tsv"
   local validation_file="$RUN_DIR/artifacts/$job_id/evidence-validation.md"
@@ -2652,7 +2726,7 @@ validate_ux_execution_evidence() {
   awk -F'\t' -v job="$job_id" 'NR > 1 && $2 == job { found = 1 } END { exit found ? 0 : 1 }' "$plan_file" || return 0
 
   mkdir -p "$(dirname "$validation_file")"
-  python3 - "$RUN_DIR" "$plan_file" "$result_file" "$job_id" "$validation_file" <<'PY'
+  python3 - "$RUN_DIR" "$plan_file" "$result_file" "$job_id" "$validation_file" "$validation_mode" <<'PY'
 import csv
 import re
 import sys
@@ -2663,7 +2737,16 @@ plan_file = Path(sys.argv[2])
 result_file = Path(sys.argv[3])
 job_id = sys.argv[4]
 validation_file = Path(sys.argv[5])
+validation_mode = sys.argv[6]
 errors = []
+start_file = run_dir / "artifacts" / f".execution-start-{job_id}"
+start_ns = None
+if validation_mode == "checkpoint":
+    start_ns = None
+elif not start_file.is_file():
+    errors.append(f"missing execution start marker: {start_file}")
+else:
+    start_ns = start_file.stat().st_mtime_ns
 
 with plan_file.open(newline="", encoding="utf-8") as handle:
     expected = {
@@ -2680,6 +2763,8 @@ rows = []
 if not result_file.is_file():
     errors.append(f"missing result manifest: {result_file}")
 else:
+    if start_ns is not None and result_file.stat().st_mtime_ns < start_ns:
+        errors.append(f"stale result manifest predates lane execution: {result_file}")
     with result_file.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         if reader.fieldnames != required_header:
@@ -2718,6 +2803,8 @@ for row in rows:
     if not trace_file.is_file():
         errors.append(f"{journey_id}: missing trace {expected_trace}")
     else:
+        if start_ns is not None and trace_file.stat().st_mtime_ns < start_ns:
+            errors.append(f"{journey_id}: stale trace predates lane execution: {expected_trace}")
         trace = trace_file.read_text(encoding="utf-8", errors="replace")
         if not re.search(rf"(?im)^\s*RESULT:\s*{re.escape(row['result'])}\s*$", trace):
             errors.append(f"{journey_id}: trace RESULT does not match manifest")
@@ -2810,6 +2897,15 @@ wait_for_group() {
             local audit_result
             audit_result="$(grep -o 'RESULT:[[:space:]]*[A-Za-z/]*' "$job_log_file" 2>/dev/null | tail -1 | sed 's/.*RESULT:[[:space:]]*//' || true)"
             [[ -n "$audit_result" ]] || audit_result="completed"
+            local journey_result_file="$RUN_DIR/artifacts/$job_name/journey-results.tsv"
+            if [[ "$audit_result" == "PASS" && -f "$journey_result_file" ]] && \
+               awk -F'\t' 'NR > 1 && $2 != "PASS" { found = 1 } END { exit found ? 0 : 1 }' "$journey_result_file"; then
+              printf '[ux-result-inconsistent] %s reported PASS with a non-PASS assigned journey\n' "$job_name" >&2
+              failed=1
+              job_passed=0
+            fi
+          fi
+          if ((job_passed)); then
             case "$audit_result" in
               PASS|completed) printf '[ok] %s result=%s\n' "$job_name" "$audit_result" ;;
               *) printf '[complete] %s result=%s\n' "$job_name" "$audit_result" ;;
@@ -3200,7 +3296,8 @@ write_run_summary() {
     --product-profile "${PRODUCT_PROFILE:-}" \
     --profile "${PROFILE:-}" \
     --runner "${RUNNER:-}" \
-    --audit-runner "${AUDIT_RUNNER:-}"
+    --audit-runner "${AUDIT_RUNNER:-}" \
+    --ux-playwright-mcp "${UX_PLAYWRIGHT_MCP:-0}"
 }
 
 write_audit_blocker_ledger() {
@@ -3331,13 +3428,23 @@ printf 'Job manifest: %s\n' "$JOBS_FILE"
       current_group="$group"
     fi
 
+    if recover_ux_pass_checkpoint "$job_id" "$kind" "$output"; then
+      continue
+    fi
+
     if audit_should_skip_checkpointed_job "$job_id"; then
       continue
     fi
 
     if [[ "$kind" == "synthesis" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
       describe_ux_fixture_capabilities
+    elif [[ "$kind" == "simulation" && "${UX_PLAYWRIGHT_MCP:-0}" == "1" ]]; then
+      # --only execution starts directly in group 03, so the normal group
+      # transition hook never runs. Prepare actor states before building the
+      # prompt or launching MCP; preparing at finalization is too late.
+      prepare_ux_fixtures
     fi
+    reset_ux_execution_lane "$job_id" "$kind" "$output"
     prompt_file="$(build_prompt "$group" "$job_id" "$kind" "$title" "$output" "$ref")"
     printf '[start] group=%s job=%s kind=%s title=%s\n' "$group" "$job_id" "$kind" "$title"
 

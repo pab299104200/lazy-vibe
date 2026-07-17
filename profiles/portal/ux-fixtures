@@ -10,6 +10,7 @@ manifest_file="${5:?missing manifest file}"
 fixture_dir="$run_dir/artifacts/ux-fixtures"
 migration_csv="$fixture_dir/portal-ux-audit-users.csv"
 prepared_json="$fixture_dir/prepared-fixtures.json"
+actor_lanes="$fixture_dir/actor-lanes.tsv"
 prefix="ux-audit-$(basename "$run_dir" | tr -cd '[:alnum:]-')"
 
 write_manifest() {
@@ -35,7 +36,9 @@ STATUS: PROVISIONABLE
 - resettable_customer_tenant: READY_AFTER_PREPARE
   - The provider creates an isolated customer tenant through the supported operator API as test infrastructure, not as a Portal operator UX journey.
 - role_context_matrix: READY_AFTER_PREPARE
-  - The provider creates distinct global tenant-admin, requester, approver, and reviewer identities plus the existing global operator identity.
+  - The provider creates distinct global tenant-admin, requester, approver, reviewer, and cross-tenant guest identities plus the existing global operator identity.
+  - The requester receives only the bounded portal.governance.request permission needed to prove the normal My Access request journey.
+  - The guest owns a separate customer home tenant and must be used for guest-access journeys; a target-tenant member is not valid guest evidence.
   - Browser lanes receive private real-Chromium initialization; no target-tenant identity clones or plaintext credentials enter prompts.
 - migration_csv: READY
   - Safe upload artifact: ${migration_csv}.
@@ -44,11 +47,15 @@ STATUS: PROVISIONABLE
 ## External fixture capabilities
 
 - scim_provider: READY through the deployed Portal SCIM lifecycle fixture lane.
-- federation_provider: READY through the dev/UAT synthetic federation fixture.
+- federation_provider: READY_AFTER_PREPARE
+  - The provider creates a tenant-scoped synthetic OIDC relying party and disabled upstream connection through supported Portal APIs.
+  - The one-time client secret is consumed during preparation and never enters the manifest or browser evidence.
 - oidc_relying_party: READY through the repo-supported self-hosted OIDC acceptance fixture.
 - saml_relying_party: READY through the repo-supported self-hosted SAML acceptance fixture.
 - webhook_receiver: READY_AFTER_PREPARE
   - The provider creates a health-checked one-day receiver with zero request retention.
+- generic_connector_runtime: READY_AFTER_PREPARE
+  - The provider creates a one-day, zero-retention JSON response fixture for the public Generic API connector and Workday report contracts.
 - push_delivery: OUT_OF_SCOPE
   - Push delivery must not block unrelated Portal journeys.
 
@@ -66,6 +73,15 @@ prepared = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = Path(sys.argv[2])
 migration_csv = sys.argv[3]
 states = prepared["actor_states"]
+connector_rows = prepared.get("connector_provider_catalog", [])
+guest = prepared.get("guest_access_fixture", {})
+connector_summary = "\n".join(
+    f"  - `{row['slug']}` ({', '.join(row.get('supported_directions') or ['target'])}; {row.get('automation_state', 'unknown')})"
+    for row in connector_rows
+) or "  - No provider metadata was returned; preparation should have failed."
+scim = prepared.get("scim_lifecycle_fixture", {})
+nexus = prepared.get("nexus_support_fixture", {})
+federation = prepared.get("federation_provider_fixture", {})
 manifest.write_text(f"""# UX Fixture Manifest
 
 STATUS: READY
@@ -83,8 +99,17 @@ STATUS: READY
   - End-user/requester storage state: `{states['requester']}`
   - Approver storage state: `{states['approver']}`
   - Reviewer storage state: `{states['reviewer']}`
+  - Disposable lifecycle-user storage state: `{states['lifecycle_user']}`
+  - Cross-tenant guest storage state: `{states['guest']}`
   - Operator-home storage state: `{states['operator']}`
   - Each actor is one global Portal identity. Cross-tenant work must use memberships or explicit grants; no identity was cloned into the target tenant.
+  - The requester has the bounded `portal.governance.request` role id {prepared['requester_role_id']} and must start governed requests from My Access.
+  - The lifecycle user is disposable and exists specifically for browser-driven deactivate, denial, reactivate, and recovery evidence; do not substitute a shared role-matrix actor.
+- guest_access: READY
+  - Guest source tenant id: {guest.get('source_tenant_id', 'missing')}
+  - Guest source tenant slug: `{guest.get('source_tenant_slug', 'missing')}`
+  - Guest target tenant id: {guest.get('target_tenant_id', 'missing')}
+  - UX-J06 must initialize with the cross-tenant guest storage state above. The requester or another target-home member is not a valid substitute.
 - browser_record_creation: READY
   - Create only uniquely prefixed records inside the target audit tenant and clean them up through supported UI or provider contracts.
 - migration_csv: READY
@@ -92,8 +117,39 @@ STATUS: READY
 
 ## Repo-supported external fixture lanes
 
-- scim_provider: READY via the deployed Portal SCIM lifecycle fixture lane.
-- federation_provider: READY via the dev/UAT synthetic upstream federation fixture.
+- connector_provider_catalog: READY
+  - Portal returned the following product-owned provider choices through `GET /connector-providers`:
+{connector_summary}
+  - The prepared dev catalog is expected to include `generic` / Generic API Connector. Use the accessible combobox options and select it for the generic connector journey; do not infer an empty provider catalog from a clipped visual listbox when the accessibility snapshot contains options.
+  - Browser journeys must still create, validate, discover, reconcile, and recover an Application-owned connector.
+- generic_connector_runtime: READY
+  - Public base URL: `{prepared['connector_runtime_url']}`
+  - Authentication mode: `none`; do not invent or enter a credential secret.
+  - Discovery path: `/`
+  - Mapping: `{{"external_id":"id","display_name":"name","entitlement_kind":"kind","status":"status"}}`
+  - The disposable response returns one stable entitlement, expires after one day, and stores zero request history.
+  - The same response contains one stable synthetic worker for the shipped Workday report runtime.
+  - For the workforce-source journey select `Workday` (source), use report mode with this public URL, worker list path `workers`, and bearer value `ux-audit-public-fixture`.
+  - That bearer value is a documented non-secret fixture marker ignored by the zero-retention endpoint; it grants no authority and must still remain masked in browser evidence because Portal treats the field as write-only.
+- scim_provider: READY
+  - Disposable SCIM config id: {scim.get('config_id', 'missing')}
+  - Browser-visible lifecycle user id: {scim.get('user_id', 'missing')}
+  - Provider-executed operations: {', '.join(scim.get('verified_operations', [])) or 'missing'}
+  - The one-time bearer was used only by the fixture provider and is absent from this manifest and browser evidence.
+- nexus_support_request: READY
+  - Owning browser surface: `{nexus.get('browser_url', 'missing')}`
+  - Nexus contract: `{nexus.get('request_contract', 'missing')}`
+  - Portal customer-decision surface: `{nexus.get('portal_decision_url', 'missing')}`
+  - Authority: {nexus.get('authority', 'missing')}.
+  - Start from the prepared operator Portal session and complete Nexus OIDC normally. The harness does not mint, expose, or substitute another product or user credential.
+  - `playwright_operator` is the Nexus execution browser fixture for this journey. Navigate it to the owning Nexus surface; do not require a separate `playwright_nexus` actor name.
+- federation_provider: READY
+  - Provider id: {federation.get('provider_id', 'missing')}
+  - Provider: {federation.get('display_name', 'missing')}
+  - Issuer: `{federation.get('issuer', 'missing')}`
+  - Client id: `{federation.get('client_id', 'missing')}`
+  - Starting state: {federation.get('starting_state', 'missing')}
+  - Use the prepared connection to test discovery, configure and preview routing, enable, inspect health/recovery, then disable it. No credential is present in this manifest.
 - oidc_relying_party: READY via the repo-supported self-hosted OIDC acceptance fixture.
 - saml_relying_party: READY via the repo-supported self-hosted SAML acceptance fixture.
 - webhook_receiver: READY
@@ -111,22 +167,35 @@ STATUS: READY
 PY
 }
 
+write_actor_lanes() {
+  cat > "$actor_lanes" <<'ACTORS'
+execution_job	default_actor	additional_actors
+03-primary-work	tenant_admin	requester,approver,lifecycle_user,operator
+03-administration	tenant_admin	operator
+03-exceptions	guest	tenant_admin,operator
+ACTORS
+}
+
 case "$action" in
   describe|prepare)
     write_manifest
     if [[ "$action" == "prepare" ]]; then
       if [[ -s "$fixture_dir/private-fixtures.json" && -s "$prepared_json" ]]; then
         python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" refresh-init "$_repo_root" "$run_dir" "$prefix"
+      elif [[ -s "$fixture_dir/private-fixtures.json" ]]; then
+        python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" resume "$_repo_root" "$run_dir" "$prefix"
       else
         python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" prepare "$_repo_root" "$run_dir" "$prefix"
       fi
+      write_actor_lanes
       write_prepared_manifest
     fi
     ;;
   cleanup)
     python3 "$_repo_root/scripts/ux_audit_fixture_provider.py" cleanup "$_repo_root" "$run_dir" "$prefix"
     rm -f "$migration_csv"
-    rm -f "$fixture_dir"/auth-state-*.json "$fixture_dir"/init-page-*.ts "$fixture_dir/private-fixtures.json" "$prepared_json"
+    rm -f "$fixture_dir"/auth-state-*.json "$fixture_dir"/init-page-*.ts "$fixture_dir/private-fixtures.json" "$prepared_json" "$actor_lanes"
+    rm -f "$run_dir/artifacts/browser-preflight/auth-state.json"
     ;;
   *)
     printf 'unknown fixture-provider action: %s\n' "$action" >&2

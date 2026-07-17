@@ -26,3 +26,11 @@ ux_job_additional_actors() {
     printf '%s\n' "$actor"
   done < <(printf '%s\n' "$actors" | tr ',' '\n')
 }
+
+ux_job_actors() {
+  local run_dir="$1" job_id="$2" actor
+  {
+    ux_job_default_actor "$run_dir" "$job_id"
+    ux_job_additional_actors "$run_dir" "$job_id"
+  } | awk 'NF && !seen[$0]++'
+}

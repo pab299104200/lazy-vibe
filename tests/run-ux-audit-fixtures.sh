@@ -92,12 +92,32 @@ prompt_file="$1"
 run_dir="$2"
 job_id="$3"
 output="$(sed -n 's#^- Required output: ##p' "$prompt_file")"
+if [[ "${FAIL_IF_STALE_EVIDENCE:-0}" == "1" ]]; then
+  if [[ -e "$run_dir/artifacts/$job_id/stale-sentinel" || -e "$output" ]]; then
+    printf 'stale UX execution evidence was visible to the rerun\n' >&2
+    exit 1
+  fi
+fi
+if [[ "${FAIL_IF_FIXTURES_UNPREPARED:-0}" == "1" && ! -s "$run_dir/artifacts/ux-fixtures/manifest.md" ]]; then
+  printf 'UX fixtures were not prepared before the simulation runner started\n' >&2
+  exit 1
+fi
 mkdir -p "$(dirname "$output")" "$run_dir/artifacts/$job_id/journeys/J01-primary"
 printf '# Execution Report\n\nRESULT: PASS\n' > "$output"
-printf '# Journey Trace\n\nRESULT: PASS\n' > "$run_dir/artifacts/$job_id/journeys/J01-primary/trace.md"
+journey_result=PASS
+fixture_status=CREATED
+oracle_status=PROVEN
+blocker=
+if [[ "${NONPASS_ASSIGNED_JOURNEY:-0}" == "1" ]]; then
+  journey_result=BLOCKED
+  fixture_status=BLOCKED
+  oracle_status=BLOCKED
+  blocker='fixture unavailable'
+fi
+printf '# Journey Trace\n\nRESULT: %s\n' "$journey_result" > "$run_dir/artifacts/$job_id/journeys/J01-primary/trace.md"
 cat > "$run_dir/artifacts/$job_id/journey-results.tsv" <<RESULTS
 journey_id	result	fixture_status	oracle_status	trace_path	cleanup_status	blocker
-J01-primary	PASS	CREATED	PROVEN	artifacts/$job_id/journeys/J01-primary/trace.md	CLEANED	
+J01-primary	$journey_result	$fixture_status	$oracle_status	artifacts/$job_id/journeys/J01-primary/trace.md	CLEANED	$blocker
 RESULTS
 if [[ "${INJECT_FOREIGN_JOURNEY:-0}" == "1" ]]; then
   mkdir -p "$run_dir/artifacts/$job_id/journeys/J02-admin"
@@ -142,6 +162,7 @@ ACTORS
 source "$SCRIPT_DIR/ux-actor-lanes.sh"
 test "$(ux_job_default_actor "$run_dir" 03-primary-work)" = "tenant_admin"
 test "$(ux_job_additional_actors "$run_dir" 03-primary-work | paste -sd, -)" = "approver,observer"
+test "$(ux_job_actors "$run_dir" 03-primary-work | paste -sd, -)" = "tenant_admin,approver,observer"
 test "$(ux_job_additional_actors "$run_dir" 03-primary-work | wc -l)" = "2"
 test -z "$(ux_job_default_actor "$run_dir" 03-exceptions)"
 printf '03-exceptions\t../invalid\t\n' >> "$run_dir/artifacts/ux-fixtures/actor-lanes.tsv"
@@ -162,14 +183,20 @@ if ux_preflight_is_fresh_pass "$run_dir" 600; then
 fi
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+mkdir -p "$run_dir/artifacts/03-primary-work"
+printf 'stale evidence\n' > "$run_dir/artifacts/03-primary-work/stale-sentinel"
+mkdir -p "$run_dir/01-domain"
+printf '# Stale execution report\n' > "$run_dir/01-domain/03-primary-work.md"
+FAIL_IF_STALE_EVIDENCE=1 \
+FAIL_IF_FIXTURES_UNPREPARED=1 \
 MUTATE_LATTICE_RUNTIME=1 \
 AUDIT_RUNNER="$fake_runner" \
-PROFILES_DIR="$fixture_root/profiles" \
-REPO_ROOT="$repo_root" \
-RUN_DIR="$run_dir" \
 UX_BROWSER_PREFLIGHT=0 \
 UX_FIXTURE_AUTH_REFRESH=1 \
 UX_BROWSER_PREFLIGHT_SCRIPT="$fake_preflight" \
+PROFILES_DIR="$fixture_root/profiles" \
+REPO_ROOT="$repo_root" \
+RUN_DIR="$run_dir" \
 "$SCRIPT_DIR/run-ux-audit.sh" --profile example --only 03-primary-work >/dev/null || {
   cat "$run_dir/artifacts/03-primary-work/evidence-validation.md" >&2
   exit 1
@@ -182,6 +209,23 @@ grep -q 'STATUS: PASS' "$run_dir/artifacts/03-primary-work/evidence-validation.m
   exit 1
 }
 grep -q $'03-primary-work\tJ01-primary\tPASS' "$run_dir/artifacts/journey-evidence-index.tsv"
+
+rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+if NONPASS_ASSIGNED_JOURNEY=1 \
+  CONTINUE_ON_FAIL=0 \
+  AUDIT_MAX_RETRIES=0 \
+  AUDIT_RUNNER="$fake_runner" \
+  PROFILES_DIR="$fixture_root/profiles" \
+  REPO_ROOT="$repo_root" \
+  RUN_DIR="$run_dir" \
+  UX_BROWSER_PREFLIGHT=0 \
+  "$SCRIPT_DIR/run-ux-audit.sh" --profile example --only 03-primary-work \
+  >"$fixture_root/nonpass-journey.log" 2>&1; then
+  printf 'PASS job with a non-PASS assigned journey unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q '\[ux-result-inconsistent\].*reported PASS with a non-PASS assigned journey' \
+  "$fixture_root/nonpass-journey.log"
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 if MUTATE_PRODUCT_SOURCE=1 \
@@ -213,6 +257,21 @@ if INJECT_FOREIGN_JOURNEY=1 \
 fi
 grep -q 'contains journeys owned by another lane: J02-admin' \
   "$run_dir/artifacts/03-primary-work/evidence-validation.md"
+rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+INJECT_FOREIGN_JOURNEY=1 \
+CONTINUE_ON_FAIL=1 \
+AUDIT_MAX_RETRIES=0 \
+AUDIT_RUNNER="$fake_runner" \
+PROFILES_DIR="$fixture_root/profiles" \
+REPO_ROOT="$repo_root" \
+RUN_DIR="$run_dir" \
+UX_BROWSER_PREFLIGHT=0 \
+"$SCRIPT_DIR/run-ux-audit.sh" --profile example --only 03-primary-work >/dev/null 2>&1
+grep -q 'run-ux-audit.sh --profile example --only 03-primary-work' \
+  "$run_dir/failed-jobs-next-actions.md" || {
+    cat "$run_dir/failed-jobs-next-actions.md" >&2
+    exit 1
+  }
 
 preflight_repo="$fixture_root/preflight-product"
 preflight_run="$fixture_root/preflight-run"

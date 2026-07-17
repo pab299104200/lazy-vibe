@@ -4942,7 +4942,14 @@ workspace_prompt_block() {
   local worktree_dir="$REMEDIATION_DIR/worktrees/$unit_id"
   local roots
   roots="$(workspace_git_roots | sed 's/^/- `/; s/$/`/' || true)"
-  if repo_root_is_git_root; then
+  if [[ "${REMEDIATION_FORCE_LIVE_WORKSPACE:-0}" == "1" ]]; then
+    cat <<EOF
+- Product root: \`$REPO_ROOT\`
+- Workspace mode: serialized live git workspace.
+- Editable repo root: \`$REPO_ROOT\`
+- Edit the active checkout directly. The orchestrator enforces \`MAX_PARALLEL=1\`, retains changes uncommitted, and verifies the accumulated live workspace.
+EOF
+  elif repo_root_is_git_root; then
     cat <<EOF
 - Product root: \`$worktree_dir\`
 - Workspace mode: isolated git worktree.
@@ -6278,6 +6285,18 @@ prepare_unit_workspace() {
     return 0
   fi
 
+  if [[ "${REMEDIATION_FORCE_LIVE_WORKSPACE:-0}" == "1" ]]; then
+    if (( MAX_PARALLEL != 1 )); then
+      printf '[workspace] %s: REMEDIATION_FORCE_LIVE_WORKSPACE requires MAX_PARALLEL=1\n' \
+        "$unit_id" >&2
+      return 1
+    fi
+    printf '[workspace] %s: using explicitly requested serialized live workspace %s\n' \
+      "$unit_id" "$REPO_ROOT" >&2
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+
   if [[ "$REVISE_EXISTING" == "1" ]] && workspace_has_child_git_roots; then
     printf '[workspace] %s: revision in split-root checkout; using active workspace directly so nested git-root changes are verified in place\n' \
       "$unit_id" >&2
@@ -7481,6 +7500,11 @@ integrate_unit_worktree_changes() {
   local recorded_workspace
   recorded_workspace="$(recorded_unit_workspace "$unit_id" 2>/dev/null || true)"
   if [[ -n "$recorded_workspace" && "$recorded_workspace" == "$REPO_ROOT" ]]; then
+    if [[ "$REMEDIATION_COMMIT_ON_VERIFY" != "1" ]]; then
+      record_unit_promotion "$unit_id" "merged" "$REPO_ROOT (live workspace; auto-commit disabled)"
+      printf '[worktree-merge] %s: active workspace retained uncommitted for verification (auto-commit disabled)\n' "$unit_id"
+      return 0
+    fi
     if ! checkpoint_active_workspace_revision_before_verification "$unit_id"; then
       printf '[worktree-merge] %s: active workspace revision could not be checkpointed before verification\n' "$unit_id" >&2
       return 1
@@ -7689,6 +7713,10 @@ FIXPROMPT
 
 run_implementer_and_test() {
   local prompt_file="$1" workstream="$2" class="$3" worktree_dir="$4" unit_id="$5"
+
+  if [[ "$REVISE_EXISTING" == "1" ]]; then
+    rm -f "$REMEDIATION_DIR/artifacts/$unit_id-summary.md"
+  fi
 
   run_prompt "$prompt_file" "$workstream" "$class" "$worktree_dir"
   local status=$?

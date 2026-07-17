@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", default="")
     parser.add_argument("--runner", default="")
     parser.add_argument("--audit-runner", default="")
+    parser.add_argument("--ux-playwright-mcp", default="0")
     return parser.parse_args()
 
 
@@ -288,17 +289,29 @@ def rerun_command(args: argparse.Namespace, row: JobRow) -> str:
         shell_assign("MAX_PARALLEL", "1"),
         shell_assign("AUDIT_STALL_INTERVALS", "30"),
     ]
-    if args.jobs_file_env:
-        env_parts.append(shell_assign("JOBS_FILE", args.jobs_file_env))
-    if args.product_profile:
-        env_parts.append(shell_assign("PRODUCT_PROFILE", args.product_profile))
-    if args.profile:
-        env_parts.append(shell_assign("PROFILE", args.profile))
+    ux_wrapper = args.ux_playwright_mcp == "1" and bool(args.profile)
+    if not ux_wrapper:
+        if args.jobs_file_env:
+            env_parts.append(shell_assign("JOBS_FILE", args.jobs_file_env))
+        if args.product_profile:
+            env_parts.append(shell_assign("PRODUCT_PROFILE", args.product_profile))
+        if args.profile:
+            env_parts.append(shell_assign("PROFILE", args.profile))
     if args.runner:
         env_parts.append(shell_assign("RUNNER", args.runner))
     if args.audit_runner:
         env_parts.append(shell_assign("AUDIT_RUNNER", args.audit_runner))
-    command = [shlex.quote(args.script_path), "--only", shlex.quote(row.job_id)]
+    if ux_wrapper:
+        wrapper = Path(args.script_path).with_name("run-ux-audit.sh")
+        command = [
+            shlex.quote(str(wrapper)),
+            "--profile",
+            shlex.quote(args.profile),
+            "--only",
+            shlex.quote(row.job_id),
+        ]
+    else:
+        command = [shlex.quote(args.script_path), "--only", shlex.quote(row.job_id)]
     return "cd " + shlex.quote(args.repo_root) + " && " + " ".join(env_parts + command)
 
 
