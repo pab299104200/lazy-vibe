@@ -24,5 +24,5 @@ ux_job_additional_actors() {
     [[ -n "$actor" ]] || continue
     [[ "$actor" =~ ^[A-Za-z0-9_]+$ ]] || return 1
     printf '%s\n' "$actor"
-  done < <(printf '%s' "$actors" | tr ',' '\n')
+  done < <(printf '%s\n' "$actors" | tr ',' '\n')
 }

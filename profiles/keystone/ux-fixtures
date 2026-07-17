@@ -173,6 +173,9 @@ STATUS: READY
   - Disposable file: `{bank_ofx_file}`
 - `browser_record_creation`: READY
   - Create only uniquely prefixed reversible records in the disposable customer workspace.
+- `purchase_to_pay_browser_setup`: READY
+  - Create the uniquely prefixed vendor, purchase order, receipt, and linked bill through visible Keystone controls in the disposable workspace.
+  - Use the prepared approver actor for maker-checker approval; setup completion alone is not journey evidence.
 - `secondary_keystone_approver`: READY
   - Use the distinct prepared approver state; never reuse the primary actor as approval evidence.
 

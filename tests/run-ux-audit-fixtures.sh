@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 grep -q 'MAX_PARALLEL="${MAX_PARALLEL:-1}"' "$SCRIPT_DIR/run-ux-audit.sh"
+grep -q '\`purchase_to_pay_browser_setup\`: READY' "$SCRIPT_DIR/profiles/keystone/ux-fixtures"
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$fixture_root"' EXIT
 
@@ -141,6 +142,7 @@ ACTORS
 source "$SCRIPT_DIR/ux-actor-lanes.sh"
 test "$(ux_job_default_actor "$run_dir" 03-primary-work)" = "tenant_admin"
 test "$(ux_job_additional_actors "$run_dir" 03-primary-work | paste -sd, -)" = "approver,observer"
+test "$(ux_job_additional_actors "$run_dir" 03-primary-work | wc -l)" = "2"
 test -z "$(ux_job_default_actor "$run_dir" 03-exceptions)"
 printf '03-exceptions\t../invalid\t\n' >> "$run_dir/artifacts/ux-fixtures/actor-lanes.tsv"
 if ux_job_default_actor "$run_dir" 03-exceptions >/dev/null; then
