@@ -79,10 +79,10 @@ STATUS: PARTIAL
 - \`disposable_portal_identities\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
   - Prepared tenant-admin, requester, approver, reviewer, and observer browser states are scoped to the isolated Keystone customer workspace.
 - \`secondary_keystone_approver\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
-  - The provider creates a distinct approver in the disposable Portal tenant, assigns the Keystone application, and emits a customer-workspace browser state only after the sold contract and binding resolve.
-  - Before maker-checker execution, grant that prepared identity the published Keystone role containing the workflow's actual route permission and verify the permission in effective access preview. Purchase-order approval currently requires \`keystone.accounting.manage\`, which is included in \`keystone_accountant\`.
-  - Match grant scope to the resource authority implemented by the product. Use a tenant-wide grant for tenant-owned resources such as purchase orders, refunds, and current close operations when their records and routes do not carry a company-entity scope. Use an entity grant only when the target record and route enforce that same entity. Never treat an entity-scoped grant as proof of access to a tenant-owned route.
-  - Preserve the required grant until every dependent approver journey has completed. Revoke it only during final run cleanup, never at the end of an earlier setup journey.
+  - The provider creates a distinct approver in the disposable Portal tenant, assigns the Keystone application, authenticates the customer workspace, and grants the published tenant-wide \`keystone_accountant\` role before parallel execution lanes start.
+  - Fixture preparation verifies the actual route authority needed for purchase-order, expense, journal, bank, and close decisions. Journeys must still prove visible access and successful maker-checker behavior; the fixture grant itself is not journey evidence.
+  - The grant is tenant-wide because these disposable approval records are tenant-owned. Entity-scoped grants must be used only for records and routes that enforce the same entity authority.
+  - Preserve the prepared grant until every dependent approver journey has completed. Cleanup retires it with the disposable customer workspace.
   - Do not use two sessions for the primary identity as approval evidence; actor IDs must differ.
 - \`portal_roles_manage\`: UNAVAILABLE
   - Reuse published roles rather than creating or changing Portal roles.
