@@ -79,6 +79,7 @@ STATUS: PARTIAL
   - Customer actors authenticate into the isolated customer-owned Keystone workspace. The Cadres operator remains in the separate commercial-control workspace.
 - \`disposable_portal_identities\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
   - Prepared tenant-admin, requester, approver, reviewer, and observer browser states are scoped to the isolated Keystone customer workspace.
+  - The requester receives the published tenant-wide \`keystone_expense_submitter\` role; the reviewer receives \`keystone_access_reviewer\`. Neither fixture depends on tenant-admin authority for its assigned journey.
 - \`secondary_keystone_approver\`: $([[ -x "$workspace_provider" ]] && printf READY_AFTER_PREPARE || printf UNAVAILABLE)
   - The provider creates a distinct approver in the disposable Portal tenant, assigns the Keystone application, authenticates the customer workspace, and grants the published tenant-wide \`keystone_accountant\` role before parallel execution lanes start.
   - Fixture preparation verifies the actual route authority needed for purchase-order, expense, journal, bank, and close decisions. Journeys must still prove visible access and successful maker-checker behavior; the fixture grant itself is not journey evidence.
@@ -180,6 +181,10 @@ STATUS: READY
   - Use the prepared approver actor for maker-checker approval; setup completion alone is not journey evidence.
 - `secondary_keystone_approver`: READY
   - Use the distinct prepared approver state; never reuse the primary actor as approval evidence.
+- `expense_requester`: READY
+  - The distinct requester holds `keystone_expense_submitter`, including expense submission, company context, and document evidence access but no expense approval permission.
+- `access_certification_reviewer`: READY
+  - The distinct reviewer holds `keystone_access_reviewer`, including certification administration and own-audit visibility but no accounting, billing, tax, or platform permission.
 
 ## Safety and cleanup
 
