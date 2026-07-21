@@ -941,6 +941,7 @@ ASSIGNMENT
 
 UX_FIXTURES_PREPARED=0
 UX_FIXTURES_DESCRIBED=0
+UX_BROWSER_PREFLIGHT_REUSED=0
 UX_FIXTURE_MANIFEST="$RUN_DIR/artifacts/ux-fixtures/manifest.md"
 UX_BROWSER_PREFLIGHT_SCRIPT="${UX_BROWSER_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/ux-browser-preflight.cjs}"
 
@@ -950,6 +951,7 @@ refresh_ux_browser_preflight() {
   [[ -s "$preflight_state" ]] || return 0
   local max_age_seconds="${UX_FIXTURE_AUTH_MAX_AGE_SECONDS:-600}"
   if ux_preflight_is_fresh_pass "$RUN_DIR" "$max_age_seconds"; then
+    UX_BROWSER_PREFLIGHT_REUSED=1
     printf '[ux-fixtures] reusing fresh browser authentication for fixture preparation\n'
     return 0
   fi
@@ -961,6 +963,7 @@ refresh_ux_browser_preflight() {
       printf '[ux-fixtures] browser authentication refresh failed\n' >&2
       return 1
     }
+  UX_BROWSER_PREFLIGHT_REUSED=0
 }
 
 describe_ux_fixture_capabilities() {
@@ -1008,7 +1011,21 @@ MANIFEST
 
   refresh_ux_browser_preflight
   printf '[ux-fixtures] preparing provider=%s\n' "$UX_FIXTURE_PROVIDER"
-  "$UX_FIXTURE_PROVIDER" prepare "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"
+  if ! "$UX_FIXTURE_PROVIDER" prepare "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"; then
+    if ((UX_BROWSER_PREFLIGHT_REUSED != 1)); then
+      return 1
+    fi
+    printf '[ux-fixtures] cached browser authentication was rejected; refreshing once\n'
+    node "$UX_BROWSER_PREFLIGHT_SCRIPT" \
+      --repo-root "$REPO_ROOT" \
+      --run-dir "$RUN_DIR" \
+      --auto-install "${UX_BROWSER_AUTO_INSTALL:-1}" || {
+        printf '[ux-fixtures] browser authentication recovery failed\n' >&2
+        return 1
+      }
+    UX_BROWSER_PREFLIGHT_REUSED=0
+    "$UX_FIXTURE_PROVIDER" prepare "$REPO_ROOT" "$RUN_DIR" "$plan_file" "$UX_FIXTURE_MANIFEST"
+  fi
   if [[ ! -s "$UX_FIXTURE_MANIFEST" ]]; then
     printf '[ux-fixtures] provider did not write manifest: %s\n' "$UX_FIXTURE_MANIFEST" >&2
     return 1

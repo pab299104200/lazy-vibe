@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 grep -q 'MAX_PARALLEL="${MAX_PARALLEL:-1}"' "$SCRIPT_DIR/run-ux-audit.sh"
 grep -q 'retaining fixtures for checkpoint resume after non-pass simulation' "$SCRIPT_DIR/run-audit.sh"
 grep -q 'is_preserved_pass = (' "$SCRIPT_DIR/run-audit.sh"
+grep -q 'cached browser authentication was rejected; refreshing once' "$SCRIPT_DIR/run-audit.sh"
 if grep -q 'args.append(f"--init-page={actor_init}")' "$SCRIPT_DIR/run-audit.sh"; then
   printf 'prepared actor init page can still overwrite popup navigation\n' >&2
   exit 1
