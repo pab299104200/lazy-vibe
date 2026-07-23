@@ -31,7 +31,9 @@ cat > "$profile_dir/product-profile.md" <<'PROFILE'
 - Repo root: REPO_ROOT_PLACEHOLDER
 - Staging URL: https://example.invalid
 PROFILE
-sed -i "s#REPO_ROOT_PLACEHOLDER#$repo_root#" "$profile_dir/product-profile.md"
+sed "s#REPO_ROOT_PLACEHOLDER#$repo_root#" "$profile_dir/product-profile.md" \
+  > "$profile_dir/product-profile.md.tmp"
+mv "$profile_dir/product-profile.md.tmp" "$profile_dir/product-profile.md"
 
 cat > "$profile_dir/ux-profile.md" <<'PROFILE'
 ## Priority Roles
@@ -89,7 +91,9 @@ if PROFILES_DIR="$fixture_root/profiles" REPO_ROOT="$repo_root" RUN_DIR="$run_di
   exit 1
 fi
 grep -q 'UX journey plan has 13 journeys; maximum is 12' "$fixture_root/journey-limit.log"
-sed -i '/^J0[3-9]-extra\|^J1[0-3]-extra/d' "$run_dir/artifacts/journey-plan.tsv"
+awk '!/^J0[3-9]-extra/ && !/^J1[0-3]-extra/' "$run_dir/artifacts/journey-plan.tsv" \
+  > "$run_dir/artifacts/journey-plan.tsv.tmp"
+mv "$run_dir/artifacts/journey-plan.tsv.tmp" "$run_dir/artifacts/journey-plan.tsv"
 
 fake_runner="$fixture_root/fake-audit-runner.sh"
 cat > "$fake_runner" <<'RUNNER'
@@ -170,7 +174,7 @@ source "$SCRIPT_DIR/ux-actor-lanes.sh"
 test "$(ux_job_default_actor "$run_dir" 03-primary-work)" = "tenant_admin"
 test "$(ux_job_additional_actors "$run_dir" 03-primary-work | paste -sd, -)" = "approver,observer"
 test "$(ux_job_actors "$run_dir" 03-primary-work | paste -sd, -)" = "tenant_admin,approver,observer"
-test "$(ux_job_additional_actors "$run_dir" 03-primary-work | wc -l)" = "2"
+test "$(ux_job_additional_actors "$run_dir" 03-primary-work | awk 'END { print NR }')" = "2"
 test -z "$(ux_job_default_actor "$run_dir" 03-exceptions)"
 printf '03-exceptions\t../invalid\t\n' >> "$run_dir/artifacts/ux-fixtures/actor-lanes.tsv"
 if ux_job_default_actor "$run_dir" 03-exceptions >/dev/null; then
@@ -183,7 +187,11 @@ if ux_preflight_is_fresh_pass "$run_dir" 600; then
   exit 1
 fi
 printf '{"status": "PASS"}\n' > "$run_dir/artifacts/browser-preflight/summary.json"
-touch -d '20 minutes ago' "$run_dir/artifacts/browser-preflight/auth-state.json"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  touch -A -002000 "$run_dir/artifacts/browser-preflight/auth-state.json"
+else
+  touch -d '20 minutes ago' "$run_dir/artifacts/browser-preflight/auth-state.json"
+fi
 if ux_preflight_is_fresh_pass "$run_dir" 600; then
   printf 'stale browser preflight was treated as reusable\n' >&2
   exit 1

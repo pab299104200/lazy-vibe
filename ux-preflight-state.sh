@@ -11,7 +11,11 @@ ux_preflight_is_fresh_pass() {
   [[ -s "$auth_state" && -s "$summary" ]] || return 1
 
   local state_modified_at
-  state_modified_at="$(stat -c %Y "$auth_state" 2>/dev/null || printf '0')"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    state_modified_at="$(stat -f %m "$auth_state" 2>/dev/null || printf '0')"
+  else
+    state_modified_at="$(stat -c %Y "$auth_state" 2>/dev/null || printf '0')"
+  fi
   (( $(date +%s) - state_modified_at <= max_age_seconds )) || return 1
 
   node - "$summary" <<'NODE'
