@@ -119,6 +119,7 @@ journey_result=PASS
 fixture_status=CREATED
 oracle_status=PROVEN
 blocker=
+cleanup_status=CLEANED
 if [[ "${NONPASS_ASSIGNED_JOURNEY:-0}" == "1" ]]; then
   journey_result=BLOCKED
   fixture_status=BLOCKED
@@ -126,9 +127,17 @@ if [[ "${NONPASS_ASSIGNED_JOURNEY:-0}" == "1" ]]; then
   blocker='fixture unavailable'
 fi
 printf '# Journey Trace\n\nRESULT: %s\n' "$journey_result" > "$run_dir/artifacts/$job_id/journeys/J01-primary/trace.md"
+if [[ "${STALE_RETAINED_PASS:-0}" == "1" ]]; then
+  cleanup_status=RETAINED_DISPOSABLE
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    touch -A -002000 "$run_dir/artifacts/$job_id/journeys/J01-primary/trace.md"
+  else
+    touch -d '20 minutes ago' "$run_dir/artifacts/$job_id/journeys/J01-primary/trace.md"
+  fi
+fi
 cat > "$run_dir/artifacts/$job_id/journey-results.tsv" <<RESULTS
 journey_id	result	fixture_status	oracle_status	trace_path	cleanup_status	blocker
-J01-primary	$journey_result	$fixture_status	$oracle_status	artifacts/$job_id/journeys/J01-primary/trace.md	CLEANED	$blocker
+J01-primary	$journey_result	$fixture_status	$oracle_status	artifacts/$job_id/journeys/J01-primary/trace.md	$cleanup_status	$blocker
 RESULTS
 if [[ "${INJECT_FOREIGN_JOURNEY:-0}" == "1" ]]; then
   mkdir -p "$run_dir/artifacts/$job_id/journeys/J02-admin"
@@ -224,6 +233,22 @@ grep -q 'STATUS: PASS' "$run_dir/artifacts/03-primary-work/evidence-validation.m
   exit 1
 }
 grep -q $'03-primary-work\tJ01-primary\tPASS' "$run_dir/artifacts/journey-evidence-index.tsv"
+
+rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
+STALE_RETAINED_PASS=1 \
+AUDIT_RUNNER="$fake_runner" \
+PROFILES_DIR="$fixture_root/profiles" \
+REPO_ROOT="$repo_root" \
+RUN_DIR="$run_dir" \
+UX_BROWSER_PREFLIGHT=0 \
+"$SCRIPT_DIR/run-ux-audit.sh" --profile example --only 03-primary-work >/dev/null || {
+  cat "$run_dir/artifacts/03-primary-work/evidence-validation.md" >&2
+  exit 1
+}
+grep -q 'STATUS: PASS' "$run_dir/artifacts/03-primary-work/evidence-validation.md" || {
+  cat "$run_dir/artifacts/03-primary-work/evidence-validation.md" >&2
+  exit 1
+}
 
 rm -f "$run_dir/completed-jobs.txt" "$run_dir/00-run-summary.tsv"
 if NONPASS_ASSIGNED_JOURNEY=1 \

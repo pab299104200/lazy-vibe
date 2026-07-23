@@ -2832,7 +2832,9 @@ for row in rows:
         is_preserved_pass = (
             row["result"] == "PASS"
             and row["oracle_status"] == "PROVEN"
-            and row["cleanup_status"] in {"CLEANED", "NOT_NEEDED"}
+            and row["cleanup_status"] in {
+                "CLEANED", "RETAINED_DISPOSABLE", "NOT_NEEDED"
+            }
         )
         if (
             start_ns is not None
